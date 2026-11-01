@@ -1,0 +1,1038 @@
+//
+//  MixerViewModel.swift
+//  AI Music Studio
+//
+
+import AVFoundation
+import Combine
+import Foundation
+
+@MainActor
+final class MixerViewModel: ObservableObject {
+    private struct UndoTrackState: Equatable {
+        let id: UUID
+        let clips: [AudioClip]
+        let volume: Float
+        let isMuted: Bool
+        let isSoloed: Bool
+    }
+
+    @Published private(set) var tracks: [Track] = []
+    @Published private(set) var sessions: [StudioSession] = []
+    @Published private(set) var activeSessionID = UUID()
+    @Published private(set) var sessionName = "Untitled Session"
+    @Published private(set) var currentTime: TimeInterval = 0
+    @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var levels: [UUID: Float] = [:]
+    @Published private(set) var isPlaying = false
+    @Published private(set) var tempoBPM = 120
+    @Published private(set) var drumPattern = DrumPattern()
+    @Published private(set) var isDrumSequencerPlaying = false
+    @Published private(set) var currentDrumStep: Int?
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+
+    // Timeline state
+    @Published private(set) var waveformPeaks: [UUID: [Float]] = [:]
+    @Published private(set) var clipWaveformPeaks: [UUID: [Float]] = [:]
+    @Published var scrubTime: Double?
+
+    // Stem separation state
+    @Published private(set) var isSeparating = false
+    @Published private(set) var separationStatus = ""
+    @Published private(set) var separationProgress: Double = 0
+    @Published var separationError: String?
+    @Published private(set) var samplerDisplayName: String?
+    @Published private(set) var samplerError: String?
+    @Published private(set) var isRecordingInstrument = false
+    @Published private(set) var recordingElapsed: TimeInterval = 0
+    @Published private(set) var recordingError: String?
+    @Published private(set) var microphonePermissionGranted = false
+    @Published private(set) var microphoneError: String?
+    @Published private(set) var isBouncing = false
+    @Published private(set) var bounceProgress = 0.0
+    @Published private(set) var bounceStatus = ""
+    @Published private(set) var bounceError: String?
+    @Published private(set) var exports: [MixExport] = []
+    @Published private(set) var lastExportURL: URL?
+
+    private var recordingStartTime: TimeInterval = 0
+    private var samplerFileURL: URL?
+    private let engine = MixerEngine()
+    private var smoothedLevels: [UUID: Float] = [:]
+    private var waveformTask: Task<Void, Never>?
+    private var wasPlayingBeforeScrub = false
+    nonisolated(unsafe) private var playbackTask: Task<Void, Never>?
+    nonisolated(unsafe) private var drumSequencerTask: Task<Void, Never>?
+    private var undoStack: [[UndoTrackState]] = []
+    private var redoStack: [[UndoTrackState]] = []
+    private var pendingUndoSnapshot: [UndoTrackState]?
+    private let historyLimit = 50
+
+    init() {
+        microphonePermissionGranted = AVAudioSession.sharedInstance().recordPermission == .granted
+        let storedSessions = StudioSessionStorage.load()
+        sessions = storedSessions.sessions
+        activeSessionID = storedSessions.activeSessionID
+        if let session = storedSessions.sessions.first(where: { $0.id == storedSessions.activeSessionID }) {
+            sessionName = session.name
+            tracks = session.tracks
+            tempoBPM = min(200, max(60, session.tempoBPM))
+            drumPattern = session.drumPattern
+        }
+        exports = MixExportStorage.loadExports()
+        resolveClipMetadata()
+        engine.load(tracks: tracks)
+        duration = engine.duration
+        loadWaveforms()
+
+        playbackTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refresh()
+                try? await Task.sleep(for: .seconds(1.0 / 30))
+            }
+        }
+    }
+
+    deinit {
+        playbackTask?.cancel()
+        drumSequencerTask?.cancel()
+    }
+
+    func importTracks(from urls: [URL]) {
+        var imported: [Track] = []
+        for url in urls {
+            if let result = try? TrackStorage.importFile(at: url) {
+                imported.append(Track(name: result.displayName, fileName: result.storedName))
+            }
+        }
+        guard !imported.isEmpty else { return }
+
+        tracks += imported
+        reloadEngine()
+    }
+
+    func setVolume(_ id: UUID, _ value: Float) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        beginUndoableEdit()
+        tracks[index].volume = value
+        engine.updateMix(tracks: tracks)
+    }
+
+    func setTrackEQ(_ id: UUID, settings: TrackEQSettings) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        tracks[index].eqSettings = settings
+        engine.updateEqualizer(trackID: id, settings: settings)
+        commitSession()
+    }
+
+    func commitSession() {
+        finishUndoableEdit()
+        persistActiveSession()
+    }
+
+    func createSession() {
+        prepareToLeaveCurrentSession()
+        persistActiveSession(markEdited: false)
+        let session = StudioSession(name: uniqueSessionName("Untitled Session"))
+        sessions.append(session)
+        activateSession(session)
+    }
+
+    func openSession(_ id: UUID) {
+        guard id != activeSessionID,
+              let session = sessions.first(where: { $0.id == id }) else { return }
+        prepareToLeaveCurrentSession()
+        persistActiveSession(markEdited: false)
+        activateSession(session)
+    }
+
+    func renameSession(_ id: UUID, to name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[index].name = trimmedName
+        sessions[index].lastEdited = Date()
+        if id == activeSessionID {
+            sessionName = trimmedName
+        }
+        StudioSessionStorage.save(sessions: sessions, activeSessionID: activeSessionID)
+    }
+
+    func duplicateSession(_ id: UUID) -> UUID? {
+        persistActiveSession(markEdited: false)
+        guard let source = sessions.first(where: { $0.id == id }) else { return nil }
+        var duplicate = source
+        duplicate.id = UUID()
+        duplicate.name = uniqueSessionName("\(source.name) Copy")
+        duplicate.lastEdited = Date()
+
+        for trackIndex in duplicate.tracks.indices {
+            let originalTrackID = duplicate.tracks[trackIndex].id
+            let newTrackID = UUID()
+            duplicate.tracks[trackIndex].id = newTrackID
+            for clipIndex in duplicate.tracks[trackIndex].clips.indices {
+                var clip = duplicate.tracks[trackIndex].clips[clipIndex]
+                clip.id = clip.isOriginal && clip.id == originalTrackID ? newTrackID : UUID()
+                duplicate.tracks[trackIndex].clips[clipIndex] = clip
+            }
+        }
+
+        sessions.append(duplicate)
+        StudioSessionStorage.save(sessions: sessions, activeSessionID: activeSessionID)
+        return duplicate.id
+    }
+
+    func deleteSession(_ id: UUID) {
+        guard sessions.count > 1,
+              let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let deletingActive = id == activeSessionID
+        if deletingActive {
+            prepareToLeaveCurrentSession()
+            persistActiveSession(markEdited: false)
+        }
+        sessions.remove(at: index)
+
+        if deletingActive, let replacement = sessions.first {
+            activateSession(replacement)
+        } else {
+            StudioSessionStorage.save(sessions: sessions, activeSessionID: activeSessionID)
+        }
+    }
+
+    private func persistActiveSession(markEdited: Bool = true) {
+        guard let index = sessions.firstIndex(where: { $0.id == activeSessionID }) else { return }
+        sessions[index].name = sessionName
+        sessions[index].tracks = tracks
+        sessions[index].tempoBPM = tempoBPM
+        sessions[index].drumPattern = drumPattern
+        if markEdited {
+            sessions[index].lastEdited = Date()
+        }
+        StudioSessionStorage.save(sessions: sessions, activeSessionID: activeSessionID)
+    }
+
+    private func prepareToLeaveCurrentSession() {
+        stopDrumSequencer()
+        if isRecordingInstrument {
+            stopInstrumentRecording()
+        }
+        engine.stop()
+        isPlaying = false
+        currentTime = 0
+        levels = [:]
+    }
+
+    private func activateSession(_ session: StudioSession) {
+        activeSessionID = session.id
+        sessionName = session.name
+        tracks = session.tracks
+        tempoBPM = min(200, max(60, session.tempoBPM))
+        drumPattern = session.drumPattern
+        pendingUndoSnapshot = nil
+        undoStack.removeAll()
+        redoStack.removeAll()
+        updateHistoryAvailability()
+        scrubTime = nil
+        resolveClipMetadata()
+        engine.load(tracks: tracks)
+        duration = engine.duration
+        isPlaying = false
+        currentTime = 0
+        loadWaveforms()
+        persistActiveSession(markEdited: false)
+    }
+
+    private func uniqueSessionName(_ proposed: String) -> String {
+        let base = proposed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled Session" : proposed
+        var candidate = base
+        var suffix = 2
+        while sessions.contains(where: { $0.name.caseInsensitiveCompare(candidate) == .orderedSame }) {
+            candidate = "\(base) \(suffix)"
+            suffix += 1
+        }
+        return candidate
+    }
+
+    func undo() {
+        finishUndoableEdit()
+        guard let previous = undoStack.popLast() else {
+            updateHistoryAvailability()
+            return
+        }
+        redoStack.append(makeUndoSnapshot())
+        restoreUndoableState(previous)
+        updateHistoryAvailability()
+    }
+
+    func redo() {
+        finishUndoableEdit()
+        guard let next = redoStack.popLast() else {
+            updateHistoryAvailability()
+            return
+        }
+        undoStack.append(makeUndoSnapshot())
+        restoreUndoableState(next)
+        updateHistoryAvailability()
+    }
+
+    private func beginUndoableEdit() {
+        if pendingUndoSnapshot == nil {
+            pendingUndoSnapshot = makeUndoSnapshot()
+        }
+    }
+
+    private func finishUndoableEdit() {
+        guard let before = pendingUndoSnapshot else { return }
+        pendingUndoSnapshot = nil
+        let after = makeUndoSnapshot()
+        guard before != after else {
+            updateHistoryAvailability()
+            return
+        }
+        undoStack.append(before)
+        if undoStack.count > historyLimit {
+            undoStack.removeFirst(undoStack.count - historyLimit)
+        }
+        redoStack.removeAll()
+        updateHistoryAvailability()
+    }
+
+    private func makeUndoSnapshot() -> [UndoTrackState] {
+        tracks.map {
+            UndoTrackState(id: $0.id, clips: $0.clips, volume: $0.volume, isMuted: $0.isMuted, isSoloed: $0.isSoloed)
+        }
+    }
+
+    private func restoreUndoableState(_ snapshot: [UndoTrackState]) {
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+        for state in snapshot {
+            guard let index = tracks.firstIndex(where: { $0.id == state.id }) else { continue }
+            tracks[index].clips = state.clips
+            tracks[index].volume = state.volume
+            tracks[index].isMuted = state.isMuted
+            tracks[index].isSoloed = state.isSoloed
+        }
+
+        engine.load(tracks: tracks)
+        duration = engine.duration
+        currentTime = duration > 0 ? min(max(0, resumeTime), duration) : max(0, resumeTime)
+        engine.seek(to: currentTime)
+        if wasPlaying { engine.play() }
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+        loadWaveforms()
+        persistActiveSession()
+    }
+
+    private func updateHistoryAvailability() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    func setTempo(_ bpm: Int) {
+        let clamped = min(200, max(60, bpm))
+        guard clamped != tempoBPM else { return }
+        tempoBPM = clamped
+        persistActiveSession()
+    }
+
+    func adjustTempo(by amount: Int) {
+        setTempo(tempoBPM + amount)
+    }
+
+    func playSynthNote(
+        frequency: Double,
+        waveform: SynthWaveform,
+        cutoff: Double,
+        attack: Double,
+        release: Double,
+        destinationTrackID: UUID?
+    ) {
+        guard let format = engine.instrumentFormat(for: destinationTrackID),
+              let buffer = InstrumentSoundGenerator.synthNote(
+                frequency: frequency,
+                waveform: waveform,
+                cutoff: cutoff,
+                attack: attack,
+                release: release,
+                format: format
+              ) else { return }
+        engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID)
+    }
+
+    func playDrumPad(_ pad: DrumPad, destinationTrackID: UUID?) {
+        guard let format = engine.instrumentFormat(for: destinationTrackID),
+              let buffer = InstrumentSoundGenerator.drumHit(pad, format: format) else { return }
+        engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID)
+    }
+
+    func toggleDrumStep(_ pad: DrumPad, step: Int) {
+        guard (0..<DrumPattern.stepCount).contains(step) else { return }
+        drumPattern.toggle(pad, step: step)
+        persistActiveSession()
+    }
+
+    func startDrumSequencer(destinationTrackID: UUID?) {
+        guard !isDrumSequencerPlaying else { return }
+        if !isPlaying { play() }
+
+        isDrumSequencerPlaying = true
+        let wallStart = Date()
+        let timelineStart = engine.currentTime
+        drumSequencerTask = Task { @MainActor [weak self] in
+            var previousAbsoluteStep: Int?
+
+            while !Task.isCancelled {
+                guard let self, self.isDrumSequencerPlaying else { break }
+                let stepDuration = 60.0 / Double(self.tempoBPM) / 4
+                let time = self.isPlaying
+                    ? self.engine.currentTime
+                    : timelineStart + Date().timeIntervalSince(wallStart)
+                let absoluteStep = max(0, Int(floor(time / stepDuration)))
+
+                if absoluteStep != previousAbsoluteStep {
+                    previousAbsoluteStep = absoluteStep
+                    let step = absoluteStep % DrumPattern.stepCount
+                    self.currentDrumStep = step
+                    for pad in DrumPad.allCases where self.drumPattern.contains(pad, step: step) {
+                        self.playDrumPad(pad, destinationTrackID: destinationTrackID)
+                    }
+                }
+
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+
+            self?.currentDrumStep = nil
+        }
+    }
+
+    func stopDrumSequencer() {
+        drumSequencerTask?.cancel()
+        drumSequencerTask = nil
+        isDrumSequencerPlaying = false
+        currentDrumStep = nil
+    }
+
+    func playTB303Note(
+        frequency: Double,
+        waveform: TB303Waveform,
+        cutoff: Double,
+        resonance: Double,
+        envelopeAmount: Double,
+        decay: Double,
+        accent: Bool,
+        destinationTrackID: UUID?
+    ) {
+        guard let format = engine.instrumentFormat(for: destinationTrackID),
+              let buffer = InstrumentSoundGenerator.tb303Note(
+                frequency: frequency,
+                waveform: waveform,
+                cutoff: cutoff,
+                resonance: resonance,
+                envelopeAmount: envelopeAmount,
+                decay: decay,
+                accent: accent,
+                format: format
+              ) else { return }
+        engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID, monophonic: true)
+    }
+
+    func loadSampler(from url: URL) {
+        do {
+            let imported = try TrackStorage.importFile(at: url)
+            samplerFileURL = TrackStorage.url(forFileName: imported.storedName)
+            samplerDisplayName = imported.displayName
+            samplerError = nil
+        } catch {
+            samplerError = "The selected audio file could not be loaded."
+        }
+    }
+
+    func playSampler(destinationTrackID: UUID?) {
+        guard let samplerFileURL else { return }
+        engine.playInstrumentFile(at: samplerFileURL, destinationTrackID: destinationTrackID)
+    }
+
+    func clearSamplerError() {
+        samplerError = nil
+    }
+
+    func requestMicrophonePermission() {
+        let session = AVAudioSession.sharedInstance()
+        switch session.recordPermission {
+        case .granted:
+            microphonePermissionGranted = true
+            microphoneError = nil
+        case .denied:
+            microphonePermissionGranted = false
+            microphoneError = "Microphone access is disabled. Allow it in Settings to record a take."
+        case .undetermined:
+            session.requestRecordPermission { [weak self] granted in
+                Task { @MainActor [weak self] in
+                    self?.microphonePermissionGranted = granted
+                    self?.microphoneError = granted ? nil : "Microphone access is needed to record a take."
+                }
+            }
+        @unknown default:
+            microphonePermissionGranted = false
+            microphoneError = "Microphone access is unavailable on this device."
+        }
+    }
+
+    func clearMicrophoneError() {
+        microphoneError = nil
+    }
+
+    func startInstrumentRecording(destinationTrackID: UUID?) {
+        guard let trackID = destinationTrackID,
+              tracks.contains(where: { $0.id == trackID }) else {
+            recordingError = InstrumentRecordingError.destinationUnavailable.localizedDescription
+            return
+        }
+        guard !isRecordingInstrument else { return }
+
+        let outputURL = TrackStorage.uniqueStemURL(baseName: "instrument-take", fileExtension: "caf")
+        do {
+            try engine.startInstrumentRecording(trackID: trackID, outputURL: outputURL)
+        } catch {
+            recordingError = (error as? LocalizedError)?.errorDescription ?? "Recording could not start."
+            return
+        }
+
+        if !isPlaying {
+            play()
+        }
+        recordingStartTime = engine.currentTime
+        recordingElapsed = 0
+        isRecordingInstrument = true
+        recordingError = nil
+    }
+
+    func startMicrophoneRecording(destinationTrackID: UUID?) {
+        guard microphonePermissionGranted else {
+            requestMicrophonePermission()
+            return
+        }
+        guard let trackID = destinationTrackID,
+              tracks.contains(where: { $0.id == trackID }) else {
+            recordingError = InstrumentRecordingError.destinationUnavailable.localizedDescription
+            return
+        }
+        guard !isRecordingInstrument else { return }
+
+        let outputURL = TrackStorage.uniqueStemURL(baseName: "microphone-take", fileExtension: "caf")
+        do {
+            try engine.startMicrophoneRecording(trackID: trackID, outputURL: outputURL)
+        } catch {
+            recordingError = (error as? LocalizedError)?.errorDescription ?? "Microphone recording could not start."
+            return
+        }
+
+        if !isPlaying {
+            play()
+        }
+        recordingStartTime = engine.currentTime
+        recordingElapsed = 0
+        isRecordingInstrument = true
+        recordingError = nil
+        microphoneError = nil
+    }
+
+    func stopInstrumentRecording() {
+        guard isRecordingInstrument else { return }
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+        let take = engine.finishInstrumentRecording()
+        isRecordingInstrument = false
+
+        guard let take,
+              let index = tracks.firstIndex(where: { $0.id == take.trackID }) else {
+            recordingError = InstrumentRecordingError.noAudioCaptured.localizedDescription
+            return
+        }
+
+        let clip = AudioClip(
+            name: "Take \(tracks[index].clips.count + 1)",
+            fileName: take.url.lastPathComponent,
+            startTime: recordingStartTime,
+            duration: take.duration
+        )
+        tracks[index].clips.append(clip)
+        recordingElapsed = take.duration
+
+        engine.load(tracks: tracks)
+        duration = engine.duration
+        currentTime = min(max(0, resumeTime), duration)
+        engine.seek(to: currentTime)
+        if wasPlaying {
+            engine.play()
+        }
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+        loadWaveforms()
+        commitSession()
+    }
+
+    func clearRecordingError() {
+        recordingError = nil
+    }
+
+    func bounceMix() {
+        guard !isBouncing else { return }
+        isBouncing = true
+        bounceProgress = 0
+        bounceStatus = "Preparing mix…"
+        bounceError = nil
+        lastExportURL = nil
+
+        let outputURL = MixExportStorage.newExportURL()
+        let tracksToBounce = tracks
+        let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
+            Task { @MainActor [weak self] in
+                self?.bounceProgress = fraction
+                self?.bounceStatus = fraction >= 1 ? "Finishing export…" : "Rendering mix · \(Int(fraction * 100))%"
+            }
+        }
+
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try MixBounceRenderer.render(tracks: tracksToBounce, to: outputURL, progress: progressUpdate)
+                }.value
+                refreshExports()
+                lastExportURL = outputURL
+                bounceProgress = 1
+                bounceStatus = "Bounce complete"
+            } catch {
+                try? FileManager.default.removeItem(at: outputURL)
+                bounceError = (error as? LocalizedError)?.errorDescription ?? "The mix could not be bounced."
+                bounceStatus = "Bounce failed"
+            }
+            isBouncing = false
+        }
+    }
+
+    func refreshExports() {
+        exports = MixExportStorage.loadExports()
+    }
+
+    func clearBounceError() {
+        bounceError = nil
+    }
+
+    func moveClip(trackID: UUID, clipID: UUID, to proposedStartTime: TimeInterval, snapInterval: TimeInterval) {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
+        beginUndoableEdit()
+        tracks[location.track].clips[location.clip].startTime = snappedTime(proposedStartTime, interval: snapInterval)
+    }
+
+    func trimClipStart(
+        trackID: UUID,
+        clipID: UUID,
+        original: AudioClip,
+        to proposedStartTime: TimeInterval,
+        snapInterval: TimeInterval
+    ) {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
+        let minimumStart = max(0, original.startTime - original.sourceStartTime)
+        let latestStart = original.startTime + original.duration - 0.05
+        guard latestStart >= minimumStart else { return }
+
+        let newStart = min(max(minimumStart, snappedTime(proposedStartTime, interval: snapInterval)), latestStart)
+        let delta = newStart - original.startTime
+        var clip = original
+        clip.startTime = newStart
+        clip.sourceStartTime = max(0, original.sourceStartTime + delta)
+        clip.duration = original.duration - delta
+        beginUndoableEdit()
+        tracks[location.track].clips[location.clip] = clip
+    }
+
+    func trimClipEnd(
+        trackID: UUID,
+        clipID: UUID,
+        original: AudioClip,
+        to proposedEndTime: TimeInterval,
+        snapInterval: TimeInterval
+    ) {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
+        let minimumDuration = min(0.05, original.duration)
+        let maximumDuration = max(0, original.sourceDuration - original.sourceStartTime)
+        guard maximumDuration >= minimumDuration else { return }
+
+        let snappedEnd = snappedTime(proposedEndTime, interval: snapInterval)
+        let newEnd = min(max(original.startTime + minimumDuration, snappedEnd), original.startTime + maximumDuration)
+        var clip = original
+        clip.duration = newEnd - original.startTime
+        beginUndoableEdit()
+        tracks[location.track].clips[location.clip] = clip
+    }
+
+    func splitClip(trackID: UUID, clipID: UUID, at time: TimeInterval, snapInterval: TimeInterval) -> UUID? {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return nil }
+        let clip = tracks[location.track].clips[location.clip]
+        let splitTime = snappedTime(time, interval: snapInterval)
+        let splitOffset = splitTime - clip.startTime
+        guard splitOffset >= 0.05, splitOffset <= clip.duration - 0.05 else { return nil }
+
+        beginUndoableEdit()
+        var left = clip
+        left.duration = splitOffset
+
+        var right = clip
+        right.id = UUID()
+        right.name = "\(clip.name) B"
+        right.startTime = splitTime
+        right.sourceStartTime = clip.sourceStartTime + splitOffset
+        right.duration = clip.duration - splitOffset
+
+        tracks[location.track].clips[location.clip] = left
+        tracks[location.track].clips.insert(right, at: location.clip + 1)
+        commitClipChanges()
+        return right.id
+    }
+
+    func duplicateClip(trackID: UUID, clipID: UUID, snapInterval: TimeInterval) -> UUID? {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return nil }
+        beginUndoableEdit()
+        var duplicate = tracks[location.track].clips[location.clip]
+        duplicate.id = UUID()
+        duplicate.name = "\(duplicate.name) Copy"
+        duplicate.startTime = snappedTime(duplicate.startTime + duplicate.duration, interval: snapInterval)
+        tracks[location.track].clips.insert(duplicate, at: location.clip + 1)
+        commitClipChanges()
+        return duplicate.id
+    }
+
+    func deleteClip(trackID: UUID, clipID: UUID) {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
+        beginUndoableEdit()
+        tracks[location.track].clips.remove(at: location.clip)
+        commitClipChanges()
+    }
+
+    func commitClipChanges() {
+        finishUndoableEdit()
+        resolveClipMetadata()
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+        engine.load(tracks: tracks)
+        duration = engine.duration
+        currentTime = min(max(0, resumeTime), duration)
+        engine.seek(to: currentTime)
+        if wasPlaying {
+            engine.play()
+        }
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+        loadWaveforms()
+        commitSession()
+    }
+
+    func toggleMute(_ id: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        beginUndoableEdit()
+        tracks[index].isMuted.toggle()
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    func toggleSolo(_ id: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        beginUndoableEdit()
+        tracks[index].isSoloed.toggle()
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    func setMuted(_ id: UUID, _ isMuted: Bool) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        beginUndoableEdit()
+        tracks[index].isMuted = isMuted
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    func setSoloed(_ id: UUID, _ isSoloed: Bool) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        beginUndoableEdit()
+        tracks[index].isSoloed = isSoloed
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    /// Finds a track by fuzzy name match (used by the agent chat).
+    func track(named name: String) -> Track? {
+        let needle = name.lowercased().trimmingCharacters(in: .whitespaces)
+        if let exact = tracks.first(where: { $0.name.lowercased() == needle }) { return exact }
+        return tracks.first(where: {
+            $0.name.lowercased().contains(needle) || needle.contains($0.name.lowercased())
+        })
+    }
+
+    func togglePlay() {
+        if isPlaying { pause() } else { play() }
+    }
+
+    func play() {
+        engine.play()
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+    }
+
+    func pause() {
+        stopDrumSequencer()
+        if isRecordingInstrument {
+            stopInstrumentRecording()
+        }
+        engine.pause()
+        isPlaying = false
+        currentTime = engine.currentTime
+    }
+
+    func stop() {
+        stopDrumSequencer()
+        if isRecordingInstrument {
+            stopInstrumentRecording()
+        }
+        engine.stop()
+        isPlaying = false
+        currentTime = 0
+        levels = [:]
+    }
+
+    // MARK: - Timeline scrubbing
+
+    func beginScrub() {
+        wasPlayingBeforeScrub = isPlaying
+        if isPlaying { pause() }
+        scrubTime = currentTime
+    }
+
+    func updateScrub(_ time: TimeInterval) {
+        scrubTime = min(max(0, time), duration)
+    }
+
+    func endScrub() {
+        if let time = scrubTime {
+            currentTime = time
+            engine.seek(to: time)
+        }
+        scrubTime = nil
+        if wasPlayingBeforeScrub {
+            play()
+        }
+    }
+
+    // MARK: - Waveforms
+
+    /// Loads track and recorded-clip peak envelopes off the main thread.
+    func loadWaveforms() {
+        waveformTask?.cancel()
+        let tracksToLoad = tracks
+        waveformTask = Task { [weak self] in
+            let peaks = await Task.detached {
+                (Self.computePeaks(for: tracksToLoad), Self.computeClipPeaks(for: tracksToLoad))
+            }.value
+            self?.waveformPeaks = peaks.0
+            self?.clipWaveformPeaks = peaks.1
+        }
+    }
+
+    /// Streams each track's audio and records the loudest sample per bucket.
+    private nonisolated static func computePeaks(for tracks: [Track]) -> [UUID: [Float]] {
+        var result: [UUID: [Float]] = [:]
+        let bucketCount = 2000
+
+        for track in tracks {
+            let url = TrackStorage.url(forFileName: track.fileName)
+            guard let file = try? AVAudioFile(forReading: url),
+                  let buffer = try? AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 16384) else {
+                continue
+            }
+
+            let totalFrames = Int(file.length)
+            guard totalFrames > 0 else { continue }
+
+            var peaks = [Float](repeating: 0, count: bucketCount)
+            let channelCount = Int(file.processingFormat.channelCount)
+            var framesRead = 0
+
+            while framesRead < totalFrames {
+                let toRead = min(16384, totalFrames - framesRead)
+                try? file.read(into: buffer, frameCount: AVAudioFrameCount(toRead))
+                let read = Int(buffer.frameLength)
+                guard read > 0, let data = buffer.floatChannelData else { break }
+
+                for channel in 0..<channelCount {
+                    let samples = data[channel]
+                    for i in 0..<read {
+                        let bucket = min(bucketCount - 1, (framesRead + i) * bucketCount / totalFrames)
+                        let value = abs(samples[i])
+                        if value > peaks[bucket] {
+                            peaks[bucket] = value
+                        }
+                    }
+                }
+                framesRead += read
+            }
+
+            normalize(&peaks)
+            result[track.id] = peaks
+        }
+        return result
+    }
+
+    private nonisolated static func computeClipPeaks(for tracks: [Track]) -> [UUID: [Float]] {
+        var result: [UUID: [Float]] = [:]
+        let bucketCount = 1000
+
+        for clip in tracks.flatMap(\.clips) {
+            let url = TrackStorage.url(forFileName: clip.fileName)
+            guard let file = try? AVAudioFile(forReading: url),
+                  let buffer = try? AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 16384) else {
+                continue
+            }
+
+            let sampleRate = file.processingFormat.sampleRate
+            let sourceStart = max(0, Int(clip.sourceStartTime * sampleRate))
+            let availableFrames = max(0, Int(file.length) - sourceStart)
+            let clipFrames = min(availableFrames, max(0, Int(clip.duration * sampleRate)))
+            guard clipFrames > 0 else { continue }
+            file.framePosition = AVAudioFramePosition(sourceStart)
+
+            var peaks = [Float](repeating: 0, count: bucketCount)
+            let channelCount = Int(file.processingFormat.channelCount)
+            var framesRead = 0
+
+            while framesRead < clipFrames {
+                let toRead = min(16384, clipFrames - framesRead)
+                try? file.read(into: buffer, frameCount: AVAudioFrameCount(toRead))
+                let read = Int(buffer.frameLength)
+                guard read > 0, let data = buffer.floatChannelData else { break }
+
+                for channel in 0..<channelCount {
+                    for frame in 0..<read {
+                        let bucket = min(bucketCount - 1, (framesRead + frame) * bucketCount / clipFrames)
+                        peaks[bucket] = max(peaks[bucket], abs(data[channel][frame]))
+                    }
+                }
+                framesRead += read
+            }
+
+            normalize(&peaks)
+            result[clip.id] = peaks
+        }
+        return result
+    }
+
+    private nonisolated static func normalize(_ peaks: inout [Float]) {
+        let maxPeak = peaks.max() ?? 0
+        guard maxPeak > 0 else { return }
+        for index in peaks.indices {
+            peaks[index] = min(1, peaks[index] / maxPeak)
+        }
+    }
+
+    // MARK: - Stem separation
+
+    /// Splits a full song into stems on device and loads them as tracks.
+    func separateStems(from songURL: URL) {
+        guard !isSeparating else { return }
+
+        isSeparating = true
+        separationProgress = 0
+        separationStatus = "Preparing…"
+
+        Task {
+            do {
+                let stems = try await OnDeviceStemSeparator.separate(fileAt: songURL) { [weak self] status, fraction in
+                    Task { @MainActor in
+                        self?.separationStatus = status
+                        self?.separationProgress = fraction
+                    }
+                }
+                applyStems(stems)
+            } catch {
+                separationError = (error as? LocalizedError)?.errorDescription
+                    ?? "Separation failed. The file may not be readable as audio."
+            }
+            isSeparating = false
+        }
+    }
+
+    private func applyStems(_ stems: [ImportedStem]) {
+        stop()
+        tracks = stems.map { Track(name: $0.name, fileName: $0.storedName) }
+        reloadEngine()
+    }
+
+    private func clipLocation(trackID: UUID, clipID: UUID) -> (track: Int, clip: Int)? {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let clipIndex = tracks[trackIndex].clips.firstIndex(where: { $0.id == clipID }) else { return nil }
+        return (trackIndex, clipIndex)
+    }
+
+    private func snappedTime(_ time: TimeInterval, interval: TimeInterval) -> TimeInterval {
+        let step = max(0.05, interval)
+        return max(0, (time / step).rounded() * step)
+    }
+
+    private func resolveClipMetadata() {
+        for trackIndex in tracks.indices {
+            for clipIndex in tracks[trackIndex].clips.indices {
+                var clip = tracks[trackIndex].clips[clipIndex]
+                let url = TrackStorage.url(forFileName: clip.fileName)
+                guard let file = try? AVAudioFile(forReading: url), file.processingFormat.sampleRate > 0 else { continue }
+
+                let sourceDuration = TimeInterval(file.length) / file.processingFormat.sampleRate
+                if clip.sourceDuration <= 0 || clip.sourceDuration > sourceDuration {
+                    clip.sourceDuration = sourceDuration
+                }
+                if clip.duration <= 0 {
+                    clip.duration = max(0, clip.sourceDuration - clip.sourceStartTime)
+                }
+                clip.duration = min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+                tracks[trackIndex].clips[clipIndex] = clip
+            }
+        }
+    }
+
+    private func reloadEngine() {
+        if isRecordingInstrument {
+            stopInstrumentRecording()
+        }
+        resolveClipMetadata()
+        engine.load(tracks: tracks)
+        duration = engine.duration
+        isPlaying = false
+        currentTime = 0
+        loadWaveforms()
+        commitSession()
+    }
+
+    private func refresh() {
+        let time = engine.currentTime
+        if isPlaying, duration > 0, time >= duration {
+            stop()
+        } else {
+            currentTime = time
+            if isRecordingInstrument {
+                recordingElapsed = max(0, time - recordingStartTime)
+            }
+        }
+        updateLevels()
+    }
+
+    private func updateLevels() {
+        for track in tracks {
+            let level = engine.level(for: track.id)
+            let previous = smoothedLevels[track.id] ?? 0
+            let smoothed = level > previous ? level : previous * 0.82
+            smoothedLevels[track.id] = smoothed
+            levels[track.id] = smoothed
+        }
+    }
+}
