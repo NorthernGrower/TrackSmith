@@ -38,7 +38,8 @@ build from GitHub Actions.
 - Instruments rack: a playable synth, the 808-style drum pads, a TB-303 acid bass
   and a sampler that loads the bundled starter sounds, a session's own audio or a
   file from the device, all played through the selected track's mixer.
-- Bounce the arrangement to a WAV file.
+- Bounce the arrangement to a WAV file, or export every track as its own stem
+  through its mixer settings and the master.
 
 ## Bundled sounds
 

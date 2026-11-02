@@ -34,6 +34,23 @@ enum MixExportStorage {
         return exportsDirectory.appendingPathComponent("Mix-\(timestamp)-\(UUID().uuidString.prefix(6)).wav")
     }
 
+    /// A unique export file named after a stem, safe for the file system.
+    static func exportURL(name: String) -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let timestamp = formatter.string(from: Date())
+
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let safeName = name
+            .replacingOccurrences(of: " ", with: "-")
+            .components(separatedBy: allowed.inverted)
+            .joined()
+        let base = safeName.isEmpty ? "Stem" : safeName
+
+        return exportsDirectory.appendingPathComponent("\(base)-\(timestamp)-\(UUID().uuidString.prefix(6)).wav")
+    }
+
     static func loadExports() -> [MixExport] {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: exportsDirectory,

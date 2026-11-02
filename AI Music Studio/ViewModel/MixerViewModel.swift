@@ -72,6 +72,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var microphonePermissionGranted = false
     @Published private(set) var microphoneError: String?
     @Published private(set) var isBouncing = false
+    @Published private(set) var isStemBounce = false
     @Published private(set) var bounceProgress = 0.0
     @Published private(set) var bounceStatus = ""
     @Published private(set) var bounceError: String?
@@ -1028,6 +1029,7 @@ final class MixerViewModel: ObservableObject {
     func bounceMix() {
         guard !isBouncing else { return }
         isBouncing = true
+        isStemBounce = false
         bounceProgress = 0
         bounceStatus = "Preparing mix…"
         bounceError = nil
@@ -1068,6 +1070,78 @@ final class MixerViewModel: ObservableObject {
             }
             isBouncing = false
         }
+    }
+
+    /// Renders every track as its own stem, through its mixer settings and the master.
+    func bounceStems() {
+        guard !isBouncing else { return }
+
+        let tracksToRender = tracks.filter { audibleDuration(of: $0) > 0 }
+        guard !tracksToRender.isEmpty else {
+            bounceError = "There are no tracks with audio or notes to export."
+            return
+        }
+
+        isBouncing = true
+        isStemBounce = true
+        bounceProgress = 0
+        bounceStatus = "Preparing stems…"
+        bounceError = nil
+        lastExportURL = nil
+
+        let master = masterVolume
+        let effects = masterEffects
+        let tempo = tempoBPM
+        let session = sessionName
+
+        Task {
+            do {
+                var lastURL: URL?
+                for (index, track) in tracksToRender.enumerated() {
+                    let stemURL = MixExportStorage.exportURL(name: "\(session)-\(track.name)")
+                    let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.bounceProgress = (Double(index) + min(1, max(0, fraction))) / Double(tracksToRender.count)
+                            self.bounceStatus = fraction >= 1
+                                ? "Saving \(track.name)…"
+                                : "Rendering \(track.name) · \(Int(fraction * 100))%"
+                        }
+                    }
+
+                    try await Task.detached(priority: .userInitiated) {
+                        try MixBounceRenderer.renderStem(
+                            track: track,
+                            masterVolume: master,
+                            masterEffects: effects,
+                            tempoBPM: tempo,
+                            to: stemURL,
+                            progress: progressUpdate
+                        )
+                    }.value
+
+                    lastURL = stemURL
+                }
+
+                refreshExports()
+                lastExportURL = lastURL
+                bounceProgress = 1
+                bounceStatus = "Stems complete"
+            } catch {
+                bounceError = (error as? LocalizedError)?.errorDescription ?? "The stems could not be bounced."
+                bounceStatus = "Bounce failed"
+            }
+            isBouncing = false
+            isStemBounce = false
+        }
+    }
+
+    private func audibleDuration(of track: Track) -> TimeInterval {
+        let clipEnd = track.playbackClips.map { clip in
+            max(0, clip.startTime) + min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+        }.max() ?? 0
+        let noteEnd = track.sequencedNotes.map(\.endTime).max() ?? 0
+        return max(clipEnd, noteEnd)
     }
 
     func refreshExports() {

@@ -326,12 +326,20 @@ struct MixerView: View {
                 }
                 .buttonStyle(.plain)
 
-                Button {
-                    model.bounceMix()
+                Menu {
+                    Button {
+                        model.bounceMix()
+                    } label: {
+                        Label("Bounce Mix", systemImage: "arrow.down.to.line")
+                    }
+                    Button {
+                        model.bounceStems()
+                    } label: {
+                        Label("Bounce Stems", systemImage: "square.stack.3d.up")
+                    }
                 } label: {
                     StudioToolbarButton(title: "Bounce", systemImage: "arrow.down.to.line")
                 }
-                .buttonStyle(.plain)
                 .disabled(model.isBouncing)
             }
         }
@@ -410,7 +418,7 @@ struct MixerView: View {
                 Image(systemName: "waveform")
                     .foregroundStyle(Color.studioAccent)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Bouncing Mix")
+                    Text(model.isStemBounce ? "Bouncing Stems" : "Bouncing Mix")
                         .font(.system(size: 14, weight: .semibold))
                     Text(model.bounceStatus)
                         .font(.system(size: 11, weight: .medium))

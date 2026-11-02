@@ -41,6 +41,7 @@ enum MixBounceRenderer {
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
         tempoBPM: Int = 120,
+        applyMuteSolo: Bool = true,
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
     ) throws {
@@ -74,7 +75,7 @@ enum MixBounceRenderer {
             engine.attach(compressor)
             engine.connect(trackMixer, to: compressor, format: outputFormat)
             engine.connect(compressor, to: masterBus, format: outputFormat)
-            let audible = !track.isMuted && (!anySolo || track.isSoloed)
+            let audible = !applyMuteSolo || (!track.isMuted && (!anySolo || track.isSoloed))
             trackMixer.outputVolume = audible ? track.volume * track.automationGain(at: 0) : 0
             trackMixer.pan = min(1, max(-1, track.panAutomationValue(at: 0)))
             trackMixers[track.id] = trackMixer
@@ -172,7 +173,7 @@ enum MixBounceRenderer {
             let framesToRender = AVAudioFrameCount(min(Int64(maximumFrameCount), framesRemaining))
             let automationTime = Double(framesRendered) / sampleRate
             for track in tracks {
-                let audible = !track.isMuted && (!anySolo || track.isSoloed)
+                let audible = !applyMuteSolo || (!track.isMuted && (!anySolo || track.isSoloed))
                 let automatedVolume = track.volume * track.automationGain(at: automationTime)
                 trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
                 trackMixers[track.id]?.pan = min(1, max(-1, track.panAutomationValue(at: automationTime)))
@@ -206,6 +207,26 @@ enum MixBounceRenderer {
         }
 
         progress(1)
+    }
+
+    /// Renders one track on its own, with its mixer settings but without mute or solo.
+    static func renderStem(
+        track: Track,
+        masterVolume: Float = 1,
+        masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
+        tempoBPM: Int = 120,
+        to outputURL: URL,
+        progress: @escaping @Sendable (Double) -> Void
+    ) throws {
+        try render(
+            tracks: [track],
+            masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            tempoBPM: tempoBPM,
+            applyMuteSolo: false,
+            to: outputURL,
+            progress: progress
+        )
     }
 
     private static func applyMasterEffects(

@@ -477,7 +477,19 @@ export class StudioEngine {
     });
   }
 
-  async renderOffline({ duration, tracks, masterVolume = 1, includeMixer = true, forceSource = false, frozenSource = null }) {
+  async renderStem(track) {
+    const duration = model.trackDuration(track);
+    if (duration <= 0) throw new Error('This track has nothing to render.');
+    return this.renderOffline({
+      duration,
+      tracks: [track],
+      masterVolume: this.session?.masterVolume ?? 1,
+      includeMixer: true,
+      applyMuteSolo: false
+    });
+  }
+
+  async renderOffline({ duration, tracks, masterVolume = 1, includeMixer = true, forceSource = false, frozenSource = null, applyMuteSolo = true }) {
     const sampleRate = 44100;
     const offline = new OfflineAudioContext(2, Math.ceil(duration * sampleRate) + 1024, sampleRate);
 
@@ -492,18 +504,18 @@ export class StudioEngine {
     const anySolo = this.session ? this.session.tracks.some((t) => t.soloed) : false;
 
     for (const track of tracks) {
-      const input = this.buildOfflineTrack(offline, track, master, { includeMixer, anySolo, duration });
+      const input = this.buildOfflineTrack(offline, track, master, { includeMixer, anySolo, duration, applyMuteSolo });
       this.scheduleOfflineTrack(offline, track, input, duration, forceSource);
     }
 
     return offline.startRendering();
   }
 
-  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration }) {
+  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration, applyMuteSolo = true }) {
     const input = ctx.createGain();
 
     if (includeMixer) {
-      const audible = !track.muted && (!anySolo || track.soloed);
+      const audible = !applyMuteSolo || (!track.muted && (!anySolo || track.soloed));
       const volume = audible ? track.volume : 0;
       input.gain.setValueAtTime(volume * model.automationGain(track, 0), 0);
       const step = 0.05;

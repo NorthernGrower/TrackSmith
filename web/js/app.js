@@ -68,6 +68,7 @@ const el = {
   addTrackBtn: document.getElementById('addTrackBtn'),
   blankTrackBtn: document.getElementById('blankTrackBtn'),
   instrumentsBtn: document.getElementById('instrumentsBtn'),
+  stemBounceBtn: document.getElementById('stemBounceBtn'),
   bounceBtn: document.getElementById('bounceBtn'),
   fileInput: document.getElementById('fileInput'),
   emptyImportBtn: document.getElementById('emptyImportBtn'),
@@ -812,6 +813,33 @@ async function toggleFreeze(trackId) {
   }
 
   state.freezing = false;
+}
+
+async function bounceStems() {
+  if (state.bouncing) return;
+  const tracks = state.session.tracks.filter((track) => model.trackDuration(track) > 0);
+  if (!tracks.length) {
+    toast('There are no tracks with audio to export');
+    return;
+  }
+
+  state.bouncing = true;
+  renderTransport();
+  toast('Rendering stems…');
+
+  try {
+    for (const track of tracks) {
+      const buffer = await engine.renderStem(track);
+      download(encodeWav(buffer), `${safeName(state.session.name)} - ${safeName(track.name)}.wav`);
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+    toast(`${tracks.length} stems exported`);
+  } catch (error) {
+    toast(error.message || 'Stems could not be exported');
+  }
+
+  state.bouncing = false;
+  renderTransport();
 }
 
 async function bounceMix() {
@@ -2312,6 +2340,7 @@ function bindEvents() {
   });
   el.blankTrackBtn.addEventListener('click', addBlankTrack);
   el.instrumentsBtn.addEventListener('click', openInstruments);
+  el.stemBounceBtn?.addEventListener('click', bounceStems);
   el.bounceBtn.addEventListener('click', bounceMix);
 
   el.undoBtn.addEventListener('click', undo);

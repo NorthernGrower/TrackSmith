@@ -82,7 +82,7 @@ button { cursor: pointer; }
 .icon-btn:disabled { opacity: 0.35; cursor: default; }
 .icon-btn:active { background: var(--panel-highlight); }
 
-.tool-row { display: flex; gap: 8px; }
+.tool-row { display: flex; gap: 8px; flex-wrap: wrap; }
 
 .tool {
   flex: 1;
