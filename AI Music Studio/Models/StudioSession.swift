@@ -8,6 +8,8 @@ import Foundation
 struct StudioSession: Identifiable, Codable, Equatable {
     var id: UUID
     var name: String
+    /// Id of the template the session was started from, when it came from one.
+    var templateID: String?
     var tracks: [Track]
     var tempoBPM: Int
     var drumPattern: DrumPattern
@@ -29,6 +31,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
     init(
         id: UUID = UUID(),
         name: String,
+        templateID: String? = nil,
         tracks: [Track] = [],
         tempoBPM: Int = 120,
         drumPattern: DrumPattern = DrumPattern(),
@@ -45,6 +48,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
     ) {
         self.id = id
         self.name = name
+        self.templateID = templateID
         self.tracks = tracks
         self.tempoBPM = tempoBPM
         self.drumPattern = drumPattern
@@ -63,6 +67,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id
         case name
+        case templateID
         case tracks
         case tempoBPM
         case drumPattern
@@ -82,6 +87,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try values.decodeIfPresent(String.self, forKey: .name) ?? "Untitled Session"
+        templateID = try values.decodeIfPresent(String.self, forKey: .templateID)
         tracks = try values.decodeIfPresent([Track].self, forKey: .tracks) ?? []
         tempoBPM = try values.decodeIfPresent(Int.self, forKey: .tempoBPM) ?? 120
         drumPattern = try values.decodeIfPresent(DrumPattern.self, forKey: .drumPattern) ?? DrumPattern()

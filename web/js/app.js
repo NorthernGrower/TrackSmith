@@ -68,6 +68,8 @@ const el = {
   sessionsBtn: document.getElementById('sessionsBtn'),
   addTrackBtn: document.getElementById('addTrackBtn'),
   blankTrackBtn: document.getElementById('blankTrackBtn'),
+  templatesBtn: document.getElementById('templatesBtn'),
+  emptyTemplatesBtn: document.getElementById('emptyTemplatesBtn'),
   instrumentsBtn: document.getElementById('instrumentsBtn'),
   stemBounceBtn: document.getElementById('stemBounceBtn'),
   bounceBtn: document.getElementById('bounceBtn'),
@@ -2240,6 +2242,59 @@ async function loadStarterSound(file) {
 
 // ---------- Sessions ----------
 
+function openTemplates() {
+  state.modal = 'templates';
+
+  const cards = model.SESSION_TEMPLATES.map((template) => {
+    const lanes = template.tracks.map((slot, index) => `
+      <div class="tpl-lane" style="--lane:${model.trackColor(index)}">
+        <span class="tpl-lane-name">${escapeHtml(slot.name)}</span>
+        <span class="tpl-lane-meta">${model.dbLabel(slot.volume)} ${model.panLabel(slot.pan ?? 0)}</span>
+      </div>`).join('');
+    const count = template.tracks.length;
+
+    return `<button class="tpl-card" data-template="${template.id}">
+      <div class="tpl-head">
+        <div class="tpl-name">
+          <strong>${escapeHtml(template.name)}</strong>
+          ${template.suggested ? '<span class="tpl-tag">SUGGESTED</span>' : ''}
+        </div>
+        <span class="tpl-meta">${count} ${count === 1 ? 'TRACK' : 'TRACKS'} · ${template.tempo} BPM</span>
+      </div>
+      <p class="tpl-desc">${escapeHtml(template.summary)}</p>
+      <div class="tpl-lanes">${lanes}</div>
+      <span class="tpl-cta">Create Session →</span>
+    </button>`;
+  }).join('');
+
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0">
+        <h2>Templates</h2>
+        <div class="sub">TRACKS · COLOURS · MIXER SETTINGS</div>
+      </div>
+      <button class="modal-close" data-close>Cancel</button>
+    </header>
+    <div class="modal-body">
+      <p class="tpl-intro">Start from a layout that already has its tracks, colours and mixer settings dialled in.</p>
+      <div class="tpl-grid">${cards}</div>
+    </div>`, { tall: true });
+
+  el.modalRoot.querySelectorAll('[data-template]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const template = model.SESSION_TEMPLATES.find((item) => item.id === button.dataset.template);
+      if (!template) return;
+      const session = model.createSessionFromTemplate(template, uniqueSessionName(template.name));
+      state.store.sessions.push(session);
+      state.store.activeId = session.id;
+      model.saveStore(state.store);
+      closeModal();
+      adoptSession(session);
+      toast(`${template.name} session created`);
+    });
+  });
+}
+
 function openSessions() {
   state.modal = 'sessions';
   const rows = state.store.sessions.map((session) => {
@@ -2368,6 +2423,8 @@ function bindEvents() {
     el.fileInput.value = '';
   });
   el.blankTrackBtn.addEventListener('click', addBlankTrack);
+  el.templatesBtn.addEventListener('click', openTemplates);
+  el.emptyTemplatesBtn?.addEventListener('click', openTemplates);
   el.instrumentsBtn.addEventListener('click', openInstruments);
   el.stemBounceBtn?.addEventListener('click', bounceStems);
   el.bounceBtn.addEventListener('click', bounceMix);

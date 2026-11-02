@@ -24,6 +24,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var sessions: [StudioSession] = []
     @Published private(set) var activeSessionID = UUID()
     @Published private(set) var sessionName = "Untitled Session"
+    @Published private(set) var activeTemplateID: String?
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var levels: [UUID: Float] = [:]
@@ -104,6 +105,7 @@ final class MixerViewModel: ObservableObject {
         activeSessionID = storedSessions.activeSessionID
         if let session = storedSessions.sessions.first(where: { $0.id == storedSessions.activeSessionID }) {
             sessionName = session.name
+            activeTemplateID = session.templateID
             tracks = session.tracks
             tempoBPM = min(200, max(60, session.tempoBPM))
             drumPattern = session.drumPattern
@@ -498,6 +500,30 @@ final class MixerViewModel: ObservableObject {
         activateSession(session)
     }
 
+    /// Starts a session from a prepared layout, with its tracks, colours and mixer
+    /// settings already in place.
+    func createSession(from template: SessionTemplate) {
+        prepareToLeaveCurrentSession()
+        persistActiveSession(markEdited: false)
+        var session = StudioSession(
+            name: uniqueSessionName(template.name),
+            templateID: template.id,
+            tempoBPM: template.tempoBPM
+        )
+        session.tracks = template.tracks.map { slot in
+            Track(
+                name: slot.name,
+                fileName: "",
+                volume: slot.volume,
+                pan: slot.pan,
+                eqSettings: slot.eqSettings,
+                compressorSettings: slot.compressorSettings
+            )
+        }
+        sessions.append(session)
+        activateSession(session)
+    }
+
     func openSession(_ id: UUID) {
         guard id != activeSessionID,
               let session = sessions.first(where: { $0.id == id }) else { return }
@@ -562,6 +588,7 @@ final class MixerViewModel: ObservableObject {
     private func persistActiveSession(markEdited: Bool = true) {
         guard let index = sessions.firstIndex(where: { $0.id == activeSessionID }) else { return }
         sessions[index].name = sessionName
+        sessions[index].templateID = activeTemplateID
         sessions[index].tracks = tracks
         sessions[index].tempoBPM = tempoBPM
         sessions[index].drumPattern = drumPattern
@@ -594,6 +621,7 @@ final class MixerViewModel: ObservableObject {
     private func activateSession(_ session: StudioSession) {
         activeSessionID = session.id
         sessionName = session.name
+        activeTemplateID = session.templateID
         tracks = session.tracks
         tempoBPM = min(200, max(60, session.tempoBPM))
         drumPattern = session.drumPattern

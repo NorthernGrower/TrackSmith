@@ -138,6 +138,10 @@ struct MixerView: View {
                 SessionLibraryView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .templates:
+                TemplatesView(model: model)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
             case .mixer:
                 ChannelMixerView(model: model)
                     .presentationDetents([.large])
@@ -257,6 +261,11 @@ struct MixerView: View {
                 .accessibilityLabel("Master effects")
 
                 Menu {
+                    Button {
+                        activeSheet = .templates
+                    } label: {
+                        Label("New from Template", systemImage: "square.grid.2x2")
+                    }
                     Button {
                         activeSheet = .sessions
                     } label: {
@@ -393,6 +402,16 @@ struct MixerView: View {
                 StudioToolbarButton(title: "Add Track", systemImage: "plus", isProminent: true)
             }
             .padding(.top, 3)
+
+            Button {
+                activeSheet = .templates
+            } label: {
+                Label("Start from a Template", systemImage: "square.grid.2x2")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.studioAccent)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -507,6 +526,7 @@ private enum StudioSheet: String, Identifiable {
     case exports
     case trackEQ
     case sessions
+    case templates
     case mixer
     case masterEffects
     case channelPresets

@@ -628,6 +628,56 @@ button { cursor: pointer; }
 .list-row .row-actions { display: flex; gap: 6px; }
 .list-row.open { border-color: rgba(245, 158, 42, 0.5); }
 
+/* Templates */
+
+.tpl-intro { margin: 0 0 12px; font-size: 11px; color: var(--secondary); line-height: 1.5; }
+.tpl-grid { display: flex; flex-direction: column; gap: 10px; }
+.tpl-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 13px;
+  border-radius: var(--radius);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.tpl-card:active { border-color: rgba(245, 158, 42, 0.5); }
+.tpl-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.tpl-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tpl-name strong { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-tag {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  background: rgba(245, 158, 42, 0.14);
+  padding: 2px 5px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.tpl-meta {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 9px;
+  color: var(--secondary);
+  white-space: nowrap;
+}
+.tpl-desc { margin: 6px 0 10px; font-size: 11px; color: var(--secondary); line-height: 1.45; }
+.tpl-lanes { display: flex; flex-direction: column; gap: 5px; }
+.tpl-lane {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.045);
+  border-left: 3px solid var(--lane, var(--accent));
+}
+.tpl-lane-name { flex: 1; font-size: 10px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-lane-meta { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 8px; color: var(--secondary); }
+.tpl-cta { display: block; margin-top: 10px; font-size: 11px; font-weight: 600; color: var(--accent); }
+
 /* Piano roll & automation sheets */
 
 .roll { display: flex; flex-direction: column; gap: 10px; }

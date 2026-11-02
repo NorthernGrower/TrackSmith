@@ -214,16 +214,20 @@ final class MixerEngine {
                 return (clip, file)
             }
 
-            let referenceFile: AVAudioFile
+            // A track with no audio yet still gets a channel strip, so material
+            // imported or sequenced into it plays as soon as it arrives.
+            let referenceFormat: AVAudioFormat
             if let firstClip = clipFiles.first {
-                referenceFile = firstClip.file
+                referenceFormat = firstClip.file.processingFormat
+            } else if let legacyFile = try? AVAudioFile(forReading: TrackStorage.url(forFileName: track.fileName)) {
+                referenceFormat = legacyFile.processingFormat
+            } else if let fallback = masterConnectionFormat() {
+                referenceFormat = fallback
             } else {
-                let legacyURL = TrackStorage.url(forFileName: track.fileName)
-                guard let file = try? AVAudioFile(forReading: legacyURL) else { continue }
-                referenceFile = file
+                continue
             }
 
-            let format = referenceFile.processingFormat
+            let format = referenceFormat
             let instrumentFormat = AVAudioFormat(
                 standardFormatWithSampleRate: format.sampleRate,
                 channels: min(format.channelCount, 2)

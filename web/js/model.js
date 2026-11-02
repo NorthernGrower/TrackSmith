@@ -129,6 +129,73 @@ export function createSession(name = 'Untitled Session') {
   };
 }
 
+// Prepared layouts a session can be started from, mirroring the iOS templates.
+
+export const SESSION_TEMPLATES = [
+  {
+    id: 'four-piece-band',
+    name: 'Four-Piece Band',
+    summary: 'Vocals, guitar, bass and drums, balanced for a live-band mix.',
+    tempo: 92,
+    suggested: true,
+    tracks: [
+      { name: 'Vocals', volume: 0.92, pan: 0, low: -2, mid: 1.5, high: 2 },
+      { name: 'Drums', volume: 0.9, pan: 0, low: 2, mid: -1, high: 1.5, comp: { threshold: -20, ratio: 4, attack: 0.006, release: 0.14 } },
+      { name: 'Bass', volume: 0.86, pan: 0, low: 1.5, mid: -0.5, high: 1, comp: { threshold: -18, ratio: 3 } },
+      { name: 'Guitar', volume: 0.7, pan: 0.22, low: -2, mid: 1, high: 1 }
+    ]
+  },
+  {
+    id: 'electronic-setup',
+    name: 'Electronic Setup',
+    summary: 'Drums, bass, synth and an FX return for club-ready productions.',
+    tempo: 124,
+    suggested: false,
+    tracks: [
+      { name: 'Drums', volume: 0.9, pan: 0, low: 2, mid: -1, high: 1.5, comp: { threshold: -20, ratio: 4, attack: 0.006, release: 0.14 } },
+      { name: 'Bass', volume: 0.85, pan: 0, low: 1.5, mid: -0.5, high: 1, comp: { threshold: -18, ratio: 3 } },
+      { name: 'Synth', volume: 0.78, pan: -0.15, low: -1, mid: 1.5, high: 0.5 },
+      { name: 'FX', volume: 0.55, pan: 0.3, low: -3, mid: 0, high: 2 }
+    ]
+  },
+  {
+    id: 'vocal-and-backing',
+    name: 'Vocal and Backing',
+    summary: 'A lead vocal with a tucked-back double over a rhythm section.',
+    tempo: 78,
+    suggested: false,
+    tracks: [
+      { name: 'Lead Vocal', volume: 0.95, pan: 0, low: -1.5, mid: 2, high: 2.5, comp: { threshold: -22, ratio: 3 } },
+      { name: 'Backing', volume: 0.62, pan: -0.25, low: -2, mid: 0.5, high: 1 },
+      { name: 'Drums', volume: 0.85, pan: 0, low: 2, mid: -1, high: 1.5 },
+      { name: 'Bass', volume: 0.82, pan: 0, low: 1.5, mid: -0.5, high: 1 }
+    ]
+  }
+];
+
+export function createSessionFromTemplate(template, name) {
+  const session = createSession(name || template.name);
+  session.tempo = clamp(Number(template.tempo) || 120, 60, 200);
+  session.templateId = template.id;
+  session.tracks = template.tracks.map((slot, index) => {
+    const track = createTrack({ name: slot.name, index });
+    track.volume = clamp(Number(slot.volume ?? 1), 0, 1);
+    track.pan = clamp(Number(slot.pan ?? 0), -1, 1);
+    track.eq.low.gain = Number(slot.low ?? 0);
+    track.eq.mid.gain = Number(slot.mid ?? 0);
+    track.eq.high.gain = Number(slot.high ?? 0);
+    if (slot.comp) {
+      track.comp.bypassed = false;
+      track.comp.threshold = Number(slot.comp.threshold ?? -18);
+      track.comp.ratio = Number(slot.comp.ratio ?? 3);
+      if (slot.comp.attack !== undefined) track.comp.attack = Number(slot.comp.attack);
+      if (slot.comp.release !== undefined) track.comp.release = Number(slot.comp.release);
+    }
+    return track;
+  });
+  return session;
+}
+
 export function playbackClips(track) {
   if (track.frozen && track.frozen.fileId && track.frozen.duration > 0) {
     return [{
@@ -220,6 +287,7 @@ export function normalizeSession(session) {
   const normal = session || createSession();
   normal.id = normal.id || uid();
   normal.name = normal.name || 'Untitled Session';
+  normal.templateId = normal.templateId || null;
   normal.tempo = clamp(Number(normal.tempo) || 120, 60, 200);
   normal.masterVolume = clamp(Number(normal.masterVolume ?? 1), 0, 1);
   normal.masterEffects = normal.masterEffects || {};
