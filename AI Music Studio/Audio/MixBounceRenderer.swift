@@ -43,10 +43,11 @@ enum MixBounceRenderer {
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
         tempoBPM: Int = 120,
         applyMuteSolo: Bool = true,
+        settings: BounceSettings = BounceSettings(),
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
     ) throws {
-        let sampleRate = 44_100.0
+        let sampleRate = Double(settings.sampleRate.rawValue)
         guard let outputFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
             throw RenderError.invalidFormat
         }
@@ -166,7 +167,13 @@ enum MixBounceRenderer {
         try engine.start()
         defer { engine.stop() }
 
-        let output = try AVAudioFile(forWriting: outputURL, settings: outputFormat.settings)
+        // The mix is rendered as float audio first so it can be normalized, then
+        // written in the chosen format and bit depth.
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MixBounce-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+
+        var renderFile: AVAudioFile? = try AVAudioFile(forWriting: temporaryURL, settings: outputFormat.settings)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: maximumFrameCount) else {
             throw RenderError.invalidFormat
         }
@@ -194,9 +201,9 @@ enum MixBounceRenderer {
             switch status {
             case .success:
                 guard buffer.frameLength > 0 else { throw RenderError.renderFailed }
-                try output.write(from: buffer)
+                try renderFile?.write(from: buffer)
                 framesRendered += AVAudioFramePosition(buffer.frameLength)
-                progress(min(1, Double(framesRendered) / Double(totalFrames)))
+                progress(0.8 * min(1, Double(framesRendered) / Double(totalFrames)))
             case .cannotDoInCurrentContext:
                 Thread.sleep(forTimeInterval: 0.001)
             case .insufficientDataFromInputNode:
@@ -207,14 +214,19 @@ enum MixBounceRenderer {
                     }
                 }
                 buffer.frameLength = framesToRender
-                try output.write(from: buffer)
+                try renderFile?.write(from: buffer)
                 framesRendered += AVAudioFramePosition(framesToRender)
-                progress(min(1, Double(framesRendered) / Double(totalFrames)))
+                progress(0.8 * min(1, Double(framesRendered) / Double(totalFrames)))
             case .error:
                 throw RenderError.renderFailed
             @unknown default:
                 throw RenderError.renderFailed
             }
+        }
+
+        renderFile = nil
+        try writeExport(from: temporaryURL, to: outputURL, settings: settings) { fraction in
+            progress(0.8 + 0.2 * fraction)
         }
 
         progress(1)
@@ -227,6 +239,7 @@ enum MixBounceRenderer {
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
         tempoBPM: Int = 120,
+        settings: BounceSettings = BounceSettings(),
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
     ) throws {
@@ -237,6 +250,7 @@ enum MixBounceRenderer {
             masterEffects: masterEffects,
             tempoBPM: tempoBPM,
             applyMuteSolo: false,
+            settings: settings,
             to: outputURL,
             progress: progress
         )
@@ -246,6 +260,109 @@ enum MixBounceRenderer {
     private static func groupGain(for trackID: UUID, groups: [TrackGroup]) -> Float {
         guard let group = groups.first(where: { $0.trackIDs.contains(trackID) }) else { return 1 }
         return min(1, max(0, group.volume))
+    }
+
+    /// Writes the rendered float mix in the chosen format, bit depth and level.
+    private static func writeExport(
+        from sourceURL: URL,
+        to outputURL: URL,
+        settings: BounceSettings,
+        progress: @escaping @Sendable (Double) -> Void
+    ) throws {
+        let source = try AVAudioFile(forReading: sourceURL)
+        let format = source.processingFormat
+        let gain = settings.normalize ? normalizationGain(for: source) : 1
+
+        source.framePosition = 0
+        let output = try AVAudioFile(
+            forWriting: outputURL,
+            settings: exportSettings(for: settings, sampleRate: format.sampleRate),
+            commonFormat: .pcmFormatFloat32,
+            interleaved: true
+        )
+
+        let chunk: AVAudioFrameCount = 8_192
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk) else {
+            throw RenderError.invalidFormat
+        }
+
+        let total = max(1, source.length)
+        var written: AVAudioFramePosition = 0
+        progress(0)
+
+        while written < source.length {
+            try source.read(into: buffer, frameCount: chunk)
+            guard buffer.frameLength > 0 else { break }
+
+            applyGain(gain, to: buffer)
+            try output.write(from: buffer)
+
+            written += AVAudioFramePosition(buffer.frameLength)
+            progress(min(1, Double(written) / Double(total)))
+        }
+    }
+
+    /// The container settings a bounce file is written with.
+    private static func exportSettings(for settings: BounceSettings, sampleRate: Double) -> [String: Any] {
+        switch settings.format {
+        case .wav:
+            return [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: 2,
+                AVLinearPCMBitDepthKey: settings.bitDepth.rawValue,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false
+            ]
+        case .m4a:
+            return [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 256_000
+            ]
+        }
+    }
+
+    /// A gain that brings the loudest peak of a render to -1 dBFS.
+    private static func normalizationGain(for file: AVAudioFile) -> Float {
+        let format = file.processingFormat
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192) else { return 1 }
+
+        var peak: Float = 0
+        file.framePosition = 0
+        while true {
+            do {
+                try file.read(into: buffer, frameCount: 8_192)
+            } catch {
+                break
+            }
+            guard buffer.frameLength > 0, let data = buffer.floatChannelData else { break }
+
+            for channel in 0..<Int(format.channelCount) {
+                let samples = data[channel]
+                for index in 0..<Int(buffer.frameLength) {
+                    peak = max(peak, abs(samples[index]))
+                }
+            }
+        }
+        file.framePosition = 0
+
+        guard peak > 0.0001 else { return 1 }
+        let target: Float = 0.891
+        return min(8, target / peak)
+    }
+
+    private static func applyGain(_ gain: Float, to buffer: AVAudioPCMBuffer) {
+        guard abs(gain - 1) > 0.0001, let data = buffer.floatChannelData else { return }
+
+        for channel in 0..<Int(buffer.format.channelCount) {
+            let samples = data[channel]
+            for index in 0..<Int(buffer.frameLength) {
+                samples[index] *= gain
+            }
+        }
     }
 
     private static func applyMasterEffects(

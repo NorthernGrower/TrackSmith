@@ -79,6 +79,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var bounceProgress = 0.0
     @Published private(set) var bounceStatus = ""
     @Published private(set) var bounceError: String?
+    @Published private(set) var bounceSettings = BounceSettingsStorage.load()
     @Published var audioError: String?
     @Published private(set) var exports: [MixExport] = []
     @Published private(set) var lastExportURL: URL?
@@ -1125,8 +1126,10 @@ final class MixerViewModel: ObservableObject {
         recordingError = nil
     }
 
-    func bounceMix() {
+    func bounceMix(settings: BounceSettings) {
         guard !isBouncing else { return }
+        bounceSettings = settings
+        BounceSettingsStorage.save(settings)
         isBouncing = true
         isStemBounce = false
         bounceProgress = 0
@@ -1134,12 +1137,13 @@ final class MixerViewModel: ObservableObject {
         bounceError = nil
         lastExportURL = nil
 
-        let outputURL = MixExportStorage.newExportURL()
+        let outputURL = MixExportStorage.exportURL(name: settings.fileName, fileExtension: settings.format.fileExtension)
         let tracksToBounce = tracks
         let groupsToBounce = groups
         let masterVolumeToBounce = masterVolume
         let masterEffectsToBounce = masterEffects
         let tempoToBounce = tempoBPM
+        let settingsToBounce = settings
         let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
             Task { @MainActor [weak self] in
                 self?.bounceProgress = fraction
@@ -1156,6 +1160,7 @@ final class MixerViewModel: ObservableObject {
                         masterVolume: masterVolumeToBounce,
                         masterEffects: masterEffectsToBounce,
                         tempoBPM: tempoToBounce,
+                        settings: settingsToBounce,
                         to: outputURL,
                         progress: progressUpdate
                     )
@@ -1174,7 +1179,7 @@ final class MixerViewModel: ObservableObject {
     }
 
     /// Renders every track as its own stem, through its mixer settings and the master.
-    func bounceStems() {
+    func bounceStems(settings: BounceSettings) {
         guard !isBouncing else { return }
 
         let tracksToRender = tracks.filter { audibleDuration(of: $0) > 0 }
@@ -1183,6 +1188,8 @@ final class MixerViewModel: ObservableObject {
             return
         }
 
+        bounceSettings = settings
+        BounceSettingsStorage.save(settings)
         isBouncing = true
         isStemBounce = true
         bounceProgress = 0
@@ -1193,14 +1200,18 @@ final class MixerViewModel: ObservableObject {
         let master = masterVolume
         let effects = masterEffects
         let tempo = tempoBPM
-        let session = sessionName
+        let baseName = settings.fileName
+        let settingsToBounce = settings
         let groupsToBounce = groups
 
         Task {
             do {
                 var lastURL: URL?
                 for (index, track) in tracksToRender.enumerated() {
-                    let stemURL = MixExportStorage.exportURL(name: "\(session)-\(track.name)")
+                    let stemURL = MixExportStorage.exportURL(
+                        name: "\(baseName)-\(track.name)",
+                        fileExtension: settings.format.fileExtension
+                    )
                     let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
                         Task { @MainActor [weak self] in
                             guard let self else { return }
@@ -1218,6 +1229,7 @@ final class MixerViewModel: ObservableObject {
                             masterVolume: master,
                             masterEffects: effects,
                             tempoBPM: tempo,
+                            settings: settingsToBounce,
                             to: stemURL,
                             progress: progressUpdate
                         )

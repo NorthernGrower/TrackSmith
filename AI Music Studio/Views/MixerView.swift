@@ -34,6 +34,7 @@ struct MixerView: View {
     @State private var activeSheet: StudioSheet?
     @State private var selectedEQTrackID: UUID?
     @State private var selectedPianoRollTrackID: UUID?
+    @State private var bounceMode: BounceSettingsView.Mode = .mix
 
     var body: some View {
         ZStack {
@@ -154,6 +155,23 @@ struct MixerView: View {
                 ChannelPresetsView(model: model, initialTrackID: nil)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .bounce:
+                BounceSettingsView(
+                    mode: bounceMode,
+                    sessionName: model.sessionName,
+                    duration: model.duration,
+                    trackCount: model.tracks.count,
+                    settings: model.bounceSettings
+                ) { settings in
+                    switch bounceMode {
+                    case .mix:
+                        model.bounceMix(settings: settings)
+                    case .stems:
+                        model.bounceStems(settings: settings)
+                    }
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
             case .pianoRoll:
                 if let selectedPianoRollTrackID {
                     PianoRollView(model: model, trackID: selectedPianoRollTrackID)
@@ -337,12 +355,14 @@ struct MixerView: View {
 
                 Menu {
                     Button {
-                        model.bounceMix()
+                        bounceMode = .mix
+                        activeSheet = .bounce
                     } label: {
                         Label("Bounce Mix", systemImage: "arrow.down.to.line")
                     }
                     Button {
-                        model.bounceStems()
+                        bounceMode = .stems
+                        activeSheet = .bounce
                     } label: {
                         Label("Bounce Stems", systemImage: "square.stack.3d.up")
                     }
@@ -531,6 +551,7 @@ private enum StudioSheet: String, Identifiable {
     case masterEffects
     case channelPresets
     case pianoRoll
+    case bounce
 
     var id: String { rawValue }
 }
