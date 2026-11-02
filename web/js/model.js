@@ -86,6 +86,7 @@ export function createTrack({ name, fileId = null, duration = 0, index = 0 }) {
     eq: defaultEQ(),
     comp: defaultCompressor(),
     automation: [],
+    panAutomation: [],
     clips: [],
     notes: [],
     frozen: { fileId: null, duration: 0 }
@@ -194,6 +195,27 @@ export function automationGain(track, time) {
   return clamp(points[points.length - 1].gain, 0, 1);
 }
 
+/// The value of a volume or pan automation lane at a moment in time.
+export function automationValue(points, time, key) {
+  const list = [...(points || [])].sort((a, b) => a.time - b.time);
+  if (!list.length) return null;
+
+  const first = list[0];
+  if (time <= first.time) return first[key];
+
+  for (let index = 1; index < list.length; index += 1) {
+    const left = list[index - 1];
+    const right = list[index];
+    if (time > right.time) continue;
+    const span = right.time - left.time;
+    const progress = clamp((time - left.time) / (span || 1), 0, 1);
+    const eased = progress * progress * (3 - 2 * progress);
+    return left[key] + (right[key] - left[key]) * eased;
+  }
+
+  return list[list.length - 1][key];
+}
+
 export function normalizeSession(session) {
   const normal = session || createSession();
   normal.id = normal.id || uid();
@@ -241,6 +263,7 @@ export function normalizeSession(session) {
     track.comp = track.comp || defaultCompressor();
     track.comp.bypassed = track.comp.bypassed !== false;
     track.automation = Array.isArray(track.automation) ? track.automation : [];
+    track.panAutomation = Array.isArray(track.panAutomation) ? track.panAutomation : [];
     track.clips = Array.isArray(track.clips) ? track.clips : [];
     track.notes = Array.isArray(track.notes) ? track.notes : [];
     track.frozen = track.frozen || { fileId: null, duration: 0 };

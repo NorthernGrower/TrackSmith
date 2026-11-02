@@ -35,6 +35,18 @@ struct VolumeAutomationPoint: Identifiable, Codable, Equatable {
     }
 }
 
+struct PanAutomationPoint: Identifiable, Codable, Equatable {
+    var id: UUID
+    var time: TimeInterval
+    var pan: Float
+
+    init(id: UUID = UUID(), time: TimeInterval, pan: Float) {
+        self.id = id
+        self.time = time
+        self.pan = pan
+    }
+}
+
 /// One layer of the session (a stem such as vocals, drums or bass).
 struct Track: Identifiable, Codable, Equatable {
     var id: UUID
@@ -51,6 +63,7 @@ struct Track: Identifiable, Codable, Equatable {
     var eqSettings: TrackEQSettings
     var compressorSettings: TrackCompressorSettings
     var volumeAutomationPoints: [VolumeAutomationPoint]
+    var panAutomationPoints: [PanAutomationPoint]
     var notes: [SynthNote]
     /// Rendered audio of this track while it is frozen.
     var frozenFileName: String?
@@ -69,6 +82,7 @@ struct Track: Identifiable, Codable, Equatable {
         eqSettings: TrackEQSettings = TrackEQSettings(),
         compressorSettings: TrackCompressorSettings = TrackCompressorSettings(),
         volumeAutomationPoints: [VolumeAutomationPoint] = [],
+        panAutomationPoints: [PanAutomationPoint] = [],
         notes: [SynthNote] = [],
         frozenFileName: String? = nil,
         frozenDuration: TimeInterval = 0
@@ -93,6 +107,7 @@ struct Track: Identifiable, Codable, Equatable {
         self.eqSettings = eqSettings
         self.compressorSettings = compressorSettings
         self.volumeAutomationPoints = volumeAutomationPoints
+        self.panAutomationPoints = panAutomationPoints
         self.notes = notes
         self.frozenFileName = frozenFileName
         self.frozenDuration = frozenDuration
@@ -111,6 +126,7 @@ struct Track: Identifiable, Codable, Equatable {
         case eqSettings
         case compressorSettings
         case volumeAutomationPoints
+        case panAutomationPoints
         case notes
         case frozenFileName
         case frozenDuration
@@ -147,6 +163,7 @@ struct Track: Identifiable, Codable, Equatable {
         eqSettings = try values.decodeIfPresent(TrackEQSettings.self, forKey: .eqSettings) ?? TrackEQSettings()
         compressorSettings = try values.decodeIfPresent(TrackCompressorSettings.self, forKey: .compressorSettings) ?? TrackCompressorSettings()
         volumeAutomationPoints = try values.decodeIfPresent([VolumeAutomationPoint].self, forKey: .volumeAutomationPoints) ?? []
+        panAutomationPoints = try values.decodeIfPresent([PanAutomationPoint].self, forKey: .panAutomationPoints) ?? []
         notes = try values.decodeIfPresent([SynthNote].self, forKey: .notes) ?? []
         frozenFileName = try values.decodeIfPresent(String.self, forKey: .frozenFileName)
         frozenDuration = try values.decodeIfPresent(TimeInterval.self, forKey: .frozenDuration) ?? 0
@@ -199,6 +216,28 @@ struct Track: Identifiable, Codable, Equatable {
         }
 
         return min(1, max(0, points[points.count - 1].gain))
+    }
+
+    /// The track's pan at a moment in time, following its pan automation when it has any.
+    func panAutomationValue(at time: TimeInterval) -> Float {
+        let points = panAutomationPoints.sorted { $0.time < $1.time }
+        guard let first = points.first else { return pan }
+        if time <= first.time { return min(1, max(-1, first.pan)) }
+
+        for index in 1..<points.count {
+            let left = points[index - 1]
+            let right = points[index]
+            guard time <= right.time else { continue }
+            let span = right.time - left.time
+            guard span > 0 else { return min(1, max(-1, right.pan)) }
+            let progress = Float(min(1, max(0, (time - left.time) / span)))
+            let eased = progress * progress * (3 - 2 * progress)
+            let startPan = min(1, max(-1, left.pan))
+            let endPan = min(1, max(-1, right.pan))
+            return startPan + (endPan - startPan) * eased
+        }
+
+        return min(1, max(-1, points[points.count - 1].pan))
     }
 }
 

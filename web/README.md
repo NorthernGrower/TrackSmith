@@ -1,8 +1,9 @@
 # AI Music Studio — Web
 
 A zero-build web version of the studio. It shares the app's dark, amber-accented
-look and the same session model: tracks, clips, mixer, volume automation, piano
-roll, looping, metronome and count-in, sessions, bounce and track freeze.
+look and the same session model: tracks, clips, mixer, volume and pan
+automation, piano roll, looping, metronome and count-in, sessions, bounce and
+track freeze.
 
 Everything runs locally in the browser with the Web Audio API. Sessions are kept
 in `localStorage`, audio files live in IndexedDB, and nothing is uploaded.
@@ -20,8 +21,8 @@ build from GitHub Actions.
 ## What it does
 
 - Import audio stems or add a blank track, with waveform clips on a shared ruler.
-- Track controls: mute, solo, fader, meter, freeze, equalizer, piano roll, volume
-  automation.
+- Track controls: mute, solo, fader, meter, freeze, equalizer, piano roll, and
+  volume or pan automation lanes.
 - Transport: play/pause/stop, timecode, tempo, loop range and loop playback,
   metronome click with level, and a one-bar count-in.
 - Named song sections marked on the ruler: add, drag, rename, delete, and tap

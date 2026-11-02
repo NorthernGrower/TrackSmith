@@ -16,6 +16,7 @@ final class MixerViewModel: ObservableObject {
         let isMuted: Bool
         let isSoloed: Bool
         let volumeAutomationPoints: [VolumeAutomationPoint]
+        let panAutomationPoints: [PanAutomationPoint]
         let notes: [SynthNote]
     }
 
@@ -332,6 +333,53 @@ final class MixerViewModel: ObservableObject {
         commitSession()
     }
 
+    // MARK: - Pan automation
+
+    func addPanAutomationPoint(
+        trackID: UUID,
+        at time: TimeInterval,
+        pan: Float,
+        snapInterval: TimeInterval,
+        maximumTime: TimeInterval
+    ) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        beginUndoableEdit()
+        let snapped = min(maximumTime, snappedTime(time, interval: snapInterval))
+        tracks[index].panAutomationPoints.append(
+            PanAutomationPoint(time: snapped, pan: min(1, max(-1, pan)))
+        )
+        tracks[index].panAutomationPoints.sort { $0.time < $1.time }
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    func movePanAutomationPoint(
+        trackID: UUID,
+        pointID: UUID,
+        to time: TimeInterval,
+        pan: Float,
+        snapInterval: TimeInterval,
+        maximumTime: TimeInterval
+    ) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let pointIndex = tracks[trackIndex].panAutomationPoints.firstIndex(where: { $0.id == pointID }) else { return }
+        beginUndoableEdit()
+        let snapped = min(maximumTime, snappedTime(time, interval: snapInterval))
+        tracks[trackIndex].panAutomationPoints[pointIndex].time = snapped
+        tracks[trackIndex].panAutomationPoints[pointIndex].pan = min(1, max(-1, pan))
+        tracks[trackIndex].panAutomationPoints.sort { $0.time < $1.time }
+        engine.updateMix(tracks: tracks)
+    }
+
+    func deletePanAutomationPoint(trackID: UUID, pointID: UUID) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let pointIndex = tracks[trackIndex].panAutomationPoints.firstIndex(where: { $0.id == pointID }) else { return }
+        beginUndoableEdit()
+        tracks[trackIndex].panAutomationPoints.remove(at: pointIndex)
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
     // MARK: - Piano roll notes
 
     func addSynthNote(
@@ -615,6 +663,7 @@ final class MixerViewModel: ObservableObject {
                 isMuted: $0.isMuted,
                 isSoloed: $0.isSoloed,
                 volumeAutomationPoints: $0.volumeAutomationPoints,
+                panAutomationPoints: $0.panAutomationPoints,
                 notes: $0.notes
             )
         }
@@ -630,6 +679,7 @@ final class MixerViewModel: ObservableObject {
             tracks[index].isMuted = state.isMuted
             tracks[index].isSoloed = state.isSoloed
             tracks[index].volumeAutomationPoints = state.volumeAutomationPoints
+            tracks[index].panAutomationPoints = state.panAutomationPoints
             tracks[index].notes = state.notes
         }
 

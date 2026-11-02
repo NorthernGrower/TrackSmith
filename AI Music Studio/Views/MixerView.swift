@@ -11,6 +11,7 @@ extension Color {
     static let studioPanel = Color(white: 0.115)
     static let studioPanelHighlight = Color(white: 0.22)
     static let studioAccent = Color(red: 0.96, green: 0.62, blue: 0.16)
+    static let studioPanAutomation = Color(red: 0.36, green: 0.56, blue: 0.93)
 
     /// One restrained color per track, cycling for larger sessions.
     static func studioTrackColor(for index: Int) -> Color {

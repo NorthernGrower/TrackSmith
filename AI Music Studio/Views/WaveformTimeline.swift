@@ -25,6 +25,7 @@ struct WaveformTimeline: View {
     @State private var renameSectionID: UUID?
     @State private var renameDraft = ""
     @State private var showingRename = false
+    @State private var automationParameter = AutomationParameter.volume
 
     private let gutterWidth: CGFloat = 122
     private let rowHeight: CGFloat = 92
@@ -171,20 +172,28 @@ struct WaveformTimeline: View {
 
     private func automationEditToolbar(for track: Track) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "chart.xyaxis.line")
-                .foregroundStyle(Color.studioAccent)
+            Image(systemName: automationParameter == .volume ? "chart.xyaxis.line" : "arrow.left.and.right")
+                .foregroundStyle(automationColor)
+
             VStack(alignment: .leading, spacing: 2) {
-                Text("VOLUME · \(track.name.uppercased())")
+                Text("\(automationParameter.title) · \(track.name.uppercased())")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .lineLimit(1)
                 Text("Tap to add · drag to edit · select a point to delete")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
             }
+
             Spacer(minLength: 4)
+
+            HStack(spacing: 4) {
+                automationParameterButton(.volume)
+                automationParameterButton(.pan)
+            }
+
             if let pointID = selectedAutomationPointID {
                 Button(role: .destructive) {
-                    model.deleteVolumeAutomationPoint(trackID: track.id, pointID: pointID)
+                    deleteAutomationPoint(track: track, pointID: pointID)
                     selectedAutomationPointID = nil
                 } label: {
                     Image(systemName: "trash")
@@ -194,6 +203,7 @@ struct WaveformTimeline: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Delete selected automation point")
             }
+
             Button("Done") {
                 automationTrackID = nil
                 selectedAutomationPointID = nil
@@ -207,6 +217,122 @@ struct WaveformTimeline: View {
         .background(Color.studioPanel)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+        }
+    }
+
+    private func automationParameterButton(_ parameter: AutomationParameter) -> some View {
+        Button {
+            automationParameter = parameter
+            selectedAutomationPointID = nil
+        } label: {
+            Text(parameter.shortTitle)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(automationParameter == parameter ? Color.black : Color.white.opacity(0.7))
+                .padding(.horizontal, 8)
+                .frame(height: 26)
+                .background(
+                    automationParameter == parameter ? automationColor : Color.studioPanelHighlight,
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(parameter.accessibilityTitle)
+        .accessibilityAddTraits(automationParameter == parameter ? .isSelected : [])
+    }
+
+    private var automationColor: Color {
+        automationParameter == .volume ? Color.studioAccent : Color.studioPanAutomation
+    }
+
+    private var panAutomationColor: Color {
+        Color.studioPanAutomation
+    }
+
+    private func automationHandles(for track: Track, parameter: AutomationParameter) -> [AutomationHandle] {
+        switch parameter {
+        case .volume:
+            return track.volumeAutomationPoints.map {
+                AutomationHandle(id: $0.id, time: $0.time, value: Double($0.gain))
+            }
+        case .pan:
+            return track.panAutomationPoints.map {
+                AutomationHandle(id: $0.id, time: $0.time, value: Double($0.pan))
+            }
+        }
+    }
+
+    private func automationUnit(for parameter: AutomationParameter, value: Double) -> Double {
+        switch parameter {
+        case .volume:
+            return min(1, max(0, value))
+        case .pan:
+            return min(1, max(0, (value + 1) / 2))
+        }
+    }
+
+    private func automationValue(for parameter: AutomationParameter, unit: Double) -> Double {
+        switch parameter {
+        case .volume:
+            return min(1, max(0, unit))
+        case .pan:
+            return min(1, max(-1, unit * 2 - 1))
+        }
+    }
+
+    private func maximumAutomationTime() -> TimeInterval {
+        Double(contentWidth / max(zoom, 1))
+    }
+
+    private func addAutomationPoint(track: Track, time: TimeInterval, value: Double) {
+        switch automationParameter {
+        case .volume:
+            model.addVolumeAutomationPoint(
+                trackID: track.id,
+                at: time,
+                gain: Float(value),
+                snapInterval: snapInterval,
+                maximumTime: maximumAutomationTime()
+            )
+        case .pan:
+            model.addPanAutomationPoint(
+                trackID: track.id,
+                at: time,
+                pan: Float(value),
+                snapInterval: snapInterval,
+                maximumTime: maximumAutomationTime()
+            )
+        }
+    }
+
+    private func moveAutomationPoint(track: Track, pointID: UUID, time: TimeInterval, value: Double) {
+        switch automationParameter {
+        case .volume:
+            model.moveVolumeAutomationPoint(
+                trackID: track.id,
+                pointID: pointID,
+                to: time,
+                gain: Float(value),
+                snapInterval: snapInterval,
+                maximumTime: maximumAutomationTime()
+            )
+        case .pan:
+            model.movePanAutomationPoint(
+                trackID: track.id,
+                pointID: pointID,
+                to: time,
+                pan: Float(value),
+                snapInterval: snapInterval,
+                maximumTime: maximumAutomationTime()
+            )
+        }
+    }
+
+    private func deleteAutomationPoint(track: Track, pointID: UUID) {
+        switch automationParameter {
+        case .volume:
+            model.deleteVolumeAutomationPoint(trackID: track.id, pointID: pointID)
+        case .pan:
+            model.deletePanAutomationPoint(trackID: track.id, pointID: pointID)
         }
     }
 
@@ -647,38 +773,59 @@ struct WaveformTimeline: View {
             }
 
             if automationTrackID == track.id {
-                VolumeAutomationEditor(
-                    points: track.volumeAutomationPoints,
+                let activeParameter = automationParameter
+                let otherParameter: AutomationParameter = activeParameter == .volume ? .pan : .volume
+                let otherHandles = automationHandles(for: track, parameter: otherParameter)
+
+                AutomationLaneEditor(
+                    handles: automationHandles(for: track, parameter: activeParameter),
                     zoom: zoom,
                     selectedPointID: selectedAutomationPointID,
-                    color: .studioAccent,
+                    color: automationColor,
+                    unitForValue: { automationUnit(for: activeParameter, value: $0) },
+                    valueForUnit: { automationValue(for: activeParameter, unit: $0) },
                     onSelect: { selectedAutomationPointID = $0 },
-                    onAdd: { time, gain in
-                        model.addVolumeAutomationPoint(
-                            trackID: track.id,
-                            at: time,
-                            gain: gain,
-                            snapInterval: snapInterval,
-                            maximumTime: Double(contentWidth / max(zoom, 1))
-                        )
+                    onAdd: { time, value in
+                        addAutomationPoint(track: track, time: time, value: value)
                     },
-                    onMove: { pointID, time, gain in
-                        model.moveVolumeAutomationPoint(
-                            trackID: track.id,
-                            pointID: pointID,
-                            to: time,
-                            gain: gain,
-                            snapInterval: snapInterval,
-                            maximumTime: Double(contentWidth / max(zoom, 1))
-                        )
+                    onMove: { pointID, time, value in
+                        moveAutomationPoint(track: track, pointID: pointID, time: time, value: value)
                     },
                     onCommit: { model.commitSession() }
                 )
                 .frame(width: contentWidth, height: rowHeight)
-            } else if !track.volumeAutomationPoints.isEmpty {
-                VolumeAutomationCurve(points: track.volumeAutomationPoints, zoom: zoom, color: .studioAccent)
-                    .frame(width: contentWidth, height: rowHeight)
-                    .allowsHitTesting(false)
+                .overlay {
+                    if !otherHandles.isEmpty {
+                        AutomationCurveView(
+                            handles: otherHandles,
+                            zoom: zoom,
+                            color: Color.white.opacity(0.22),
+                            unitForValue: { automationUnit(for: otherParameter, value: $0) }
+                        )
+                        .allowsHitTesting(false)
+                    }
+                }
+            } else if !track.volumeAutomationPoints.isEmpty || !track.panAutomationPoints.isEmpty {
+                ZStack {
+                    if !track.volumeAutomationPoints.isEmpty {
+                        AutomationCurveView(
+                            handles: automationHandles(for: track, parameter: .volume),
+                            zoom: zoom,
+                            color: .studioAccent,
+                            unitForValue: { automationUnit(for: .volume, value: $0) }
+                        )
+                    }
+                    if !track.panAutomationPoints.isEmpty {
+                        AutomationCurveView(
+                            handles: automationHandles(for: track, parameter: .pan),
+                            zoom: zoom,
+                            color: panAutomationColor,
+                            unitForValue: { automationUnit(for: .pan, value: $0) }
+                        )
+                    }
+                }
+                .frame(width: contentWidth, height: rowHeight)
+                .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .bottom) {
@@ -1177,5 +1324,199 @@ private struct VolumeAutomationEditor: View {
     private func y(for gain: Float, height: CGFloat) -> CGFloat {
         let usableHeight = max(1, height - verticalInset * 2)
         return verticalInset + (1 - CGFloat(min(1, max(0, gain)))) * usableHeight
+    }
+}
+
+
+// MARK: - Automation lanes
+
+enum AutomationParameter: String {
+    case volume
+    case pan
+
+    var title: String {
+        self == .volume ? "VOLUME" : "PAN"
+    }
+
+    var shortTitle: String {
+        self == .volume ? "VOL" : "PAN"
+    }
+
+    var accessibilityTitle: String {
+        self == .volume ? "Volume automation" : "Pan automation"
+    }
+}
+
+private struct AutomationHandle: Identifiable {
+    let id: UUID
+    var time: TimeInterval
+    var value: Double
+}
+
+/// Draws an automation curve from a set of handles.
+private struct AutomationCurveView: View {
+    let handles: [AutomationHandle]
+    let zoom: CGFloat
+    let color: Color
+    let unitForValue: (Double) -> Double
+
+    private let verticalInset: CGFloat = 12
+
+    var body: some View {
+        Canvas { context, size in
+            let points = handles.sorted { $0.time < $1.time }
+            guard let first = points.first, size.width > 0 else { return }
+
+            let usableHeight = max(1, size.height - verticalInset * 2)
+            let yFor: (Double) -> CGFloat = { value in
+                let unit = min(1, max(0, unitForValue(value)))
+                return verticalInset + (1 - CGFloat(unit)) * usableHeight
+            }
+
+            var path = Path()
+            let firstY = yFor(first.value)
+            path.move(to: CGPoint(x: 0, y: firstY))
+            let firstX = CGFloat(first.time) * zoom
+            if firstX > 0 {
+                path.addLine(to: CGPoint(x: min(size.width, firstX), y: firstY))
+            }
+
+            if points.count > 1 {
+                for index in 1..<points.count {
+                    let left = points[index - 1]
+                    let right = points[index]
+                    let segmentCount = 16
+                    for step in 1...segmentCount {
+                        let progress = Double(step) / Double(segmentCount)
+                        let eased = progress * progress * (3 - 2 * progress)
+                        let value = left.value + (right.value - left.value) * eased
+                        let time = left.time + (right.time - left.time) * progress
+                        path.addLine(to: CGPoint(
+                            x: min(size.width, CGFloat(time) * zoom),
+                            y: yFor(value)
+                        ))
+                    }
+                }
+            }
+
+            if let last = points.last {
+                let lastX = CGFloat(last.time) * zoom
+                if lastX < size.width {
+                    path.addLine(to: CGPoint(x: size.width, y: yFor(last.value)))
+                }
+            }
+
+            context.stroke(path, with: .color(color.opacity(0.95)), lineWidth: 2)
+
+            for point in points {
+                let pointX = min(max(0, CGFloat(point.time) * zoom), size.width)
+                let pointY = yFor(point.value)
+                context.fill(
+                    Path(ellipseIn: CGRect(x: pointX - 3, y: pointY - 3, width: 6, height: 6)),
+                    with: .color(color)
+                )
+            }
+        }
+    }
+}
+
+/// Editable automation lane: tap to add points, drag to reshape, select to delete.
+private struct AutomationLaneEditor: View {
+    let handles: [AutomationHandle]
+    let zoom: CGFloat
+    let selectedPointID: UUID?
+    let color: Color
+    let unitForValue: (Double) -> Double
+    let valueForUnit: (Double) -> Double
+    var onSelect: (UUID) -> Void
+    var onAdd: (TimeInterval, Double) -> Void
+    var onMove: (UUID, TimeInterval, Double) -> Void
+    var onCommit: () -> Void
+
+    @State private var dragOrigins: [UUID: AutomationHandle] = [:]
+    private let verticalInset: CGFloat = 12
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(Color.clear)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        SpatialTapGesture()
+                            .onEnded { value in
+                                let x = min(max(0, value.location.x), geometry.size.width)
+                                onAdd(
+                                    Double(x / max(zoom, 1)),
+                                    valueAt(y: value.location.y, height: geometry.size.height)
+                                )
+                            }
+                    )
+
+                AutomationCurveView(
+                    handles: handles,
+                    zoom: zoom,
+                    color: color,
+                    unitForValue: unitForValue
+                )
+                .allowsHitTesting(false)
+
+                ForEach(handles) { handle in
+                    Circle()
+                        .fill(Color.studioPanel)
+                        .frame(width: 15, height: 15)
+                        .overlay(Circle().stroke(color, lineWidth: 2))
+                        .position(
+                            x: min(max(0, CGFloat(handle.time) * zoom), geometry.size.width),
+                            y: y(for: handle.value, height: geometry.size.height)
+                        )
+                        .onTapGesture { onSelect(handle.id) }
+                        .gesture(
+                            DragGesture(minimumDistance: 2)
+                                .onChanged { value in
+                                    onSelect(handle.id)
+                                    if dragOrigins[handle.id] == nil {
+                                        dragOrigins[handle.id] = handle
+                                    }
+                                    let origin = dragOrigins[handle.id] ?? handle
+                                    update(handle: handle, origin: origin, translation: value.translation, size: geometry.size)
+                                }
+                                .onEnded { value in
+                                    let origin = dragOrigins.removeValue(forKey: handle.id) ?? handle
+                                    update(handle: handle, origin: origin, translation: value.translation, size: geometry.size)
+                                    onCommit()
+                                }
+                        )
+                        .accessibilityLabel("Automation point, \(Int(unitForValue(handle.value) * 100)) percent")
+                        .accessibilityHint("Tap to select or drag to adjust.")
+                        .accessibilityAddTraits(selectedPointID == handle.id ? .isSelected : [])
+                }
+            }
+        }
+    }
+
+    private func update(
+        handle: AutomationHandle,
+        origin: AutomationHandle,
+        translation: CGSize,
+        size: CGSize
+    ) {
+        let maximumTime = Double(size.width / max(zoom, 1))
+        let time = min(maximumTime, max(0, origin.time + Double(translation.width / max(zoom, 1))))
+        let usableHeight = max(1, size.height - verticalInset * 2)
+        let unit = unitForValue(origin.value) - Double(translation.height / usableHeight)
+        onMove(handle.id, time, valueForUnit(min(1, max(0, unit))))
+    }
+
+    private func valueAt(y: CGFloat, height: CGFloat) -> Double {
+        let usableHeight = max(1, height - verticalInset * 2)
+        let normalized = min(1, max(0, (y - verticalInset) / usableHeight))
+        return valueForUnit(1 - Double(normalized))
+    }
+
+    private func y(for value: Double, height: CGFloat) -> CGFloat {
+        let usableHeight = max(1, height - verticalInset * 2)
+        let unit = min(1, max(0, unitForValue(value)))
+        return verticalInset + (1 - CGFloat(unit)) * usableHeight
     }
 }

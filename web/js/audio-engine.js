@@ -193,7 +193,11 @@ export class StudioEngine {
       if (!nodes) continue;
       const audible = !track.muted && (!anySolo || track.soloed);
       nodes.input.gain.value = audible ? track.volume * model.automationGain(track, position) : 0;
-      if (nodes.pan) nodes.pan.pan.value = model.clamp(track.pan ?? 0, -1, 1);
+      if (nodes.pan) {
+        const automatedPan = model.automationValue(track.panAutomation, position, 'pan');
+        const pan = automatedPan === null ? (track.pan ?? 0) : automatedPan;
+        nodes.pan.pan.value = model.clamp(pan, -1, 1);
+      }
     }
 
     this.masterGain.gain.value = this.session.masterVolume;
@@ -544,7 +548,7 @@ export class StudioEngine {
     let tail = input;
     if (includeMixer && typeof ctx.createStereoPanner === 'function') {
       const panner = ctx.createStereoPanner();
-      panner.pan.value = model.clamp(track.pan ?? 0, -1, 1);
+      scheduleAutomatedPan(panner.pan, track, duration);
       tail.connect(panner);
       tail = panner;
     }
@@ -581,6 +585,18 @@ export class StudioEngine {
     for (const note of notes) {
       this.scheduleNote(ctx, input, note, Math.max(0, note.start));
     }
+  }
+}
+
+function scheduleAutomatedPan(param, track, duration) {
+  const panAt = (time) => {
+    const automated = model.automationValue(track.panAutomation, time, 'pan');
+    return model.clamp(automated === null ? (track.pan ?? 0) : automated, -1, 1);
+  };
+
+  param.setValueAtTime(panAt(0), 0);
+  for (let time = 0.05; time <= duration; time += 0.05) {
+    param.linearRampToValueAtTime(panAt(time), time);
   }
 }
 

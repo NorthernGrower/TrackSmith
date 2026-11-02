@@ -76,7 +76,7 @@ enum MixBounceRenderer {
             engine.connect(compressor, to: masterBus, format: outputFormat)
             let audible = !track.isMuted && (!anySolo || track.isSoloed)
             trackMixer.outputVolume = audible ? track.volume * track.automationGain(at: 0) : 0
-            trackMixer.pan = min(1, max(-1, track.pan))
+            trackMixer.pan = min(1, max(-1, track.panAutomationValue(at: 0)))
             trackMixers[track.id] = trackMixer
             var compressorSettings = track.compressorSettings
             if track.isFrozen {
@@ -175,6 +175,7 @@ enum MixBounceRenderer {
                 let audible = !track.isMuted && (!anySolo || track.isSoloed)
                 let automatedVolume = track.volume * track.automationGain(at: automationTime)
                 trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
+                trackMixers[track.id]?.pan = min(1, max(-1, track.panAutomationValue(at: automationTime)))
             }
             let status = try engine.renderOffline(framesToRender, to: buffer)
 

@@ -19,6 +19,7 @@ const state = {
   playhead: 0,
   selectedClip: null,
   automationTrack: null,
+  automationParam: 'volume',
   selectedAutomationPoint: null,
   rollTrackId: null,
   selectedNote: null,
@@ -359,7 +360,8 @@ function renderHeads() {
           <span class="track-name">${escapeHtml(track.name)}</span>
           <button class="icon-btn" data-act="eq" data-track="${track.id}" title="Equalizer">≡</button>
           <button class="icon-btn ${frozen ? 'off' : ''}" data-act="roll" data-track="${track.id}" title="Piano roll" ${frozen ? 'disabled' : ''}>♫</button>
-          <button class="icon-btn ${state.automationTrack === track.id ? '' : 'off'}" data-act="automation" data-track="${track.id}" title="Volume automation">⋀</button>
+          <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'volume' ? '' : 'off'}" data-act="automation" data-track="${track.id}" title="Volume automation">⋀</button>
+          <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'pan' ? '' : 'off'}" data-act="automation-pan" data-track="${track.id}" title="Pan automation">⇄</button>
         </div>
         <div class="track-head-row">
           <div style="display:flex;flex-direction:column;gap:4px">
@@ -446,9 +448,12 @@ function renderLanes(contentWidth, pps, beatPx) {
     }).join('');
 
     const automation = state.automationTrack === track.id ? '<canvas class="automation-canvas"></canvas>' : '';
-    const points = state.automationTrack === track.id
-      ? [...track.automation].sort((a, b) => a.time - b.time).map((point) => (
-        `<div class="auto-point ${state.selectedAutomationPoint === point.id ? 'selected' : ''}" data-act="auto-point" data-point="${point.id}" data-track="${track.id}" style="left:${point.time * pps}px;top:${(1 - model.clamp(point.gain, 0, 1)) * ROW_HEIGHT}px"></div>`
+    const activePoints = state.automationTrack === track.id
+      ? activeAutomationPoints(track)
+      : [];
+    const points = activePoints.length
+      ? [...activePoints].sort((a, b) => a.time - b.time).map((point) => (
+        `<div class="auto-point ${state.selectedAutomationPoint === point.id ? 'selected' : ''}" data-act="auto-point" data-point="${point.id}" data-track="${track.id}" style="left:${point.time * pps}px;top:${automationY(state.automationParam, point[automationValueKey()])}px"></div>`
       )).join('')
       : '';
 
@@ -464,7 +469,7 @@ function renderLanes(contentWidth, pps, beatPx) {
   if (state.automationTrack) {
     const track = trackById(state.automationTrack);
     const canvas = el.lanes.querySelector('.automation-canvas');
-    if (track && canvas) drawAutomation(canvas, track, contentWidth, pps);
+    if (track && canvas) drawAutomation(canvas, track, contentWidth, pps, state.automationParam);
   }
 }
 
@@ -489,7 +494,7 @@ function drawClipWave(canvas, peaks) {
   ctx.stroke();
 }
 
-function drawAutomation(canvas, track, contentWidth, pps) {
+function drawAutomation(canvas, track, contentWidth, pps, param) {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.max(1, Math.floor(contentWidth * dpr));
   canvas.height = Math.floor(ROW_HEIGHT * dpr);
@@ -497,34 +502,60 @@ function drawAutomation(canvas, track, contentWidth, pps) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, contentWidth, ROW_HEIGHT);
 
-  const points = [...track.automation].sort((a, b) => a.time - b.time);
-  if (!points.length) return;
-
-  const yFor = (gain) => (1 - model.clamp(gain, 0, 1)) * ROW_HEIGHT;
-
-  ctx.strokeStyle = 'rgba(245, 158, 42, 0.95)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  const firstX = points[0].time * pps;
-  ctx.moveTo(0, yFor(points[0].gain));
-  ctx.lineTo(firstX, yFor(points[0].gain));
-
-  for (let i = 1; i < points.length; i += 1) {
-    const left = points[i - 1];
-    const right = points[i];
-    const steps = 16;
-    for (let step = 1; step <= steps; step += 1) {
-      const progress = step / steps;
-      const eased = progress * progress * (3 - 2 * progress);
-      const gain = left.gain + (right.gain - left.gain) * eased;
-      const time = left.time + (right.time - left.time) * progress;
-      ctx.lineTo(time * pps, yFor(gain));
-    }
+  if (param === 'pan') {
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, ROW_HEIGHT / 2);
+    ctx.lineTo(contentWidth, ROW_HEIGHT / 2);
+    ctx.stroke();
   }
 
-  const last = points[points.length - 1];
-  ctx.lineTo(contentWidth, yFor(last.gain));
-  ctx.stroke();
+  const drawCurve = (points, key, curveParam, stroke, lineWidth) => {
+    if (!points || !points.length) return;
+    const ordered = [...points].sort((a, b) => a.time - b.time);
+    const yFor = (value) => automationY(curveParam, value);
+
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    const firstX = ordered[0].time * pps;
+    ctx.moveTo(0, yFor(ordered[0][key]));
+    ctx.lineTo(firstX, yFor(ordered[0][key]));
+
+    for (let i = 1; i < ordered.length; i += 1) {
+      const left = ordered[i - 1];
+      const right = ordered[i];
+      const steps = 16;
+      for (let step = 1; step <= steps; step += 1) {
+        const progress = step / steps;
+        const eased = progress * progress * (3 - 2 * progress);
+        const value = left[key] + (right[key] - left[key]) * eased;
+        const time = left.time + (right.time - left.time) * progress;
+        ctx.lineTo(time * pps, yFor(value));
+      }
+    }
+
+    ctx.lineTo(contentWidth, yFor(ordered[ordered.length - 1][key]));
+    ctx.stroke();
+
+    if (lineWidth > 1.5) {
+      ctx.fillStyle = stroke;
+      ordered.forEach((point) => {
+        ctx.beginPath();
+        ctx.arc(point.time * pps, yFor(point[key]), 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+  };
+
+  if (param === 'pan') {
+    drawCurve(track.automation, 'gain', 'volume', 'rgba(255,255,255,0.22)', 1.5);
+    drawCurve(track.panAutomation, 'pan', 'pan', 'rgba(92,143,237,0.95)', 2);
+  } else {
+    drawCurve(track.panAutomation, 'pan', 'pan', 'rgba(255,255,255,0.22)', 1.5);
+    drawCurve(track.automation, 'gain', 'volume', 'rgba(245,158,42,0.95)', 2);
+  }
 }
 
 function renderLoopStrip(contentWidth, pps) {
@@ -708,8 +739,13 @@ function toggleSolo(trackId) {
   render();
 }
 
-function toggleAutomation(trackId) {
-  state.automationTrack = state.automationTrack === trackId ? null : trackId;
+function toggleAutomation(trackId, param = 'volume') {
+  if (state.automationTrack === trackId && state.automationParam === param) {
+    state.automationTrack = null;
+  } else {
+    state.automationTrack = trackId;
+    state.automationParam = param;
+  }
   state.selectedAutomationPoint = null;
   renderTimeline();
 }
@@ -1007,9 +1043,34 @@ function setLoopEnd(time) {
 
 // ---------- Automation ----------
 
-function automationGainAt(laneEl, clientY) {
+function automationUnit(param, value) {
+  return param === 'pan'
+    ? model.clamp((value + 1) / 2, 0, 1)
+    : model.clamp(value, 0, 1);
+}
+
+function automationValueFromUnit(param, unit) {
+  return param === 'pan'
+    ? model.clamp(unit * 2 - 1, -1, 1)
+    : model.clamp(unit, 0, 1);
+}
+
+function automationValueAt(laneEl, clientY, param) {
   const rect = laneEl.getBoundingClientRect();
-  return model.clamp(1 - (clientY - rect.top) / ROW_HEIGHT, 0, 1);
+  const unit = model.clamp(1 - (clientY - rect.top) / ROW_HEIGHT, 0, 1);
+  return automationValueFromUnit(param, unit);
+}
+
+function automationY(param, value) {
+  return (1 - automationUnit(param, value)) * ROW_HEIGHT;
+}
+
+function activeAutomationPoints(track) {
+  return state.automationParam === 'pan' ? (track.panAutomation || []) : (track.automation || []);
+}
+
+function automationValueKey() {
+  return state.automationParam === 'pan' ? 'pan' : 'gain';
 }
 
 function automationTimeAt(laneEl, clientX) {
@@ -2075,6 +2136,7 @@ function bindEvents() {
       case 'eq': openEQ(trackId); break;
       case 'roll': openRoll(trackId); break;
       case 'automation': toggleAutomation(trackId); break;
+      case 'automation-pan': toggleAutomation(trackId, 'pan'); break;
       default: break;
     }
   });
@@ -2101,7 +2163,9 @@ function bindEvents() {
 
     const pointEl = event.target.closest('.auto-point');
     if (pointEl) {
-      const point = track.automation.find((item) => item.id === pointEl.dataset.point);
+      const param = state.automationParam;
+      const key = automationValueKey();
+      const point = activeAutomationPoints(track).find((item) => item.id === pointEl.dataset.point);
       if (!point) return;
       event.preventDefault();
       state.selectedAutomationPoint = point.id;
@@ -2113,13 +2177,15 @@ function bindEvents() {
         const dx = moveEvent.clientX - startX;
         const dy = moveEvent.clientY - startY;
         point.time = snapTime(origin.time + dx / state.zoom);
-        point.gain = model.clamp(origin.gain - dy / ROW_HEIGHT, 0, 1);
+        const unit = automationUnit(param, origin[key]) - dy / ROW_HEIGHT;
+        point[key] = automationValueFromUnit(param, model.clamp(unit, 0, 1));
         pointEl.style.left = `${point.time * state.zoom}px`;
-        pointEl.style.top = `${(1 - point.gain) * ROW_HEIGHT}px`;
+        pointEl.style.top = `${automationY(param, point[key])}px`;
         const canvas = lane.querySelector('.automation-canvas');
-        if (canvas) drawAutomation(canvas, track, Number(el.arrContent.style.width.replace('px', '')), state.zoom);
+        if (canvas) drawAutomation(canvas, track, Number(el.arrContent.style.width.replace('px', '')), state.zoom, param);
       }, () => {
-        track.automation.sort((a, b) => a.time - b.time);
+        track.automation = [...(track.automation || [])].sort((a, b) => a.time - b.time);
+        track.panAutomation = [...(track.panAutomation || [])].sort((a, b) => a.time - b.time);
         persist();
         renderTimeline();
       });
@@ -2136,11 +2202,15 @@ function bindEvents() {
           const movement = Math.hypot(upEvent.clientX - startX, upEvent.clientY - startY);
           if (movement > 6) return;
           const time = automationTimeAt(lane, upEvent.clientX);
-          const gain = automationGainAt(lane, upEvent.clientY);
+          const param = state.automationParam;
+          const key = automationValueKey();
+          const value = automationValueAt(lane, upEvent.clientY, param);
           snapshot();
-          const point = { id: model.uid(), time, gain };
-          track.automation.push(point);
-          track.automation.sort((a, b) => a.time - b.time);
+          const point = { id: model.uid(), time };
+          point[key] = value;
+          const list = activeAutomationPoints(track);
+          list.push(point);
+          list.sort((a, b) => a.time - b.time);
           state.selectedAutomationPoint = point.id;
           persist();
           renderTimeline();
@@ -2209,7 +2279,12 @@ function bindEvents() {
     const track = trackById(pointEl.dataset.track);
     if (!track) return;
     snapshot();
-    track.automation = track.automation.filter((point) => point.id !== pointEl.dataset.point);
+    const pointId = pointEl.dataset.point;
+    if (state.automationParam === 'pan') {
+      track.panAutomation = (track.panAutomation || []).filter((point) => point.id !== pointId);
+    } else {
+      track.automation = (track.automation || []).filter((point) => point.id !== pointId);
+    }
     state.selectedAutomationPoint = null;
     persist();
     renderTimeline();

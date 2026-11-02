@@ -318,7 +318,10 @@ final class MixerEngine {
             let audible = !track.isMuted && (!anySolo || track.isSoloed)
             let automatedVolume = track.volume * track.automationGain(at: automationTime)
             trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
-            trackMixers[track.id]?.pan = min(1, max(-1, track.pan))
+            let automatedPan = track.panAutomationPoints.isEmpty
+                ? track.pan
+                : track.panAutomationValue(at: automationTime)
+            trackMixers[track.id]?.pan = min(1, max(-1, automatedPan))
         }
     }
 
