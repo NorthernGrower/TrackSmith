@@ -40,6 +40,7 @@ const el = {
   undoBtn: document.getElementById('undoBtn'),
   redoBtn: document.getElementById('redoBtn'),
   mixerBtn: document.getElementById('mixerBtn'),
+  fxBtn: document.getElementById('fxBtn'),
   sessionsBtn: document.getElementById('sessionsBtn'),
   addTrackBtn: document.getElementById('addTrackBtn'),
   blankTrackBtn: document.getElementById('blankTrackBtn'),
@@ -1419,6 +1420,122 @@ function openEQ(trackId) {
   }
 }
 
+// ---------- Master effects ----------
+
+function delayBeatLabel(beats) {
+  const choices = [0.25, 0.5, 0.75, 1, 1.5, 2];
+  const closest = choices.reduce((best, value) => (
+    Math.abs(value - beats) < Math.abs(best - beats) ? value : best
+  ), choices[0]);
+  return { 0.25: '1/16', 0.5: '1/8', 0.75: '1/8.', 1: '1/4', 1.5: '1/4.' }[closest] || '1/2';
+}
+
+function reverbRoomName(decay) {
+  if (decay < 0.6) return 'Small Room';
+  if (decay < 1.2) return 'Medium Room';
+  if (decay < 2) return 'Large Room';
+  if (decay < 2.8) return 'Medium Hall';
+  if (decay < 3.8) return 'Large Hall';
+  return 'Cathedral';
+}
+
+function openMasterEffects() {
+  const session = state.session;
+  if (!session) return;
+  state.modal = 'masterfx';
+  let fx = session.masterEffects;
+
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0">
+        <h2>Master Effects</h2>
+        <div class="sub">${escapeHtml(session.name.toUpperCase())} · MASTER BUS</div>
+      </div>
+      <button class="modal-close" data-close>Done</button>
+    </header>
+    <div class="modal-body">
+      <div class="panel">
+        <div class="switch-row">
+          <div>
+            <h3 style="margin:0 0 4px">MASTER FX</h3>
+            <span class="range-label">${fx.bypassed ? 'Bypassed · playback and bounce stay dry' : 'Reverb and delay on the master output'}</span>
+          </div>
+          <button class="switch ${fx.bypassed ? '' : 'on'}" id="fxBypass" aria-label="Toggle master effects"></button>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>REVERB · ${reverbRoomName(fx.reverbDecay)}</h3>
+        <div class="field">
+          <div class="label-row"><span>Mix</span><span data-fx-value="reverbMix">${Math.round(fx.reverbMix * 100)}%</span></div>
+          <input type="range" min="0" max="1" step="0.01" value="${fx.reverbMix}" data-fx="reverbMix">
+        </div>
+        <div class="field">
+          <div class="label-row"><span>Decay</span><span data-fx-value="reverbDecay">${fx.reverbDecay.toFixed(1)} s</span></div>
+          <input type="range" min="0.2" max="5" step="0.1" value="${fx.reverbDecay}" data-fx="reverbDecay">
+        </div>
+      </div>
+      <div class="panel">
+        <h3>DELAY</h3>
+        <div class="field">
+          <div class="label-row"><span>Time</span><span data-fx-value="delayBeats">${delayBeatLabel(fx.delayBeats)}</span></div>
+          <select data-fx-select="delayBeats" style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
+            <option value="0.25" ${fx.delayBeats === 0.25 ? 'selected' : ''}>1/16</option>
+            <option value="0.5" ${fx.delayBeats === 0.5 ? 'selected' : ''}>1/8</option>
+            <option value="0.75" ${fx.delayBeats === 0.75 ? 'selected' : ''}>1/8 dotted</option>
+            <option value="1" ${fx.delayBeats === 1 ? 'selected' : ''}>1/4</option>
+            <option value="1.5" ${fx.delayBeats === 1.5 ? 'selected' : ''}>1/4 dotted</option>
+            <option value="2" ${fx.delayBeats === 2 ? 'selected' : ''}>1/2</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="label-row"><span>Feedback</span><span data-fx-value="delayFeedback">${Math.round(fx.delayFeedback * 100)}%</span></div>
+          <input type="range" min="0" max="0.9" step="0.01" value="${fx.delayFeedback}" data-fx="delayFeedback">
+        </div>
+        <div class="field">
+          <div class="label-row"><span>Mix</span><span data-fx-value="delayMix">${Math.round(fx.delayMix * 100)}%</span></div>
+          <input type="range" min="0" max="1" step="0.01" value="${fx.delayMix}" data-fx="delayMix">
+        </div>
+      </div>
+      <p class="range-label" style="text-align:center">Applied to playback and the mix bounce.</p>
+    </div>`, { tall: true });
+
+  const bypass = document.getElementById('fxBypass');
+  bypass.addEventListener('click', () => {
+    snapshot();
+    fx.bypassed = !fx.bypassed;
+    bypass.classList.toggle('on', !fx.bypassed);
+    engine.applyMasterEffects();
+    persist();
+    openMasterEffects();
+  });
+
+  el.modalRoot.querySelectorAll('[data-fx]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const key = input.dataset.fx;
+      fx[key] = Number(input.value);
+      const label = el.modalRoot.querySelector(`[data-fx-value="${key}"]`);
+      if (label) {
+        label.textContent = key === 'reverbDecay'
+          ? `${Number(input.value).toFixed(1)} s`
+          : `${Math.round(Number(input.value) * 100)}%`;
+      }
+      engine.applyMasterEffects();
+      persist();
+    });
+  });
+
+  const select = el.modalRoot.querySelector('[data-fx-select="delayBeats"]');
+  if (select) {
+    select.addEventListener('change', () => {
+      fx.delayBeats = Number(select.value);
+      const label = el.modalRoot.querySelector('[data-fx-value="delayBeats"]');
+      if (label) label.textContent = delayBeatLabel(fx.delayBeats);
+      engine.applyMasterEffects();
+      persist();
+    });
+  }
+}
+
 // ---------- Sessions ----------
 
 function openSessions() {
@@ -1554,6 +1671,7 @@ function bindEvents() {
   el.undoBtn.addEventListener('click', undo);
   el.redoBtn.addEventListener('click', redo);
   el.mixerBtn.addEventListener('click', openMixer);
+  el.fxBtn.addEventListener('click', openMasterEffects);
   el.sessionsBtn.addEventListener('click', openSessions);
 
   el.playBtn.addEventListener('click', togglePlay);
@@ -1603,6 +1721,7 @@ function bindEvents() {
     if (!Number.isFinite(bpm)) return;
     snapshot();
     state.session.tempo = model.clamp(Math.round(bpm), 60, 200);
+    engine.applyMasterEffects();
     persist();
     render();
   });
@@ -1861,6 +1980,7 @@ function bindEvents() {
 function changeTempo(delta) {
   snapshot();
   state.session.tempo = model.clamp(state.session.tempo + delta, 60, 200);
+  engine.applyMasterEffects();
   persist();
   render();
 }

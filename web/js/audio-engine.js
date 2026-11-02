@@ -33,12 +33,22 @@ export class StudioEngine {
     if (!this.ctx) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       this.ctx = new Ctx();
-      this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.value = 1;
       this.masterAnalyser = this.ctx.createAnalyser();
       this.masterAnalyser.fftSize = 1024;
-      this.masterGain.connect(this.masterAnalyser);
+
+      const chain = buildMasterChain(this.ctx, this.masterAnalyser, {
+        masterVolume: this.session?.masterVolume ?? 1,
+        effects: this.session?.masterEffects,
+        tempo: this.session?.tempo ?? 120,
+        includeEffects: true
+      });
+      this.masterGain = chain.input;
+      this.masterChain = chain;
       this.masterAnalyser.connect(this.ctx.destination);
+
+      this.clickBus = this.ctx.createGain();
+      this.clickBus.connect(this.masterAnalyser);
+
       if (this.session) this.rebuild();
     }
     if (this.ctx.state === 'suspended') {
@@ -55,6 +65,14 @@ export class StudioEngine {
   setSession(session) {
     this.session = session;
     if (this.ctx) this.rebuild();
+  }
+
+  applyMasterEffects() {
+    if (!this.session) return;
+    applyMasterChain(this.masterChain, {
+      effects: this.session.masterEffects,
+      tempo: this.session.tempo
+    });
   }
 
   duration() {
@@ -89,6 +107,10 @@ export class StudioEngine {
     }
 
     this.masterGain.gain.value = this.session.masterVolume;
+    applyMasterChain(this.masterChain, {
+      effects: this.session.masterEffects,
+      tempo: this.session.tempo
+    });
     this.updateMix(this.isPlaying ? this.getPosition() : this.position);
   }
 
@@ -378,7 +400,7 @@ export class StudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.055);
 
     osc.connect(gain);
-    gain.connect(this.masterGain);
+    gain.connect(this.clickBus || this.masterGain);
     osc.start(when);
     osc.stop(when + 0.07);
     this.oscillators.add(osc);
@@ -455,9 +477,13 @@ export class StudioEngine {
     const sampleRate = 44100;
     const offline = new OfflineAudioContext(2, Math.ceil(duration * sampleRate) + 1024, sampleRate);
 
-    const master = offline.createGain();
-    master.gain.value = includeMixer ? masterVolume : 1;
-    master.connect(offline.destination);
+    const masterChain = buildMasterChain(offline, offline.destination, {
+      masterVolume: includeMixer ? masterVolume : 1,
+      effects: this.session?.masterEffects,
+      tempo: this.session?.tempo ?? 120,
+      includeEffects: includeMixer
+    });
+    const master = masterChain.input;
 
     const anySolo = this.session ? this.session.tracks.some((t) => t.soloed) : false;
 
@@ -556,6 +582,78 @@ export class StudioEngine {
       this.scheduleNote(ctx, input, note, Math.max(0, note.start));
     }
   }
+}
+
+function makeImpulseResponse(ctx, decay) {
+  const rate = ctx.sampleRate;
+  const seconds = model.clamp(Number(decay) || 1.8, 0.2, 5);
+  const length = Math.max(1, Math.floor(rate * seconds));
+  const impulse = ctx.createBuffer(2, length, rate);
+
+  for (let channel = 0; channel < 2; channel += 1) {
+    const data = impulse.getChannelData(channel);
+    for (let index = 0; index < length; index += 1) {
+      data[index] = (Math.random() * 2 - 1) * Math.pow(1 - index / length, 2.2);
+    }
+  }
+
+  return impulse;
+}
+
+function buildMasterChain(ctx, destination, { masterVolume = 1, effects, tempo = 120, includeEffects = true }) {
+  const input = ctx.createGain();
+  input.gain.value = masterVolume;
+
+  const dry = ctx.createGain();
+  input.connect(dry);
+  dry.connect(destination);
+
+  if (!includeEffects) {
+    return { input, dry, reverb: null, revWet: null, delay: null, delayWet: null, feedback: null, impulseDecay: 0 };
+  }
+
+  const reverb = ctx.createConvolver();
+  const revWet = ctx.createGain();
+  const delay = ctx.createDelay(2);
+  const feedback = ctx.createGain();
+  const delayWet = ctx.createGain();
+
+  input.connect(reverb);
+  reverb.connect(revWet);
+  revWet.connect(destination);
+
+  input.connect(delay);
+  delay.connect(feedback);
+  feedback.connect(delay);
+  delay.connect(delayWet);
+  delayWet.connect(destination);
+
+  const chain = { input, dry, reverb, revWet, delay, delayWet, feedback, impulseDecay: 0 };
+  applyMasterChain(chain, { effects, tempo });
+  return chain;
+}
+
+function applyMasterChain(chain, { effects, tempo }) {
+  if (!chain || !chain.reverb) return;
+  const settings = effects || { bypassed: true };
+  const bypassed = settings.bypassed !== false;
+  const tempoSafe = tempo || 120;
+  const decay = model.clamp(Number(settings.reverbDecay ?? 1.8), 0.2, 5);
+
+  if (chain.impulseDecay !== decay) {
+    chain.impulseDecay = decay;
+    try {
+      chain.reverb.buffer = makeImpulseResponse(chain.reverb.context, decay);
+    } catch (error) {
+      // keep the previous impulse if the browser rejects the swap
+    }
+  }
+
+  chain.revWet.gain.value = bypassed ? 0 : model.clamp(Number(settings.reverbMix ?? 0.32), 0, 1);
+  chain.delayWet.gain.value = bypassed ? 0 : model.clamp(Number(settings.delayMix ?? 0.22), 0, 1);
+  chain.feedback.gain.value = bypassed ? 0 : model.clamp(Number(settings.delayFeedback ?? 0.38), 0, 0.9);
+  const beats = Number(settings.delayBeats ?? 0.5);
+  chain.delay.delayTime.value = Math.min(2, Math.max(0.01, beats * 60 / tempoSafe));
 }
 
 export function encodeWav(buffer) {

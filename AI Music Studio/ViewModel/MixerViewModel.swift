@@ -27,6 +27,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var levels: [UUID: Float] = [:]
     @Published private(set) var masterVolume: Float = 1
+    @Published private(set) var masterEffects = MasterEffectsSettings()
     @Published private(set) var masterLevel: Float = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var tempoBPM = 120
@@ -104,6 +105,7 @@ final class MixerViewModel: ObservableObject {
             loopEnd = max(loopStart, session.loopEnd)
             isLoopEnabled = session.isLoopEnabled
             masterVolume = min(1, max(0, session.masterVolume))
+            masterEffects = session.masterEffects
             isMetronomeEnabled = session.isMetronomeEnabled
             metronomeLevel = min(1, max(0, session.metronomeLevel))
             isCountInEnabled = session.isCountInEnabled
@@ -115,6 +117,7 @@ final class MixerViewModel: ObservableObject {
         applyLoopChangeToEngine()
         engine.setMasterVolume(masterVolume)
         engine.setTempo(tempoBPM)
+        engine.updateMasterEffects(masterEffects, tempoBPM: tempoBPM)
         engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
         loadWaveforms()
 
@@ -164,6 +167,12 @@ final class MixerViewModel: ObservableObject {
     func setMasterVolume(_ value: Float) {
         masterVolume = min(1, max(0, value))
         engine.setMasterVolume(masterVolume)
+    }
+
+    /// Applies the master reverb and delay settings while they are adjusted.
+    func updateMasterEffects(_ settings: MasterEffectsSettings) {
+        masterEffects = settings
+        engine.updateMasterEffects(settings, tempoBPM: tempoBPM)
     }
 
     func addVolumeAutomationPoint(
@@ -374,6 +383,7 @@ final class MixerViewModel: ObservableObject {
         sessions[index].loopEnd = loopEnd
         sessions[index].isLoopEnabled = isLoopEnabled
         sessions[index].masterVolume = masterVolume
+        sessions[index].masterEffects = masterEffects
         sessions[index].isMetronomeEnabled = isMetronomeEnabled
         sessions[index].metronomeLevel = metronomeLevel
         sessions[index].isCountInEnabled = isCountInEnabled
@@ -404,6 +414,7 @@ final class MixerViewModel: ObservableObject {
         loopEnd = max(loopStart, session.loopEnd)
         isLoopEnabled = session.isLoopEnabled
         masterVolume = min(1, max(0, session.masterVolume))
+        masterEffects = session.masterEffects
         isMetronomeEnabled = session.isMetronomeEnabled
         metronomeLevel = min(1, max(0, session.metronomeLevel))
         isCountInEnabled = session.isCountInEnabled
@@ -418,6 +429,7 @@ final class MixerViewModel: ObservableObject {
         applyLoopChangeToEngine()
         engine.setMasterVolume(masterVolume)
         engine.setTempo(tempoBPM)
+        engine.updateMasterEffects(masterEffects, tempoBPM: tempoBPM)
         engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
         isPlaying = false
         currentTime = 0
@@ -529,6 +541,7 @@ final class MixerViewModel: ObservableObject {
         guard clamped != tempoBPM else { return }
         tempoBPM = clamped
         engine.setTempo(clamped)
+        engine.updateMasterEffects(masterEffects, tempoBPM: clamped)
         persistActiveSession()
     }
 
@@ -859,6 +872,8 @@ final class MixerViewModel: ObservableObject {
         let outputURL = MixExportStorage.newExportURL()
         let tracksToBounce = tracks
         let masterVolumeToBounce = masterVolume
+        let masterEffectsToBounce = masterEffects
+        let tempoToBounce = tempoBPM
         let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
             Task { @MainActor [weak self] in
                 self?.bounceProgress = fraction
@@ -872,6 +887,8 @@ final class MixerViewModel: ObservableObject {
                     try MixBounceRenderer.render(
                         tracks: tracksToBounce,
                         masterVolume: masterVolumeToBounce,
+                        masterEffects: masterEffectsToBounce,
+                        tempoBPM: tempoToBounce,
                         to: outputURL,
                         progress: progressUpdate
                     )

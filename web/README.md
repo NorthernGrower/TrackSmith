@@ -21,6 +21,8 @@ uses ES modules and IndexedDB).
 - Transport: play/pause/stop, timecode, tempo, loop range and loop playback,
   metronome click with level, and a one-bar count-in.
 - Channel mixer with pan, faders, dB readouts, meters and a master strip.
+- Master effects: tempo-synced delay and reverb on the master output, with a
+  bypass switch, applied to playback and the bounce.
 - Piano roll sequencer for the built-in synthesizer, snapped to the beat grid.
 - Bounce the arrangement to a WAV file.
 

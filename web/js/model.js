@@ -112,6 +112,14 @@ export function createSession(name = 'Untitled Session') {
     name,
     tempo: 120,
     masterVolume: 1,
+    masterEffects: {
+      bypassed: true,
+      reverbMix: 0.32,
+      reverbDecay: 1.8,
+      delayBeats: 0.5,
+      delayFeedback: 0.38,
+      delayMix: 0.22
+    },
     loop: { start: 0, end: 0, enabled: false },
     metronome: { enabled: false, level: 0.7, countIn: false },
     tracks: [],
@@ -191,6 +199,13 @@ export function normalizeSession(session) {
   normal.name = normal.name || 'Untitled Session';
   normal.tempo = clamp(Number(normal.tempo) || 120, 60, 200);
   normal.masterVolume = clamp(Number(normal.masterVolume ?? 1), 0, 1);
+  normal.masterEffects = normal.masterEffects || {};
+  normal.masterEffects.bypassed = normal.masterEffects.bypassed !== false;
+  normal.masterEffects.reverbMix = clamp(Number(normal.masterEffects.reverbMix ?? 0.32), 0, 1);
+  normal.masterEffects.reverbDecay = clamp(Number(normal.masterEffects.reverbDecay ?? 1.8), 0.2, 5);
+  normal.masterEffects.delayBeats = clamp(Number(normal.masterEffects.delayBeats ?? 0.5), 0.25, 2);
+  normal.masterEffects.delayFeedback = clamp(Number(normal.masterEffects.delayFeedback ?? 0.38), 0, 0.9);
+  normal.masterEffects.delayMix = clamp(Number(normal.masterEffects.delayMix ?? 0.22), 0, 1);
   normal.loop = normal.loop || { start: 0, end: 0, enabled: false };
   normal.loop.start = Math.max(0, Number(normal.loop.start) || 0);
   normal.loop.end = Math.max(normal.loop.start, Number(normal.loop.end) || 0);

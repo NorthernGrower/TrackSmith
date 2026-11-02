@@ -39,6 +39,8 @@ enum MixBounceRenderer {
     static func render(
         tracks: [Track],
         masterVolume: Float = 1,
+        masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
+        tempoBPM: Int = 120,
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
     ) throws {
@@ -54,13 +56,24 @@ enum MixBounceRenderer {
         var duration: TimeInterval = 0
         let anySolo = tracks.contains { $0.isSoloed }
 
+        let masterBus = AVAudioMixerNode()
+        let reverb = AVAudioUnitReverb()
+        let delay = AVAudioUnitDelay()
+        engine.attach(masterBus)
+        engine.attach(reverb)
+        engine.attach(delay)
+        engine.connect(masterBus, to: reverb, format: outputFormat)
+        engine.connect(reverb, to: delay, format: outputFormat)
+        engine.connect(delay, to: engine.mainMixerNode, format: outputFormat)
+        applyMasterEffects(masterEffects, tempoBPM: tempoBPM, reverb: reverb, delay: delay)
+
         for track in tracks {
             let trackMixer = AVAudioMixerNode()
             let compressor = TrackCompressorUnit.make()
             engine.attach(trackMixer)
             engine.attach(compressor)
             engine.connect(trackMixer, to: compressor, format: outputFormat)
-            engine.connect(compressor, to: engine.mainMixerNode, format: outputFormat)
+            engine.connect(compressor, to: masterBus, format: outputFormat)
             let audible = !track.isMuted && (!anySolo || track.isSoloed)
             trackMixer.outputVolume = audible ? track.volume * track.automationGain(at: 0) : 0
             trackMixer.pan = min(1, max(-1, track.pan))
@@ -192,6 +205,29 @@ enum MixBounceRenderer {
         }
 
         progress(1)
+    }
+
+    private static func applyMasterEffects(
+        _ settings: MasterEffectsSettings,
+        tempoBPM: Int,
+        reverb: AVAudioUnitReverb,
+        delay: AVAudioUnitDelay
+    ) {
+        let bypassed = settings.isBypassed
+
+        switch settings.reverbDecay {
+        case ..<0.6: reverb.loadFactoryPreset(.smallRoom)
+        case ..<1.2: reverb.loadFactoryPreset(.mediumRoom)
+        case ..<2.0: reverb.loadFactoryPreset(.largeRoom)
+        case ..<2.8: reverb.loadFactoryPreset(.mediumHall)
+        case ..<3.8: reverb.loadFactoryPreset(.largeHall)
+        default: reverb.loadFactoryPreset(.cathedral)
+        }
+        reverb.wetDryMix = bypassed ? 0 : Float(min(1, max(0, settings.reverbMix)) * 100)
+
+        delay.delayTime = settings.delaySeconds(tempoBPM: tempoBPM)
+        delay.feedback = bypassed ? 0 : Float(min(0.9, max(0, settings.delayFeedback)) * 100)
+        delay.wetDryMix = bypassed ? 0 : Float(min(1, max(0, settings.delayMix)) * 100)
     }
 
 }

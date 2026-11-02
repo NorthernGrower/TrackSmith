@@ -141,6 +141,10 @@ struct MixerView: View {
                 ChannelMixerView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .masterEffects:
+                MasterEffectsView(model: model)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
             case .pianoRoll:
                 if let selectedPianoRollTrackID {
                     PianoRollView(model: model, trackID: selectedPianoRollTrackID)
@@ -226,6 +230,25 @@ struct MixerView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Channel mixer")
+
+                Button {
+                    activeSheet = .masterEffects
+                } label: {
+                    Image(systemName: "speaker.wave.2")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 38, height: 38)
+                        .background(Color.studioPanelHighlight.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(alignment: .topTrailing) {
+                            if !model.masterEffects.isBypassed {
+                                Circle()
+                                    .fill(Color.studioAccent)
+                                    .frame(width: 6, height: 6)
+                                    .padding(6)
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Master effects")
 
                 Menu {
                     Button {
@@ -464,6 +487,7 @@ private enum StudioSheet: String, Identifiable {
     case trackEQ
     case sessions
     case mixer
+    case masterEffects
     case pianoRoll
 
     var id: String { rawValue }

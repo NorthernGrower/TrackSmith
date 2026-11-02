@@ -81,6 +81,10 @@ final class MixerEngine {
     private var metronomeVolume: Float = 0.7
     private var songTempoBPM = 120
     private let metronomeVoiceCount = 4
+    private let masterBus = AVAudioMixerNode()
+    private let masterReverb = AVAudioUnitReverb()
+    private let masterDelay = AVAudioUnitDelay()
+    private var masterEffectsSettings = MasterEffectsSettings()
     private var mixTracks: [Track] = []
     private var automationTime: TimeInterval = 0
     private var activeLoop: ClosedRange<TimeInterval>?
@@ -102,7 +106,53 @@ final class MixerEngine {
 
     init() {
         try? AVAudioSession.sharedInstance().setCategory(.playback)
+        buildMasterEffectsGraph()
         buildMetronomeGraph()
+    }
+
+    /// Connects the master reverb and delay once, between the tracks and the output.
+    private func buildMasterEffectsGraph() {
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2) else {
+            return
+        }
+
+        engine.attach(masterBus)
+        engine.attach(masterReverb)
+        engine.attach(masterDelay)
+        engine.connect(masterBus, to: masterReverb, format: format)
+        engine.connect(masterReverb, to: masterDelay, format: format)
+        engine.connect(masterDelay, to: engine.mainMixerNode, format: format)
+        applyMasterEffects()
+    }
+
+    /// Applies the master reverb and delay settings.
+    func updateMasterEffects(_ settings: MasterEffectsSettings, tempoBPM: Int) {
+        masterEffectsSettings = settings
+        songTempoBPM = min(200, max(60, tempoBPM))
+        applyMasterEffects()
+    }
+
+    private func applyMasterEffects() {
+        let settings = masterEffectsSettings
+        let bypassed = settings.isBypassed
+
+        masterReverb.loadFactoryPreset(reverbPreset(for: settings.reverbDecay))
+        masterReverb.wetDryMix = bypassed ? 0 : Float(min(1, max(0, settings.reverbMix)) * 100)
+
+        masterDelay.delayTime = settings.delaySeconds(tempoBPM: songTempoBPM)
+        masterDelay.feedback = bypassed ? 0 : Float(min(0.9, max(0, settings.delayFeedback)) * 100)
+        masterDelay.wetDryMix = bypassed ? 0 : Float(min(1, max(0, settings.delayMix)) * 100)
+    }
+
+    private func reverbPreset(for decay: Double) -> AVAudioUnitReverbPreset {
+        switch decay {
+        case ..<0.6: return .smallRoom
+        case ..<1.2: return .mediumRoom
+        case ..<2.0: return .largeRoom
+        case ..<2.8: return .mediumHall
+        case ..<3.8: return .largeHall
+        default: return .cathedral
+        }
     }
 
     /// Connects the click track once, so it never needs building during playback.
@@ -179,7 +229,7 @@ final class MixerEngine {
             engine.connect(instrumentMixer, to: mixer, format: instrumentFormat)
             engine.connect(mixer, to: equalizer, format: format)
             engine.connect(equalizer, to: compressor, format: format)
-            engine.connect(compressor, to: engine.mainMixerNode, format: format)
+            engine.connect(compressor, to: masterBus, format: format)
 
             let store = levelStore
             let trackID = track.id
@@ -271,6 +321,7 @@ final class MixerEngine {
 
     func setTempo(_ bpm: Int) {
         songTempoBPM = min(200, max(60, bpm))
+        applyMasterEffects()
     }
 
     /// Turns the click track on or off and sets its level.
