@@ -14,6 +14,8 @@ struct SessionLibraryView: View {
     @State private var showingRename = false
     @State private var deleteSessionID: UUID?
     @State private var showingDeleteConfirmation = false
+    @State private var isSavingTemplate = false
+    @State private var templateName = ""
 
     var body: some View {
         NavigationStack {
@@ -31,6 +33,15 @@ struct SessionLibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        templateName = model.sessionName
+                        isSavingTemplate = true
+                    } label: {
+                        Label("Save as Template", systemImage: "bookmark")
+                    }
+                    .disabled(model.tracks.isEmpty)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -53,6 +64,15 @@ struct SessionLibraryView: View {
             }
         } message: {
             Text("Choose a name for this session.")
+        }
+        .alert("Save as Template", isPresented: $isSavingTemplate) {
+            TextField("Template name", text: $templateName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                model.saveCurrentSessionAsTemplate(name: templateName)
+            }
+        } message: {
+            Text("Keeps this session's tracks, colours and mixer settings so you can start new sessions from them.")
         }
         .confirmationDialog("Delete this session?", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
             Button("Delete Session", role: .destructive) {

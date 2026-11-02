@@ -6,9 +6,9 @@
 import Foundation
 
 /// A prepared track layout a session can be started from.
-struct SessionTemplate: Identifiable, Equatable {
+struct SessionTemplate: Identifiable, Codable, Equatable {
     /// One channel the template sets up, with its mixer settings already dialled in.
-    struct TrackSlot: Identifiable, Equatable {
+    struct TrackSlot: Identifiable, Codable, Equatable {
         let name: String
         /// Gain from 0 to 1.
         let volume: Float
@@ -174,4 +174,50 @@ extension SessionTemplate {
             )
         ]
     )
+}
+
+
+extension SessionTemplate {
+    /// Captures a session's track names, order and mixer settings as a
+    /// template the user can start new sessions from.
+    static func make(from session: StudioSession, name: String) -> SessionTemplate {
+        let count = session.tracks.count
+        let trackText = count == 1 ? "1 track" : "\(count) tracks"
+
+        return SessionTemplate(
+            id: UUID().uuidString,
+            name: name,
+            summary: "Captured from \(session.name): \(trackText) with their levels, pan, EQ and compression.",
+            symbolName: "bookmark",
+            tempoBPM: session.tempoBPM,
+            isSuggested: false,
+            tracks: session.tracks.map { track in
+                TrackSlot(
+                    name: track.name,
+                    volume: track.volume,
+                    pan: track.pan,
+                    eqSettings: track.eqSettings,
+                    compressorSettings: track.compressorSettings
+                )
+            }
+        )
+    }
+}
+
+/// Keeps the user's own templates on device, apart from the sessions they came from.
+enum SessionTemplateStorage {
+    private static let key = "studio.customSessionTemplates"
+
+    static func load() -> [SessionTemplate] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let templates = try? JSONDecoder().decode([SessionTemplate].self, from: data) else {
+            return []
+        }
+        return templates
+    }
+
+    static func save(_ templates: [SessionTemplate]) {
+        guard let data = try? JSONEncoder().encode(templates) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
 }

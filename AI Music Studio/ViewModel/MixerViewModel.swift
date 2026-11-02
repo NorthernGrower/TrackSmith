@@ -33,6 +33,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var masterEffects = MasterEffectsSettings()
     @Published private(set) var sections: [SongSection] = []
     @Published private(set) var channelPresets: [ChannelPreset] = []
+    @Published private(set) var customTemplates: [SessionTemplate] = []
     @Published private(set) var masterLevel: Float = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var tempoBPM = 120
@@ -101,6 +102,7 @@ final class MixerViewModel: ObservableObject {
     init() {
         microphonePermissionGranted = AVAudioSession.sharedInstance().recordPermission == .granted
         channelPresets = ChannelPresetStorage.load()
+        customTemplates = SessionTemplateStorage.load()
         let storedSessions = StudioSessionStorage.load()
         sessions = storedSessions.sessions
         activeSessionID = storedSessions.activeSessionID
@@ -525,6 +527,35 @@ final class MixerViewModel: ObservableObject {
         }
         sessions.append(session)
         activateSession(session)
+    }
+
+    /// Captures the open session's tracks and mixer settings as a custom template.
+    @discardableResult
+    func saveCurrentSessionAsTemplate(name: String) -> SessionTemplate? {
+        persistActiveSession(markEdited: false)
+        guard !tracks.isEmpty,
+              let session = sessions.first(where: { $0.id == activeSessionID }) else { return nil }
+
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.isEmpty ? session.name : trimmed
+        var templateName = base
+        var suffix = 2
+        while customTemplates.contains(where: { $0.name.caseInsensitiveCompare(templateName) == .orderedSame }) {
+            templateName = "\(base) \(suffix)"
+            suffix += 1
+        }
+
+        let template = SessionTemplate.make(from: session, name: templateName)
+        customTemplates.insert(template, at: 0)
+        SessionTemplateStorage.save(customTemplates)
+        return template
+    }
+
+    /// Removes a saved template, leaving the sessions made from it untouched.
+    func deleteCustomTemplate(_ id: String) {
+        guard customTemplates.contains(where: { $0.id == id }) else { return }
+        customTemplates.removeAll { $0.id == id }
+        SessionTemplateStorage.save(customTemplates)
     }
 
     func openSession(_ id: UUID) {

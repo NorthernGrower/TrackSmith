@@ -11,11 +11,17 @@ struct TemplatesView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedTemplateID: String?
+    @State private var deletingTemplateID: String?
+    @State private var isConfirmingDelete = false
 
-    private var templates: [SessionTemplate] { SessionTemplateCatalog.all }
+    private var builtInTemplates: [SessionTemplate] { SessionTemplateCatalog.all }
+
+    private var customTemplates: [SessionTemplate] { model.customTemplates }
+
+    private var allTemplates: [SessionTemplate] { customTemplates + builtInTemplates }
 
     private var selectedTemplate: SessionTemplate? {
-        templates.first { $0.id == selectedTemplateID }
+        allTemplates.first { $0.id == selectedTemplateID }
     }
 
     var body: some View {
@@ -27,8 +33,17 @@ struct TemplatesView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    ForEach(templates) { template in
-                        card(for: template)
+                    if !customTemplates.isEmpty {
+                        sectionLabel("YOUR TEMPLATES")
+                        ForEach(customTemplates) { template in
+                            card(for: template, isCustom: true)
+                        }
+
+                        sectionLabel("STUDIO TEMPLATES")
+                    }
+
+                    ForEach(builtInTemplates) { template in
+                        card(for: template, isCustom: false)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -45,79 +60,119 @@ struct TemplatesView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) { createBar }
+            .confirmationDialog(
+                "Delete this template?",
+                isPresented: $isConfirmingDelete,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Template", role: .destructive) {
+                    if let deletingTemplateID {
+                        model.deleteCustomTemplate(deletingTemplateID)
+                    }
+                    deletingTemplateID = nil
+                    if selectedTemplate == nil {
+                        selectedTemplateID = allTemplates.first?.id
+                    }
+                }
+                Button("Cancel", role: .cancel) { deletingTemplateID = nil }
+            } message: {
+                Text("Sessions already created from it are not affected.")
+            }
         }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
         .onAppear(perform: selectStartingTemplate)
     }
 
-    private func card(for template: SessionTemplate) -> some View {
+    private func card(for template: SessionTemplate, isCustom: Bool) -> some View {
         let isSelected = template.id == selectedTemplateID
 
-        return Button {
-            selectedTemplateID = template.id
-        } label: {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack(spacing: 11) {
-                    Image(systemName: template.symbolName)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(isSelected ? Color.black : Color.studioAccent)
-                        .frame(width: 38, height: 38)
-                        .background(
-                            isSelected ? Color.studioAccent : Color.studioAccent.opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: 10)
-                        )
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(template.name)
-                                .font(.system(size: 15, weight: .semibold))
-                                .lineLimit(1)
-
-                            if template.isSuggested {
-                                tag("SUGGESTED")
-                            }
-                        }
-
-                        Text("\(template.trackCount) TRACKS  ·  \(template.tempoBPM) BPM")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .tracking(0.4)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer(minLength: 4)
-
-                    Image(systemName: selectedTemplateID == template.id ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(selectedTemplateID == template.id ? Color.studioAccent : Color.white.opacity(0.22))
-                }
-
-                Text(template.summary)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
-
-                VStack(spacing: 5) {
-                    ForEach(Array(template.tracks.enumerated()), id: \.element.id) { index, slot in
-                        lane(slot, index: index)
-                    }
-                }
-            }
-            .padding(14)
-            .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 16))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(
-                        selectedTemplateID == template.id ? Color.studioAccent.opacity(0.75) : Color.white.opacity(0.06),
-                        lineWidth: selectedTemplateID == template.id ? 1.5 : 1
+        return VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 11) {
+                Image(systemName: template.symbolName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.black : Color.studioAccent)
+                    .frame(width: 38, height: 38)
+                    .background(
+                        isSelected ? Color.studioAccent : Color.studioAccent.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 10)
                     )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(template.name)
+                            .font(.system(size: 15, weight: .semibold))
+                            .lineLimit(1)
+
+                        if template.isSuggested {
+                            tag("SUGGESTED")
+                        }
+                    }
+
+                    Text("\(template.trackCount) TRACKS  ·  \(template.tempoBPM) BPM")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .tracking(0.4)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 4)
+
+                if isCustom {
+                    Menu {
+                        Button(role: .destructive) {
+                            deletingTemplateID = template.id
+                            isConfirmingDelete = true
+                        } label: {
+                            Label("Delete Template", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("Actions for \(template.name)")
+                }
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.studioAccent : Color.white.opacity(0.22))
             }
-            .contentShape(RoundedRectangle(cornerRadius: 16))
+
+            Text(template.summary)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+
+            VStack(spacing: 5) {
+                ForEach(Array(template.tracks.enumerated()), id: \.element.id) { index, slot in
+                    lane(slot, index: index)
+                }
+            }
         }
-        .buttonStyle(.plain)
+        .padding(14)
+        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(
+                    isSelected ? Color.studioAccent.opacity(0.75) : Color.white.opacity(0.06),
+                    lineWidth: isSelected ? 1.5 : 1
+                )
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .onTapGesture { selectedTemplateID = template.id }
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(template.name), \(template.trackCount) tracks")
-        .accessibilityAddTraits(selectedTemplateID == template.id ? [.isSelected] : [])
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .tracking(0.8)
+            .foregroundStyle(.secondary)
+            .padding(.top, 2)
     }
 
     private func lane(_ slot: SessionTemplate.TrackSlot, index: Int) -> some View {
@@ -205,10 +260,10 @@ struct TemplatesView: View {
     private func selectStartingTemplate() {
         guard selectedTemplateID == nil else { return }
         if let activeID = model.activeTemplateID,
-           templates.contains(where: { $0.id == activeID }) {
+           allTemplates.contains(where: { $0.id == activeID }) {
             selectedTemplateID = activeID
         } else {
-            selectedTemplateID = templates.first?.id
+            selectedTemplateID = allTemplates.first?.id
         }
     }
 }
