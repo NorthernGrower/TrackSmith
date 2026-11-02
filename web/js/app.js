@@ -25,6 +25,7 @@ const state = {
   rollTrackId: null,
   selectedNote: null,
   rollDivision: 2,
+  rollChord: 'single',
   undo: [],
   redo: [],
   buffers: new Map(),
@@ -1144,6 +1145,15 @@ function rollSnap() {
   return beatDuration() / state.rollDivision;
 }
 
+function rollChordIntervals(type) {
+  switch (type) {
+    case 'major': return [0, 4, 7];
+    case 'minor': return [0, 3, 7];
+    case 'seventh': return [0, 4, 7, 10];
+    default: return [0];
+  }
+}
+
 function renderRollModal() {
   const track = trackById(state.rollTrackId);
   if (!track) {
@@ -1182,8 +1192,13 @@ function renderRollModal() {
             <button class="pill ${state.rollDivision === 4 ? 'on' : ''}" data-roll-div="4">1/16</button>
           </div>
         </div>
-        <div class="roll-grid-wrap">
-          <div class="roll-keys">${keys.join('')}</div>
+        <div class="roll-toolbar">
+          <span class="range-label">CHORD</span>
+          <div style="display:flex;gap:4px">
+            ${[['single', 'SINGLE'], ['major', 'MAJOR'], ['minor', 'MINOR'], ['seventh', '7TH']].map(([id, label]) => `<button class="pill ${state.rollChord === id ? 'on' : ''}" data-roll-chord="${id}">${label}</button>`).join('')}
+          </div>
+        </div>
+        <div class="roll-grid-wrap">          <div class="roll-keys">${keys.join('')}</div>
           <div class="roll-scroll" id="rollScroll">
             <div class="roll-grid" id="rollGrid" style="width:${contentWidth}px;height:${gridHeight}px">
               <canvas class="automation-canvas" id="rollCanvas"></canvas>
@@ -1224,6 +1239,13 @@ function renderRollModal() {
     });
   });
 
+  document.querySelectorAll('[data-roll-chord]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.rollChord = button.dataset.rollChord;
+      renderRollModal();
+    });
+  });
+
   grid.addEventListener('pointerdown', (event) => {
     const noteEl = event.target.closest('.roll-note');
     const rect = grid.getBoundingClientRect();
@@ -1235,10 +1257,17 @@ function renderRollModal() {
       const start = Math.max(0, snapTime(x / (beatPx / beatDuration())));
       const length = Math.round(start / rollSnap()) * rollSnap();
       snapshot();
-      const note = { id: model.uid(), pitch, start: length, duration: rollSnap() };
-      track.notes.push(note);
+      const addedIds = [];
+      rollChordIntervals(state.rollChord).forEach((interval) => {
+        const chordPitch = pitch + interval;
+        if (chordPitch < model.NOTE_LOW || chordPitch > model.NOTE_HIGH) return;
+        const note = { id: model.uid(), pitch: chordPitch, start: length, duration: rollSnap() };
+        track.notes.push(note);
+        addedIds.push(note.id);
+      });
+      if (!addedIds.length) return;
       track.notes.sort((a, b) => a.start - b.start);
-      state.selectedNote = note.id;
+      state.selectedNote = addedIds[0];
       persist();
       engine.rebuild();
       renderRollModal();

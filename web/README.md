@@ -34,7 +34,8 @@ build from GitHub Actions.
 - Channel mixer with pan, faders, dB readouts, meters and a master strip.
 - Master effects: tempo-synced delay and reverb on the master output, with a
   bypass switch, applied to playback and the bounce.
-- Piano roll sequencer for the built-in synthesizer, snapped to the beat grid.
+- Piano roll sequencer for the built-in synthesizer, snapped to the beat grid,
+  with a chord mode that drops major, minor or seventh chords in one tap.
 - Instruments rack: a playable synth, the 808-style drum pads, a TB-303 acid bass
   and a sampler that loads the bundled starter sounds, a session's own audio or a
   file from the device, all played through the selected track's mixer.

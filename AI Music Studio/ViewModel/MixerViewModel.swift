@@ -390,19 +390,44 @@ final class MixerViewModel: ObservableObject {
         duration noteDuration: TimeInterval,
         snapInterval: TimeInterval
     ) -> UUID? {
-        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return nil }
+        addSynthChord(
+            trackID: trackID,
+            pitch: pitch,
+            startTime: startTime,
+            duration: noteDuration,
+            chordType: .single,
+            snapInterval: snapInterval
+        ).first
+    }
+
+    /// Places every note of a chord on the same beat, as one undoable edit.
+    @discardableResult
+    func addSynthChord(
+        trackID: UUID,
+        pitch: Int,
+        startTime: TimeInterval,
+        duration noteDuration: TimeInterval,
+        chordType: ChordType,
+        snapInterval: TimeInterval
+    ) -> [UUID] {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return [] }
         beginUndoableEdit()
-        let note = SynthNote(
-            pitch: min(SynthNote.highestPitch, max(SynthNote.lowestPitch, pitch)),
-            startTime: snappedTime(startTime, interval: snapInterval),
-            duration: max(snapInterval, snappedTime(noteDuration, interval: snapInterval))
-        )
-        tracks[index].notes.append(note)
+        let start = snappedTime(startTime, interval: snapInterval)
+        let length = max(snapInterval, snappedTime(noteDuration, interval: snapInterval))
+        let rootPitch = min(SynthNote.highestPitch, max(SynthNote.lowestPitch, pitch))
+
+        var ids: [UUID] = []
+        for chordPitch in chordType.pitches(root: rootPitch) {
+            let note = SynthNote(pitch: chordPitch, startTime: start, duration: length)
+            tracks[index].notes.append(note)
+            ids.append(note.id)
+        }
+
         tracks[index].notes.sort { $0.startTime < $1.startTime }
         engine.updateMix(tracks: tracks)
         duration = engine.duration
         commitSession()
-        return note.id
+        return ids
     }
 
     func moveSynthNote(

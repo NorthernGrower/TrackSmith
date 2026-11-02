@@ -48,3 +48,37 @@ enum SynthNoteVoice {
     static let attack = 0.02
     static let release = 0.28
 }
+
+/// Chords the piano roll can place with a single tap.
+enum ChordType: String, CaseIterable, Identifiable {
+    case single
+    case major
+    case minor
+    case seventh
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .single: return "Single"
+        case .major: return "Major"
+        case .minor: return "Minor"
+        case .seventh: return "7th"
+        }
+    }
+
+    var intervals: [Int] {
+        switch self {
+        case .single: return [0]
+        case .major: return [0, 4, 7]
+        case .minor: return [0, 3, 7]
+        case .seventh: return [0, 4, 7, 10]
+        }
+    }
+
+    func pitches(root: Int) -> [Int] {
+        intervals
+            .map { root + $0 }
+            .filter { (SynthNote.lowestPitch...SynthNote.highestPitch).contains($0) }
+    }
+}

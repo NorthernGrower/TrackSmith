@@ -15,6 +15,7 @@ struct PianoRollView: View {
 
     @State private var selectedNoteID: UUID?
     @State private var noteStep = PianoRollStep.eighth
+    @State private var chordType = ChordType.single
     @State private var dragOrigin: SynthNote?
     @State private var resizeOrigin: SynthNote?
 
@@ -86,29 +87,46 @@ struct PianoRollView: View {
     }
 
     private func header(_ track: Track) -> some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(track.name.uppercased())
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(0.7)
-                    .foregroundStyle(Color.studioAccent)
-                    .lineLimit(1)
-                Text("\(model.tempoBPM) BPM  ·  TAP GRID TO ADD")
-                    .font(.system(size: 8, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 6)
-
-            Picker("Note length", selection: $noteStep) {
-                ForEach(PianoRollStep.allCases) { step in
-                    Text(step.rawValue).tag(step)
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(track.name.uppercased())
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .tracking(0.7)
+                        .foregroundStyle(Color.studioAccent)
+                        .lineLimit(1)
+                    Text("\(model.tempoBPM) BPM  ·  TAP GRID TO ADD")
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
+
+                Spacer(minLength: 6)
+
+                Picker("Note length", selection: $noteStep) {
+                    ForEach(PianoRollStep.allCases) { step in
+                        Text(step.rawValue).tag(step)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 148)
+                .accessibilityLabel("Note length")
             }
-            .pickerStyle(.segmented)
-            .frame(width: 148)
-            .accessibilityLabel("Note length")
+
+            HStack(spacing: 10) {
+                Text("CHORD")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+
+                Picker("Chord type", selection: $chordType) {
+                    ForEach(ChordType.allCases) { type in
+                        Text(type.title).tag(type)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Chord type")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -189,13 +207,14 @@ struct PianoRollView: View {
             .gesture(
                 SpatialTapGesture()
                     .onEnded { value in
-                        selectedNoteID = model.addSynthNote(
+                        selectedNoteID = model.addSynthChord(
                             trackID: trackID,
                             pitch: pitch(atY: value.location.y),
                             startTime: snappedTime(atX: value.location.x),
                             duration: snapDuration,
+                            chordType: chordType,
                             snapInterval: snapDuration
-                        )
+                        ).first
                     }
             )
 
