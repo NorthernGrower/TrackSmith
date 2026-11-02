@@ -13,6 +13,10 @@ Open `index.html` from this folder in a browser (it needs to be served over
 `http://` or `https://`, for example with any static file server, because the app
 uses ES modules and IndexedDB).
 
+It is also published with GitHub Pages by the `Deploy web studio` workflow, so
+the repository's Pages address serves this folder directly once Pages is set to
+build from GitHub Actions.
+
 ## What it does
 
 - Import audio stems or add a blank track, with waveform clips on a shared ruler.
