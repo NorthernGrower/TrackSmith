@@ -9,21 +9,29 @@ import SwiftUI
 struct WaveformTimeline: View {
     @ObservedObject var model: MixerViewModel
     var onOpenTrackEQ: (UUID) -> Void = { _ in }
+    var onOpenPianoRoll: (UUID) -> Void = { _ in }
 
     @State private var zoom: CGFloat = 24
     @State private var pinchBase: CGFloat?
     @State private var isScrubbing = false
     @State private var selectedClipID: UUID?
+    @State private var automationTrackID: UUID?
+    @State private var selectedAutomationPointID: UUID?
     @State private var moveOrigins: [UUID: TimeInterval] = [:]
     @State private var leftTrimOrigins: [UUID: AudioClip] = [:]
     @State private var rightTrimOrigins: [UUID: AudioClip] = [:]
+    @State private var loopDragAnchor: TimeInterval?
 
     private let gutterWidth: CGFloat = 122
     private let rowHeight: CGFloat = 92
-    private let rulerHeight: CGFloat = 34
+    private let rulerHeight: CGFloat = 44
+    private let loopStripHeight: CGFloat = 14
 
     var body: some View {
         VStack(spacing: 0) {
+            if let automationTrack = model.tracks.first(where: { $0.id == automationTrackID }) {
+                automationEditToolbar(for: automationTrack)
+            }
             if let selectedClipInfo {
                 clipEditToolbar(for: selectedClipInfo)
             }
@@ -144,6 +152,47 @@ struct WaveformTimeline: View {
         }
     }
 
+    private func automationEditToolbar(for track: Track) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "chart.xyaxis.line")
+                .foregroundStyle(Color.studioAccent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("VOLUME · \(track.name.uppercased())")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .lineLimit(1)
+                Text("Tap to add · drag to edit · select a point to delete")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            if let pointID = selectedAutomationPointID {
+                Button(role: .destructive) {
+                    model.deleteVolumeAutomationPoint(trackID: track.id, pointID: pointID)
+                    selectedAutomationPointID = nil
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Delete selected automation point")
+            }
+            Button("Done") {
+                automationTrackID = nil
+                selectedAutomationPointID = nil
+            }
+                .font(.system(size: 11, weight: .semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.studioAccent)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.studioPanel)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+        }
+    }
+
     private var tracksHeader: some View {
         HStack(spacing: 5) {
             Text("4/4")
@@ -178,6 +227,14 @@ struct WaveformTimeline: View {
                 }
             }
 
+            if model.hasLoopRange {
+                Rectangle()
+                    .fill(Color.studioAccent.opacity(model.isLoopEnabled ? 0.075 : 0.035))
+                    .frame(width: loopWidth, height: CGFloat(model.tracks.count) * rowHeight)
+                    .offset(x: loopStartX, y: rulerHeight)
+                    .allowsHitTesting(false)
+            }
+
             playhead
                 .frame(width: contentWidth, height: timelineHeight, alignment: .topLeading)
         }
@@ -210,6 +267,30 @@ struct WaveformTimeline: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.studioAccent)
                 .accessibilityLabel("Equalizer for \(track.name)")
+                Button {
+                    onOpenPianoRoll(track.id)
+                } label: {
+                    Image(systemName: "pianokeys")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 18, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.studioAccent)
+                .accessibilityLabel("Piano roll for \(track.name)")
+                Button {
+                    automationTrackID = automationTrackID == track.id ? nil : track.id
+                    selectedAutomationPointID = nil
+                    if automationTrackID == track.id { selectedClipID = nil }
+                } label: {
+                    Image(systemName: "chart.xyaxis.line")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 18, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(automationTrackID == track.id ? Color.studioAccent : Color.white.opacity(0.55))
+                .accessibilityLabel("Volume automation for \(track.name)")
                 Spacer(minLength: 0)
             }
 
@@ -276,45 +357,147 @@ struct WaveformTimeline: View {
     // MARK: - Time ruler and grid
 
     private var ruler: some View {
-        Canvas { context, size in
-            let beatSpacing = CGFloat(beatDuration) * zoom
-            let beatCount = Int(ceil(model.duration / beatDuration))
+        ZStack(alignment: .topLeading) {
+            Canvas { context, size in
+                let beatSpacing = CGFloat(beatDuration) * zoom
+                let beatCount = Int(ceil(model.duration / beatDuration))
 
-            for beatIndex in 0...max(1, beatCount) {
-                let time = Double(beatIndex) * beatDuration
-                let x = CGFloat(time) * zoom
-                guard x <= size.width else { continue }
-                let isBar = beatIndex % 4 == 0
+                for beatIndex in 0...max(1, beatCount) {
+                    let time = Double(beatIndex) * beatDuration
+                    let x = CGFloat(time) * zoom
+                    guard x <= size.width else { continue }
+                    let isBar = beatIndex % 4 == 0
 
-                var tick = Path()
-                tick.move(to: CGPoint(x: x, y: size.height - (isBar ? 13 : 7)))
-                tick.addLine(to: CGPoint(x: x, y: size.height))
-                context.stroke(
-                    tick,
-                    with: .color(isBar ? Color.white.opacity(0.62) : Color.white.opacity(0.25)),
-                    lineWidth: isBar ? 1.2 : 1
-                )
-
-                if isBar || beatSpacing >= 11 {
-                    let barNumber = beatIndex / 4 + 1
-                    let beatNumber = beatIndex % 4 + 1
-                    let label = isBar ? "\(barNumber)" : (beatSpacing >= 34 ? "\(barNumber).\(beatNumber)" : "\(beatNumber)")
-                    context.draw(
-                        Text(label)
-                            .font(.system(size: isBar ? 9 : 8, weight: isBar ? .semibold : .regular, design: .monospaced))
-                            .foregroundColor(isBar ? .primary : .secondary),
-                        at: CGPoint(x: x + 4, y: 9),
-                        anchor: .leading
+                    var tick = Path()
+                    tick.move(to: CGPoint(x: x, y: size.height - (isBar ? 13 : 7)))
+                    tick.addLine(to: CGPoint(x: x, y: size.height))
+                    context.stroke(
+                        tick,
+                        with: .color(isBar ? Color.white.opacity(0.62) : Color.white.opacity(0.25)),
+                        lineWidth: isBar ? 1.2 : 1
                     )
+
+                    if isBar || beatSpacing >= 11 {
+                        let barNumber = beatIndex / 4 + 1
+                        let beatNumber = beatIndex % 4 + 1
+                        let label = isBar ? "\(barNumber)" : (beatSpacing >= 34 ? "\(barNumber).\(beatNumber)" : "\(beatNumber)")
+                        context.draw(
+                            Text(label)
+                                .font(.system(size: isBar ? 9 : 8, weight: isBar ? .semibold : .regular, design: .monospaced))
+                                .foregroundColor(isBar ? .primary : .secondary),
+                            at: CGPoint(x: x + 4, y: loopStripHeight + 8),
+                            anchor: .leading
+                        )
+                    }
                 }
             }
+            .contentShape(Rectangle())
+            .gesture(scrubGesture)
+
+            loopStrip
         }
-        .contentShape(Rectangle())
-        .gesture(scrubGesture)
         .background(Color.studioBackground)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.12)).frame(height: 1)
         }
+    }
+
+    // MARK: - Loop strip
+
+    private var loopStartX: CGFloat {
+        CGFloat(max(0, model.loopStart)) * zoom
+    }
+
+    private var loopWidth: CGFloat {
+        max(0, CGFloat(model.loopEnd - model.loopStart) * zoom)
+    }
+
+    private var loopStrip: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.04))
+
+                if model.hasLoopRange {
+                    Rectangle()
+                        .fill(Color.studioAccent.opacity(model.isLoopEnabled ? 0.26 : 0.12))
+                        .frame(width: loopWidth)
+                        .offset(x: loopStartX)
+
+                    loopEdge(x: loopStartX, isStart: true)
+                    loopEdge(x: CGFloat(model.loopEnd) * zoom, isStart: false)
+                } else {
+                    Text("DRAG TO SET A LOOP")
+                        .font(.system(size: 7, weight: .bold, design: .monospaced))
+                        .tracking(0.5)
+                        .foregroundStyle(Color.white.opacity(0.35))
+                        .padding(.leading, 8)
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(width: geometry.size.width, height: loopStripHeight)
+            .contentShape(Rectangle())
+            .gesture(loopStripGesture())
+        }
+        .frame(height: loopStripHeight)
+    }
+
+    private func loopEdge(x: CGFloat, isStart: Bool) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.studioAccent)
+                .frame(width: 2)
+
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color.studioAccent)
+                .frame(width: 10, height: 7)
+        }
+        .frame(width: 22, height: loopStripHeight)
+        .contentShape(Rectangle())
+        .offset(x: max(0, x - 11))
+        .gesture(loopHandleGesture(isStart: isStart))
+        .accessibilityLabel(isStart ? "Loop start" : "Loop end")
+        .accessibilityValue(studioTimeString(isStart ? model.loopStart : model.loopEnd))
+    }
+
+    private func loopStripGesture() -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard abs(value.translation.width) > 2 else { return }
+                if loopDragAnchor == nil {
+                    loopDragAnchor = snappedLoopTime(Double(value.startLocation.x) / max(zoom, 1))
+                }
+                guard let anchor = loopDragAnchor else { return }
+                let current = snappedLoopTime(Double(value.location.x) / max(zoom, 1))
+                model.setLoopRange(start: min(anchor, current), end: max(anchor, current))
+            }
+            .onEnded { _ in
+                defer { loopDragAnchor = nil }
+                guard loopDragAnchor != nil else { return }
+                model.commitLoopChange()
+            }
+    }
+
+    private func loopHandleGesture(isStart: Bool) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let origin = isStart ? model.loopStart : model.loopEnd
+                let proposed = origin + Double(value.translation.width / max(zoom, 1))
+                let time = snappedLoopTime(proposed)
+                if isStart {
+                    model.setLoopStart(time)
+                } else {
+                    model.setLoopEnd(time)
+                }
+            }
+            .onEnded { _ in
+                model.commitLoopChange()
+            }
+    }
+
+    private func snappedLoopTime(_ time: TimeInterval) -> TimeInterval {
+        let step = max(0.05, snapInterval)
+        return max(0, (time / step).rounded() * step)
     }
 
     private var scrubGesture: some Gesture {
@@ -344,6 +527,42 @@ struct WaveformTimeline: View {
             ForEach(track.clips) { clip in
                 editableClip(trackID: track.id, clip: clip, color: color)
                     .offset(x: CGFloat(clip.startTime) * zoom)
+                    .allowsHitTesting(automationTrackID != track.id)
+            }
+
+            if automationTrackID == track.id {
+                VolumeAutomationEditor(
+                    points: track.volumeAutomationPoints,
+                    zoom: zoom,
+                    selectedPointID: selectedAutomationPointID,
+                    color: .studioAccent,
+                    onSelect: { selectedAutomationPointID = $0 },
+                    onAdd: { time, gain in
+                        model.addVolumeAutomationPoint(
+                            trackID: track.id,
+                            at: time,
+                            gain: gain,
+                            snapInterval: snapInterval,
+                            maximumTime: Double(contentWidth / max(zoom, 1))
+                        )
+                    },
+                    onMove: { pointID, time, gain in
+                        model.moveVolumeAutomationPoint(
+                            trackID: track.id,
+                            pointID: pointID,
+                            to: time,
+                            gain: gain,
+                            snapInterval: snapInterval,
+                            maximumTime: Double(contentWidth / max(zoom, 1))
+                        )
+                    },
+                    onCommit: { model.commitSession() }
+                )
+                .frame(width: contentWidth, height: rowHeight)
+            } else if !track.volumeAutomationPoints.isEmpty {
+                VolumeAutomationCurve(points: track.volumeAutomationPoints, zoom: zoom, color: .studioAccent)
+                    .frame(width: contentWidth, height: rowHeight)
+                    .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .bottom) {
@@ -686,5 +905,161 @@ struct WaveformLane: View {
 
             context.stroke(path, with: .color(color), lineWidth: 1.2)
         }
+    }
+}
+
+
+
+private struct VolumeAutomationCurve: View {
+    let points: [VolumeAutomationPoint]
+    let zoom: CGFloat
+    let color: Color
+
+    private let verticalInset: CGFloat = 12
+
+    var body: some View {
+        Canvas { context, size in
+            let ordered = points.sorted { $0.time < $1.time }
+            guard let first = ordered.first, size.width > 0 else { return }
+
+            var path = Path()
+            let firstY = y(for: first.gain, height: size.height)
+            path.move(to: CGPoint(x: 0, y: firstY))
+            let firstX = CGFloat(first.time) * zoom
+            if firstX > 0 {
+                path.addLine(to: CGPoint(x: min(size.width, firstX), y: firstY))
+            }
+
+            if ordered.count > 1 {
+                for index in 1..<ordered.count {
+                    let left = ordered[index - 1]
+                    let right = ordered[index]
+                    let segmentCount = 16
+                    for step in 1...segmentCount {
+                        let progress = CGFloat(step) / CGFloat(segmentCount)
+                        let eased = progress * progress * (3 - 2 * progress)
+                        let gain = left.gain + (right.gain - left.gain) * Float(eased)
+                        let time = left.time + (right.time - left.time) * Double(progress)
+                        path.addLine(to: CGPoint(
+                            x: min(size.width, CGFloat(time) * zoom),
+                            y: y(for: gain, height: size.height)
+                        ))
+                    }
+                }
+            }
+
+            if let last = ordered.last {
+                let lastX = CGFloat(last.time) * zoom
+                if lastX < size.width {
+                    path.addLine(to: CGPoint(x: size.width, y: y(for: last.gain, height: size.height)))
+                }
+            }
+
+            context.stroke(path, with: .color(color.opacity(0.95)), lineWidth: 2)
+            for point in ordered {
+                let pointX = min(max(0, CGFloat(point.time) * zoom), size.width)
+                let pointY = y(for: point.gain, height: size.height)
+                let marker = Path(ellipseIn: CGRect(x: pointX - 3, y: pointY - 3, width: 6, height: 6))
+                context.fill(marker, with: .color(color))
+            }
+        }
+    }
+
+    fileprivate func y(for gain: Float, height: CGFloat) -> CGFloat {
+        let usableHeight = max(1, height - verticalInset * 2)
+        let boundedGain = min(1, max(0, CGFloat(gain)))
+        return verticalInset + (1 - boundedGain) * usableHeight
+    }
+}
+
+private struct VolumeAutomationEditor: View {
+    let points: [VolumeAutomationPoint]
+    let zoom: CGFloat
+    let selectedPointID: UUID?
+    let color: Color
+    var onSelect: (UUID) -> Void
+    var onAdd: (TimeInterval, Float) -> Void
+    var onMove: (UUID, TimeInterval, Float) -> Void
+    var onCommit: () -> Void
+
+    @State private var dragOrigins: [UUID: VolumeAutomationPoint] = [:]
+    private let verticalInset: CGFloat = 12
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(Color.clear)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        SpatialTapGesture()
+                            .onEnded { value in
+                                let x = min(max(0, value.location.x), geometry.size.width)
+                                onAdd(
+                                    Double(x / max(zoom, 1)),
+                                    gain(at: value.location.y, height: geometry.size.height)
+                                )
+                            }
+                    )
+
+                VolumeAutomationCurve(points: points, zoom: zoom, color: color)
+                    .allowsHitTesting(false)
+
+                ForEach(points) { point in
+                    Circle()
+                        .fill(Color.studioPanel)
+                        .frame(width: 15, height: 15)
+                        .overlay(Circle().stroke(color, lineWidth: 2))
+                        .position(
+                            x: min(max(0, CGFloat(point.time) * zoom), geometry.size.width),
+                            y: y(for: point.gain, height: geometry.size.height)
+                        )
+                        .onTapGesture { onSelect(point.id) }
+                        .gesture(
+                            DragGesture(minimumDistance: 2)
+                                .onChanged { value in
+                                    onSelect(point.id)
+                                    let origin = dragOrigins[point.id] ?? point
+                                    if dragOrigins[point.id] == nil {
+                                        dragOrigins[point.id] = point
+                                    }
+                                    update(point: point, origin: origin, translation: value.translation, size: geometry.size)
+                                }
+                                .onEnded { value in
+                                    let origin = dragOrigins.removeValue(forKey: point.id) ?? point
+                                    update(point: point, origin: origin, translation: value.translation, size: geometry.size)
+                                    onCommit()
+                                }
+                        )
+                        .accessibilityLabel("Volume automation point, \(Int(point.gain * 100)) percent")
+                        .accessibilityHint("Tap to select or drag to adjust.")
+                        .accessibilityAddTraits(selectedPointID == point.id ? .isSelected : [])
+                }
+            }
+        }
+    }
+
+    private func update(
+        point: VolumeAutomationPoint,
+        origin: VolumeAutomationPoint,
+        translation: CGSize,
+        size: CGSize
+    ) {
+        let maximumTime = Double(size.width / max(zoom, 1))
+        let time = min(maximumTime, max(0, origin.time + Double(translation.width / max(zoom, 1))))
+        let usableHeight = max(1, size.height - verticalInset * 2)
+        let gain = origin.gain - Float(translation.height / usableHeight)
+        onMove(point.id, time, min(1, max(0, gain)))
+    }
+
+    private func gain(at y: CGFloat, height: CGFloat) -> Float {
+        let usableHeight = max(1, height - verticalInset * 2)
+        let normalized = min(1, max(0, (y - verticalInset) / usableHeight))
+        return Float(1 - normalized)
+    }
+
+    private func y(for gain: Float, height: CGFloat) -> CGFloat {
+        let usableHeight = max(1, height - verticalInset * 2)
+        return verticalInset + (1 - CGFloat(min(1, max(0, gain)))) * usableHeight
     }
 }

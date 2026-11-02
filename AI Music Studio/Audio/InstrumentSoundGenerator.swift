@@ -108,11 +108,12 @@ enum InstrumentSoundGenerator {
         cutoff: Double,
         attack: Double,
         release: Double,
+        duration: Double = 0.9,
         format: AVAudioFormat
     ) -> AVAudioPCMBuffer? {
         let sampleRate = format.sampleRate
-        let duration = 0.9
-        let frameCount = max(1, Int(sampleRate * duration))
+        let noteDuration = min(6, max(0.15, duration))
+        let frameCount = max(1, Int(sampleRate * noteDuration))
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
               let channels = buffer.floatChannelData else { return nil }
 
@@ -120,9 +121,9 @@ enum InstrumentSoundGenerator {
         let channelCount = Int(format.channelCount)
         let safeCutoff = min(max(100, cutoff), sampleRate * 0.46)
         let filterCoefficient = 1 - exp(-2 * Double.pi * safeCutoff / sampleRate)
-        let safeAttack = min(max(0.005, attack), duration * 0.8)
-        let safeRelease = min(max(0.02, release), duration * 0.8)
-        let releaseStart = max(safeAttack, duration - safeRelease)
+        let safeAttack = min(max(0.005, attack), noteDuration * 0.8)
+        let safeRelease = min(max(0.02, release), noteDuration * 0.8)
+        let releaseStart = max(safeAttack, noteDuration - safeRelease)
 
         for channel in 0..<channelCount {
             var filteredSample = 0.0
@@ -145,7 +146,7 @@ enum InstrumentSoundGenerator {
                 if time < safeAttack {
                     envelope = time / safeAttack
                 } else if time > releaseStart {
-                    envelope = max(0, (duration - time) / max(0.001, duration - releaseStart))
+                    envelope = max(0, (noteDuration - time) / max(0.001, noteDuration - releaseStart))
                 } else {
                     envelope = 1
                 }

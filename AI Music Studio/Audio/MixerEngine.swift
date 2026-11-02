@@ -59,6 +59,7 @@ final class MixerEngine {
     private var trackMixers: [UUID: AVAudioMixerNode] = [:]
     private var instrumentMixers: [UUID: AVAudioMixerNode] = [:]
     private var equalizers: [UUID: AVAudioUnitEQ] = [:]
+    private var compressors: [UUID: AVAudioUnitEffect] = [:]
     private var clipPlayers: [UUID: [ClipPlayback]] = [:]
     private var clipSignatures: [UUID: [AudioClip]] = [:]
     private var instrumentVoices: [UUID: [AVAudioPlayerNode]] = [:]
@@ -68,6 +69,17 @@ final class MixerEngine {
     private var previewFormat: AVAudioFormat?
     private var previewVoiceCursor = 0
     private var scheduledInstrumentFiles: [ObjectIdentifier: AVAudioFile] = [:]
+    private var notePlayers: [UUID: [AVAudioPlayerNode]] = [:]
+    private var notePlayerBusy: [UUID: [TimeInterval]] = [:]
+    private var noteBufferCache: [String: AVAudioPCMBuffer] = [:]
+    private let noteVoiceCount = 6
+    private var mixTracks: [Track] = []
+    private var automationTime: TimeInterval = 0
+    private var activeLoop: ClosedRange<TimeInterval>?
+    private var playbackHostStart: UInt64 = 0
+    private var loopScheduleDelay: TimeInterval = 0.04
+    private var nextLoopPass = 0
+    private var scheduledUntilOffset: TimeInterval = 0
     private var takeRecorder: InstrumentTakeRecorder?
     private var takeTrackID: UUID?
     private var takeURL: URL?
@@ -124,13 +136,16 @@ final class MixerEngine {
             let mixer = AVAudioMixerNode()
             let instrumentMixer = AVAudioMixerNode()
             let equalizer = AVAudioUnitEQ(numberOfBands: 3)
+            let compressor = TrackCompressorUnit.make()
 
             engine.attach(mixer)
             engine.attach(instrumentMixer)
             engine.attach(equalizer)
+            engine.attach(compressor)
             engine.connect(instrumentMixer, to: mixer, format: instrumentFormat)
             engine.connect(mixer, to: equalizer, format: format)
-            engine.connect(equalizer, to: engine.mainMixerNode, format: format)
+            engine.connect(equalizer, to: compressor, format: format)
+            engine.connect(compressor, to: engine.mainMixerNode, format: format)
 
             let store = levelStore
             let trackID = track.id
@@ -146,6 +161,14 @@ final class MixerEngine {
                 voices.append(voice)
             }
 
+            var sequencingVoices: [AVAudioPlayerNode] = []
+            for _ in 0..<noteVoiceCount {
+                let notePlayer = AVAudioPlayerNode()
+                engine.attach(notePlayer)
+                engine.connect(notePlayer, to: instrumentMixer, format: instrumentFormat)
+                sequencingVoices.append(notePlayer)
+            }
+
             var loadedClips: [ClipPlayback] = []
             for (clip, clipFile) in clipFiles {
                 let clipPlayer = AVAudioPlayerNode()
@@ -158,10 +181,13 @@ final class MixerEngine {
             trackMixers[track.id] = mixer
             instrumentMixers[track.id] = instrumentMixer
             equalizers[track.id] = equalizer
+            compressors[track.id] = compressor
             clipPlayers[track.id] = loadedClips
             instrumentVoices[track.id] = voices
+            notePlayers[track.id] = sequencingVoices
             instrumentFormats[track.id] = instrumentFormat
             configureEqualizer(equalizer, settings: track.eqSettings)
+            TrackCompressorUnit.configure(compressor, settings: track.compressorSettings)
         }
 
         updateMix(tracks: tracks)
@@ -169,16 +195,48 @@ final class MixerEngine {
     }
 
     func updateMix(tracks: [Track]) {
-        let anySolo = tracks.contains { $0.isSoloed }
-        for track in tracks {
+        mixTracks = tracks
+        let clipEnd = tracks.flatMap { track in
+            track.clips.map { clip in
+                max(0, clip.startTime) + min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+            }
+        }.max() ?? 0
+        let noteEnd = tracks.flatMap { $0.notes.map(\.endTime) }.max() ?? 0
+        duration = max(clipEnd, noteEnd)
+        applyMix()
+    }
+
+    func updateAutomation(at time: TimeInterval) {
+        automationTime = max(0, time)
+        applyMix()
+    }
+
+    private func applyMix() {
+        let anySolo = mixTracks.contains { $0.isSoloed }
+        for track in mixTracks {
             let audible = !track.isMuted && (!anySolo || track.isSoloed)
-            trackMixers[track.id]?.outputVolume = audible ? track.volume : 0
+            let automatedVolume = track.volume * track.automationGain(at: automationTime)
+            trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
+            trackMixers[track.id]?.pan = min(1, max(-1, track.pan))
+        }
+    }
+
+    /// Sets the overall output level of the studio.
+    func setMasterVolume(_ volume: Float) {
+        let clamped = min(1, max(0, volume))
+        if engine.mainMixerNode.outputVolume != clamped {
+            engine.mainMixerNode.outputVolume = clamped
         }
     }
 
     func updateEqualizer(trackID: UUID, settings: TrackEQSettings) {
         guard let equalizer = equalizers[trackID] else { return }
         configureEqualizer(equalizer, settings: settings)
+    }
+
+    func updateCompressor(trackID: UUID, settings: TrackCompressorSettings) {
+        guard let compressor = compressors[trackID] else { return }
+        TrackCompressorUnit.configure(compressor, settings: settings)
     }
 
     private func configureEqualizer(_ equalizer: AVAudioUnitEQ, settings: TrackEQSettings) {
@@ -203,55 +261,223 @@ final class MixerEngine {
         high.bypass = settings.isBypassed
     }
 
+    /// Sets or clears the section that repeats during playback.
+    func setLoopRange(_ range: ClosedRange<TimeInterval>?) {
+        let trimmed = range.flatMap { candidate -> ClosedRange<TimeInterval>? in
+            candidate.upperBound - candidate.lowerBound > 0.05 ? candidate : nil
+        }
+        guard trimmed != activeLoop else { return }
+
+        let position = currentTime
+        activeLoop = trimmed
+
+        guard isPlaying else { return }
+        seek(to: position)
+    }
+
+    /// Keeps the next loop passes scheduled while playback continues.
+    func ensureLoopScheduling() {
+        guard isPlaying, activeLoop != nil else { return }
+        scheduleLoopPasses(ahead: 30)
+    }
+
     func play() {
         guard !trackIDs.isEmpty, startAudioEngine() else { return }
+
+        let loop = activeLoop
+        if let loop,
+           playHeadOffset < loop.lowerBound || playHeadOffset >= loop.upperBound {
+            playHeadOffset = loop.lowerBound
+        }
+        updateAutomation(at: playHeadOffset)
 
         let scheduleDelay = 0.04
         let hostStart = AVAudioTime.hostTime(forSeconds: ProcessInfo.processInfo.systemUptime + scheduleDelay)
         let playbackStart = AVAudioTime(hostTime: hostStart)
         isPlaying = true
         playStartDate = Date().addingTimeInterval(scheduleDelay)
+        playbackHostStart = hostStart
+        loopScheduleDelay = scheduleDelay
+        nextLoopPass = 0
+        scheduledUntilOffset = 0
 
         for id in trackIDs {
             for loadedClip in clipPlayers[id] ?? [] {
                 loadedClip.player.stop()
-                let clip = loadedClip.clip
-                let availableSourceDuration = max(0, clip.sourceDuration - clip.sourceStartTime)
-                let clipDuration = min(clip.duration, availableSourceDuration)
-                let clipEnd = clip.startTime + clipDuration
-                guard clipEnd > playHeadOffset else { continue }
+            }
+        }
+        for players in notePlayers.values {
+            for player in players {
+                player.stop()
+            }
+        }
+        notePlayerBusy.removeAll()
 
-                let offsetInClip = max(0, playHeadOffset - clip.startTime)
-                let sourceTime = clip.sourceStartTime + offsetInClip
-                let startFrame = AVAudioFramePosition(sourceTime * loadedClip.file.processingFormat.sampleRate)
-                let availableFrames = loadedClip.file.length - startFrame
-                guard availableFrames > 0 else { continue }
+        if loop != nil {
+            scheduleLoopPasses(ahead: 30)
+        } else {
+            scheduleWindow(from: playHeadOffset, to: max(duration, playHeadOffset), timeOffset: 0)
+        }
 
-                let playableDuration = clipDuration - offsetInClip
-                let requestedFrames = AVAudioFramePosition(playableDuration * loadedClip.file.processingFormat.sampleRate)
-                let framesToPlay = min(availableFrames, requestedFrames)
-                guard framesToPlay > 0 else { continue }
-                let frameCount = AVAudioFrameCount(min(framesToPlay, Int64(UInt32.max)))
-                let delay = max(0, clip.startTime - playHeadOffset)
-                let clipHostTime = hostStart + AVAudioTime.hostTime(forSeconds: delay)
-                let clipStart = AVAudioTime(hostTime: clipHostTime)
-                loadedClip.player.scheduleSegment(
-                    loadedClip.file,
-                    startingFrame: startFrame,
-                    frameCount: frameCount,
-                    at: clipStart
-                )
+        for id in trackIDs {
+            for loadedClip in clipPlayers[id] ?? [] {
                 loadedClip.player.play(at: playbackStart)
+            }
+        }
+        for players in notePlayers.values {
+            for player in players {
+                player.play(at: playbackStart)
             }
         }
     }
 
+    /// Schedules as many loop passes as needed to cover the coming seconds.
+    private func scheduleLoopPasses(ahead: TimeInterval) {
+        guard let loop = activeLoop else { return }
+        let length = max(0.05, loop.upperBound - loop.lowerBound)
+        let elapsed = playStartDate.map { max(0, Date().timeIntervalSince($0)) } ?? 0
+        let target = elapsed + ahead
+        var scheduled = 0
+
+        while scheduledUntilOffset < target, scheduled < 500 {
+            let passStart = nextLoopPass == 0 ? playHeadOffset : loop.lowerBound
+            let passOffset = nextLoopPass == 0
+                ? 0
+                : (loop.upperBound - playHeadOffset) + Double(nextLoopPass - 1) * length
+
+            if loop.upperBound > passStart {
+                scheduleWindow(from: passStart, to: loop.upperBound, timeOffset: passOffset)
+                scheduledUntilOffset = passOffset + (loop.upperBound - passStart)
+            }
+
+            nextLoopPass += 1
+            scheduled += 1
+        }
+    }
+
+    /// Schedules every clip portion inside a timeline window at a host offset.
+    private func scheduleWindow(from start: TimeInterval, to end: TimeInterval, timeOffset: TimeInterval) {
+        guard end > start else { return }
+
+        for id in trackIDs {
+            for loadedClip in clipPlayers[id] ?? [] {
+                let clip = loadedClip.clip
+                let playableDuration = min(
+                    clip.duration,
+                    max(0, clip.sourceDuration - clip.sourceStartTime)
+                )
+                guard playableDuration > 0 else { continue }
+
+                let clipStart = max(0, clip.startTime)
+                let clipEnd = clipStart + playableDuration
+                let overlapStart = max(start, clipStart)
+                let overlapEnd = min(end, clipEnd)
+                guard overlapEnd > overlapStart else { continue }
+
+                let seconds = loopScheduleDelay + timeOffset + (overlapStart - start)
+                scheduleClipSegment(
+                    loadedClip,
+                    offset: overlapStart - clipStart,
+                    duration: overlapEnd - overlapStart,
+                    at: seconds
+                )
+            }
+
+            if let track = mixTracks.first(where: { $0.id == id }), !track.notes.isEmpty {
+                scheduleSynthNotes(
+                    track.notes,
+                    trackID: id,
+                    start: start,
+                    end: end,
+                    timeOffset: timeOffset
+                )
+            }
+        }
+    }
+
+    /// Schedules the track's piano-roll notes that start inside a timeline window.
+    private func scheduleSynthNotes(
+        _ notes: [SynthNote],
+        trackID: UUID,
+        start: TimeInterval,
+        end: TimeInterval,
+        timeOffset: TimeInterval
+    ) {
+        guard let players = notePlayers[trackID], !players.isEmpty,
+              let format = instrumentFormats[trackID] else { return }
+
+        var busy = notePlayerBusy[trackID] ?? Array(repeating: 0, count: players.count)
+        if busy.count != players.count {
+            busy = Array(repeating: 0, count: players.count)
+        }
+
+        for note in notes where note.startTime >= start && note.startTime < end {
+            guard let buffer = noteBuffer(for: note, trackID: trackID, format: format) else { continue }
+
+            let index = busy.firstIndex(where: { $0 <= note.startTime })
+                ?? busy.indices.min(by: { busy[$0] < busy[$1] }) ?? 0
+            busy[index] = note.endTime
+
+            let seconds = loopScheduleDelay + timeOffset + (note.startTime - start)
+            let hostTime = playbackHostStart + AVAudioTime.hostTime(forSeconds: seconds)
+            players[index].scheduleBuffer(buffer, at: AVAudioTime(hostTime: hostTime), options: [])
+        }
+
+        notePlayerBusy[trackID] = busy
+    }
+
+    /// Builds (and caches) the synth audio for one piano-roll note.
+    private func noteBuffer(for note: SynthNote, trackID: UUID, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let key = "\(trackID.uuidString)-\(note.pitch)-\(Int(note.duration * 1000))"
+        if let cached = noteBufferCache[key] { return cached }
+
+        guard let buffer = InstrumentSoundGenerator.synthNote(
+            frequency: SynthNote.frequency(for: note.pitch),
+            waveform: SynthNoteVoice.waveform,
+            cutoff: SynthNoteVoice.cutoff,
+            attack: SynthNoteVoice.attack,
+            release: SynthNoteVoice.release,
+            duration: note.duration + SynthNoteVoice.release,
+            format: format
+        ) else { return nil }
+
+        if noteBufferCache.count > 120 {
+            noteBufferCache.removeAll()
+        }
+        noteBufferCache[key] = buffer
+        return buffer
+    }
+
+    private func scheduleClipSegment(
+        _ loadedClip: ClipPlayback,
+        offset: TimeInterval,
+        duration: TimeInterval,
+        at seconds: TimeInterval
+    ) {
+        let sampleRate = loadedClip.file.processingFormat.sampleRate
+        guard sampleRate > 0 else { return }
+
+        let startFrame = AVAudioFramePosition((loadedClip.clip.sourceStartTime + offset) * sampleRate)
+        let availableFrames = loadedClip.file.length - startFrame
+        let requestedFrames = AVAudioFramePosition(max(0, duration) * sampleRate)
+        let frames = min(availableFrames, requestedFrames)
+        guard startFrame >= 0, frames > 0 else { return }
+
+        let hostTime = playbackHostStart + AVAudioTime.hostTime(forSeconds: seconds)
+        loadedClip.player.scheduleSegment(
+            loadedClip.file,
+            startingFrame: startFrame,
+            frameCount: AVAudioFrameCount(min(frames, Int64(UInt32.max))),
+            at: AVAudioTime(hostTime: hostTime)
+        )
+    }
+
     func pause() {
         guard isPlaying else { return }
-        if let start = playStartDate {
-            playHeadOffset = min(duration, playHeadOffset + max(0, Date().timeIntervalSince(start)))
-        }
+        playHeadOffset = currentTime
+        updateAutomation(at: playHeadOffset)
         clipPlayers.values.flatMap { $0 }.forEach { $0.player.pause() }
+        notePlayers.values.flatMap { $0 }.forEach { $0.pause() }
         isPlaying = false
         playStartDate = nil
     }
@@ -259,7 +485,10 @@ final class MixerEngine {
     func stop() {
         pause()
         playHeadOffset = 0
+        updateAutomation(at: playHeadOffset)
         clipPlayers.values.flatMap { $0 }.forEach { $0.player.stop() }
+        notePlayers.values.flatMap { $0 }.forEach { $0.stop() }
+        notePlayerBusy.removeAll()
         instrumentVoices.values.flatMap { $0 }.forEach { $0.stop() }
         previewVoices.forEach { $0.stop() }
     }
@@ -271,7 +500,10 @@ final class MixerEngine {
             pause()
         }
         playHeadOffset = min(max(0, time), duration)
+        updateAutomation(at: playHeadOffset)
         clipPlayers.values.flatMap { $0 }.forEach { $0.player.stop() }
+        notePlayers.values.flatMap { $0 }.forEach { $0.stop() }
+        notePlayerBusy.removeAll()
         if wasPlaying {
             play()
         }
@@ -280,7 +512,18 @@ final class MixerEngine {
     var currentTime: TimeInterval {
         guard isPlaying, let start = playStartDate else { return playHeadOffset }
         let elapsed = max(0, Date().timeIntervalSince(start))
-        return duration > 0 ? min(duration, playHeadOffset + elapsed) : playHeadOffset + elapsed
+        let linear = playHeadOffset + elapsed
+
+        if let loop = activeLoop {
+            let length = loop.upperBound - loop.lowerBound
+            if length > 0, linear >= loop.upperBound {
+                let overflow = (linear - loop.upperBound).truncatingRemainder(dividingBy: length)
+                return min(loop.upperBound, loop.lowerBound + overflow)
+            }
+            return min(loop.upperBound, linear)
+        }
+
+        return duration > 0 ? min(duration, linear) : linear
     }
 
     func level(for id: UUID) -> Float {
@@ -320,6 +563,14 @@ final class MixerEngine {
         player.scheduleFile(file, at: nil)
         scheduledInstrumentFiles[ObjectIdentifier(player)] = file
         player.play()
+    }
+
+    /// Stops any sound preview playing on the master output.
+    func stopPreviews() {
+        for voice in previewVoices {
+            voice.stop()
+            scheduledInstrumentFiles.removeValue(forKey: ObjectIdentifier(voice))
+        }
     }
 
     func startInstrumentRecording(trackID: UUID, outputURL: URL) throws {
@@ -502,6 +753,15 @@ final class MixerEngine {
                 engine.detach(voice)
             }
         }
+        for players in notePlayers.values {
+            players.forEach { player in
+                player.stop()
+                engine.detach(player)
+            }
+        }
+        notePlayers.removeAll()
+        notePlayerBusy.removeAll()
+        noteBufferCache.removeAll()
         previewVoices.forEach { voice in
             voice.stop()
             engine.detach(voice)
@@ -512,6 +772,9 @@ final class MixerEngine {
         for equalizer in equalizers.values {
             engine.detach(equalizer)
         }
+        for compressor in compressors.values {
+            engine.detach(compressor)
+        }
         for mixer in trackMixers.values {
             mixer.removeTap(onBus: 0)
             engine.detach(mixer)
@@ -519,6 +782,7 @@ final class MixerEngine {
         trackMixers.removeAll()
         instrumentMixers.removeAll()
         equalizers.removeAll()
+        compressors.removeAll()
         clipPlayers.removeAll()
         clipSignatures.removeAll()
         instrumentVoices.removeAll()
@@ -527,6 +791,8 @@ final class MixerEngine {
         previewVoices.removeAll()
         previewFormat = nil
         scheduledInstrumentFiles.removeAll()
+        mixTracks = []
+        automationTime = 0
         trackIDs = []
         playHeadOffset = 0
         playStartDate = nil

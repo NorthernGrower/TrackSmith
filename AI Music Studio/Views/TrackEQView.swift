@@ -10,11 +10,14 @@ struct TrackEQView: View {
     let trackID: UUID
     @Environment(\.dismiss) private var dismiss
     @State private var settings: TrackEQSettings
+    @State private var compressorSettings: TrackCompressorSettings
 
     init(model: MixerViewModel, trackID: UUID) {
         self.model = model
         self.trackID = trackID
-        _settings = State(initialValue: model.tracks.first(where: { $0.id == trackID })?.eqSettings ?? TrackEQSettings())
+        let track = model.tracks.first(where: { $0.id == trackID })
+        _settings = State(initialValue: track?.eqSettings ?? TrackEQSettings())
+        _compressorSettings = State(initialValue: track?.compressorSettings ?? TrackCompressorSettings())
     }
 
     var body: some View {
@@ -52,6 +55,7 @@ struct TrackEQView: View {
                         frequencyRange: 1_000...18_000,
                         gain: $settings.highGain
                     )
+                    compressorPanel
                 }
                 .padding(16)
             }
@@ -76,6 +80,9 @@ struct TrackEQView: View {
         }
         .onChange(of: settings) { _, newSettings in
             model.setTrackEQ(trackID, settings: newSettings)
+        }
+        .onChange(of: compressorSettings) { _, newSettings in
+            model.setTrackCompressor(trackID, settings: newSettings)
         }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
@@ -144,6 +151,80 @@ struct TrackEQView: View {
         .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.07), lineWidth: 1)
+        }
+    }
+
+    private var compressorPanel: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("COMPRESSOR")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundStyle(Color.studioAccent)
+                    Text("Dynamics control")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(String(format: "%.1f:1", compressorSettings.ratio))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            }
+
+            Toggle(isOn: $compressorSettings.isBypassed) {
+                Text("Bypass Compressor")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .tint(Color.studioAccent)
+
+            compressorSlider(
+                title: "Threshold",
+                value: $compressorSettings.thresholdDB,
+                range: -48...0,
+                valueText: String(format: "%.1f dB", compressorSettings.thresholdDB)
+            )
+            compressorSlider(
+                title: "Ratio",
+                value: $compressorSettings.ratio,
+                range: 1...20,
+                valueText: String(format: "%.1f:1", compressorSettings.ratio)
+            )
+            compressorSlider(
+                title: "Attack",
+                value: $compressorSettings.attackMilliseconds,
+                range: 0.1...100,
+                valueText: String(format: "%.1f ms", compressorSettings.attackMilliseconds)
+            )
+            compressorSlider(
+                title: "Release",
+                value: $compressorSettings.releaseMilliseconds,
+                range: 10...1_000,
+                valueText: String(format: "%.0f ms", compressorSettings.releaseMilliseconds)
+            )
+        }
+        .padding(13)
+        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.07), lineWidth: 1)
+        }
+    }
+
+    private func compressorSlider(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        valueText: String
+    ) -> some View {
+        VStack(spacing: 3) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                Spacer()
+                Text(valueText)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range)
         }
     }
 

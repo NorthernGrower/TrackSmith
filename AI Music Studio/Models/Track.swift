@@ -15,6 +15,26 @@ struct TrackEQSettings: Codable, Equatable {
     var highGain = 0.0
 }
 
+struct TrackCompressorSettings: Codable, Equatable {
+    var isBypassed = true
+    var thresholdDB = -18.0
+    var ratio = 4.0
+    var attackMilliseconds = 10.0
+    var releaseMilliseconds = 120.0
+}
+
+struct VolumeAutomationPoint: Identifiable, Codable, Equatable {
+    var id: UUID
+    var time: TimeInterval
+    var gain: Float
+
+    init(id: UUID = UUID(), time: TimeInterval, gain: Float) {
+        self.id = id
+        self.time = time
+        self.gain = gain
+    }
+}
+
 /// One layer of the session (a stem such as vocals, drums or bass).
 struct Track: Identifiable, Codable, Equatable {
     var id: UUID
@@ -23,10 +43,15 @@ struct Track: Identifiable, Codable, Equatable {
     var fileName: String
     /// Gain from 0 to 1.
     var volume: Float
+    /// Stereo position from -1 (left) to 1 (right).
+    var pan: Float
     var isMuted: Bool
     var isSoloed: Bool
     var clips: [AudioClip]
     var eqSettings: TrackEQSettings
+    var compressorSettings: TrackCompressorSettings
+    var volumeAutomationPoints: [VolumeAutomationPoint]
+    var notes: [SynthNote]
     private var clipLayoutInitialized: Bool
 
     init(
@@ -34,15 +59,20 @@ struct Track: Identifiable, Codable, Equatable {
         name: String,
         fileName: String,
         volume: Float = 1.0,
+        pan: Float = 0,
         isMuted: Bool = false,
         isSoloed: Bool = false,
         clips: [AudioClip]? = nil,
-        eqSettings: TrackEQSettings = TrackEQSettings()
+        eqSettings: TrackEQSettings = TrackEQSettings(),
+        compressorSettings: TrackCompressorSettings = TrackCompressorSettings(),
+        volumeAutomationPoints: [VolumeAutomationPoint] = [],
+        notes: [SynthNote] = []
     ) {
         self.id = id
         self.name = name
         self.fileName = fileName
         self.volume = volume
+        self.pan = pan
         self.isMuted = isMuted
         self.isSoloed = isSoloed
         self.clips = clips ?? [AudioClip(
@@ -56,6 +86,9 @@ struct Track: Identifiable, Codable, Equatable {
             isOriginal: true
         )]
         self.eqSettings = eqSettings
+        self.compressorSettings = compressorSettings
+        self.volumeAutomationPoints = volumeAutomationPoints
+        self.notes = notes
         clipLayoutInitialized = true
     }
 
@@ -64,10 +97,14 @@ struct Track: Identifiable, Codable, Equatable {
         case name
         case fileName
         case volume
+        case pan
         case isMuted
         case isSoloed
         case clips
         case eqSettings
+        case compressorSettings
+        case volumeAutomationPoints
+        case notes
         case clipLayoutInitialized
     }
 
@@ -77,6 +114,7 @@ struct Track: Identifiable, Codable, Equatable {
         name = try values.decode(String.self, forKey: .name)
         fileName = try values.decode(String.self, forKey: .fileName)
         volume = try values.decodeIfPresent(Float.self, forKey: .volume) ?? 1.0
+        pan = try values.decodeIfPresent(Float.self, forKey: .pan) ?? 0
         isMuted = try values.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
         isSoloed = try values.decodeIfPresent(Bool.self, forKey: .isSoloed) ?? false
         let storedClips = try values.decodeIfPresent([AudioClip].self, forKey: .clips) ?? []
@@ -98,7 +136,31 @@ struct Track: Identifiable, Codable, Equatable {
             clips = [sourceClip] + storedClips
         }
         eqSettings = try values.decodeIfPresent(TrackEQSettings.self, forKey: .eqSettings) ?? TrackEQSettings()
+        compressorSettings = try values.decodeIfPresent(TrackCompressorSettings.self, forKey: .compressorSettings) ?? TrackCompressorSettings()
+        volumeAutomationPoints = try values.decodeIfPresent([VolumeAutomationPoint].self, forKey: .volumeAutomationPoints) ?? []
+        notes = try values.decodeIfPresent([SynthNote].self, forKey: .notes) ?? []
         clipLayoutInitialized = true
+    }
+
+    func automationGain(at time: TimeInterval) -> Float {
+        let points = volumeAutomationPoints.sorted { $0.time < $1.time }
+        guard let first = points.first else { return 1 }
+        if time <= first.time { return min(1, max(0, first.gain)) }
+
+        for index in 1..<points.count {
+            let left = points[index - 1]
+            let right = points[index]
+            guard time <= right.time else { continue }
+            let span = right.time - left.time
+            guard span > 0 else { return min(1, max(0, right.gain)) }
+            let progress = Float(min(1, max(0, (time - left.time) / span)))
+            let eased = progress * progress * (3 - 2 * progress)
+            let startGain = min(1, max(0, left.gain))
+            let endGain = min(1, max(0, right.gain))
+            return startGain + (endGain - startGain) * eased
+        }
+
+        return min(1, max(0, points[points.count - 1].gain))
     }
 }
 

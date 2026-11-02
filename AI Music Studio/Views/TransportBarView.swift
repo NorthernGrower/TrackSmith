@@ -70,6 +70,8 @@ struct TransportBarView: View {
             .padding(.horizontal, 15)
             .padding(.bottom, 8)
 
+            loopControls
+
             tempoControls
         }
         .padding(.top, 10)
@@ -91,6 +93,45 @@ struct TransportBarView: View {
         } message: {
             Text("Choose a tempo from 60 to 200 BPM.")
         }
+    }
+
+    private var loopControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.toggleLoop()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "repeat")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(model.isLoopEnabled ? "LOOP ON" : "LOOP")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.6)
+                }
+                .foregroundStyle(model.isLoopEnabled ? Color.black : Color.white.opacity(0.7))
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(
+                    model.isLoopEnabled ? Color.studioAccent : Color.studioPanelHighlight,
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.hasLoopRange)
+            .opacity(model.hasLoopRange ? 1 : 0.4)
+            .accessibilityLabel(model.isLoopEnabled ? "Turn loop playback off" : "Turn loop playback on")
+            .accessibilityAddTraits(model.isLoopEnabled ? .isSelected : [])
+
+            Text(model.hasLoopRange
+                ? "\(studioTimeString(model.loopStart)) – \(studioTimeString(model.loopEnd))"
+                : "Drag markers on the ruler")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 15)
+        .padding(.bottom, 8)
     }
 
     private var tempoControls: some View {

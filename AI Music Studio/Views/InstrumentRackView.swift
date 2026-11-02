@@ -24,6 +24,7 @@ struct InstrumentRackView: View {
     @State private var tb303Decay = 0.42
     @State private var tb303Accent = false
     @State private var showSamplerImporter = false
+    @State private var showSampleLibrary = false
     @State private var countInValue: Int?
     @State private var countInTask: Task<Void, Never>?
 
@@ -101,6 +102,11 @@ struct InstrumentRackView: View {
             if case .success(let urls) = result, let url = urls.first {
                 model.loadSampler(from: url)
             }
+        }
+        .sheet(isPresented: $showSampleLibrary) {
+            SampleLibraryView(model: model)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
         }
         .onDisappear {
             cancelCountIn()
@@ -603,6 +609,28 @@ struct InstrumentRackView: View {
             }
             .padding(12)
             .background(Color.studioBackground, in: RoundedRectangle(cornerRadius: 10))
+
+            Button {
+                showSampleLibrary = true
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Browse Sample Library")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(Color.studioAccent)
+                .padding(.horizontal, 11)
+                .frame(height: 40)
+                .background(Color.studioBackground, in: RoundedRectangle(cornerRadius: 9))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Browse sample library")
 
             HStack(spacing: 9) {
                 Button {

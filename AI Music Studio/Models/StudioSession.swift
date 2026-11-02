@@ -11,6 +11,13 @@ struct StudioSession: Identifiable, Codable, Equatable {
     var tracks: [Track]
     var tempoBPM: Int
     var drumPattern: DrumPattern
+    /// Start of the timeline section that repeats during playback.
+    var loopStart: TimeInterval
+    /// End of the timeline section that repeats during playback.
+    var loopEnd: TimeInterval
+    var isLoopEnabled: Bool
+    /// Overall output level of the master strip, from 0 to 1.
+    var masterVolume: Float
     var lastEdited: Date
 
     init(
@@ -19,6 +26,10 @@ struct StudioSession: Identifiable, Codable, Equatable {
         tracks: [Track] = [],
         tempoBPM: Int = 120,
         drumPattern: DrumPattern = DrumPattern(),
+        loopStart: TimeInterval = 0,
+        loopEnd: TimeInterval = 0,
+        isLoopEnabled: Bool = false,
+        masterVolume: Float = 1,
         lastEdited: Date = Date()
     ) {
         self.id = id
@@ -26,7 +37,38 @@ struct StudioSession: Identifiable, Codable, Equatable {
         self.tracks = tracks
         self.tempoBPM = tempoBPM
         self.drumPattern = drumPattern
+        self.loopStart = loopStart
+        self.loopEnd = loopEnd
+        self.isLoopEnabled = isLoopEnabled
+        self.masterVolume = masterVolume
         self.lastEdited = lastEdited
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case tracks
+        case tempoBPM
+        case drumPattern
+        case loopStart
+        case loopEnd
+        case isLoopEnabled
+        case masterVolume
+        case lastEdited
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try values.decodeIfPresent(String.self, forKey: .name) ?? "Untitled Session"
+        tracks = try values.decodeIfPresent([Track].self, forKey: .tracks) ?? []
+        tempoBPM = try values.decodeIfPresent(Int.self, forKey: .tempoBPM) ?? 120
+        drumPattern = try values.decodeIfPresent(DrumPattern.self, forKey: .drumPattern) ?? DrumPattern()
+        loopStart = try values.decodeIfPresent(TimeInterval.self, forKey: .loopStart) ?? 0
+        loopEnd = try values.decodeIfPresent(TimeInterval.self, forKey: .loopEnd) ?? 0
+        isLoopEnabled = try values.decodeIfPresent(Bool.self, forKey: .isLoopEnabled) ?? false
+        masterVolume = try values.decodeIfPresent(Float.self, forKey: .masterVolume) ?? 1
+        lastEdited = try values.decodeIfPresent(Date.self, forKey: .lastEdited) ?? Date()
     }
 }
 

@@ -32,6 +32,7 @@ struct MixerView: View {
     @State private var chat = AgentChatViewModel()
     @State private var activeSheet: StudioSheet?
     @State private var selectedEQTrackID: UUID?
+    @State private var selectedPianoRollTrackID: UUID?
 
     var body: some View {
         ZStack {
@@ -44,10 +45,17 @@ struct MixerView: View {
                     emptyState
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    WaveformTimeline(model: model) { trackID in
-                        selectedEQTrackID = trackID
-                        activeSheet = .trackEQ
-                    }
+                    WaveformTimeline(
+                        model: model,
+                        onOpenTrackEQ: { trackID in
+                            selectedEQTrackID = trackID
+                            activeSheet = .trackEQ
+                        },
+                        onOpenPianoRoll: { trackID in
+                            selectedPianoRollTrackID = trackID
+                            activeSheet = .pianoRoll
+                        }
+                    )
                 }
 
                 TransportBarView(model: model)
@@ -124,6 +132,18 @@ struct MixerView: View {
                 SessionLibraryView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .mixer:
+                ChannelMixerView(model: model)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+            case .pianoRoll:
+                if let selectedPianoRollTrackID {
+                    PianoRollView(model: model, trackID: selectedPianoRollTrackID)
+                        .presentationDetents([.large])
+                        .presentationDragIndicator(.visible)
+                } else {
+                    Color.clear
+                }
             }
         }
         .onChange(of: model.lastExportURL) { _, exportURL in
@@ -189,6 +209,17 @@ struct MixerView: View {
                 .disabled(!model.canRedo)
                 .opacity(model.canRedo ? 1 : 0.35)
                 .accessibilityLabel("Redo")
+
+                Button {
+                    activeSheet = .mixer
+                } label: {
+                    Image(systemName: "slider.vertical.3")
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(width: 38, height: 38)
+                        .background(Color.studioPanelHighlight.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Channel mixer")
 
                 Menu {
                     Button {
@@ -398,6 +429,8 @@ private enum StudioSheet: String, Identifiable {
     case exports
     case trackEQ
     case sessions
+    case mixer
+    case pianoRoll
 
     var id: String { rawValue }
 }

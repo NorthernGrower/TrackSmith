@@ -15,6 +15,8 @@ final class MixerViewModel: ObservableObject {
         let volume: Float
         let isMuted: Bool
         let isSoloed: Bool
+        let volumeAutomationPoints: [VolumeAutomationPoint]
+        let notes: [SynthNote]
     }
 
     @Published private(set) var tracks: [Track] = []
@@ -24,8 +26,13 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var levels: [UUID: Float] = [:]
+    @Published private(set) var masterVolume: Float = 1
+    @Published private(set) var masterLevel: Float = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var tempoBPM = 120
+    @Published private(set) var loopStart: TimeInterval = 0
+    @Published private(set) var loopEnd: TimeInterval = 0
+    @Published private(set) var isLoopEnabled = false
     @Published private(set) var drumPattern = DrumPattern()
     @Published private(set) var isDrumSequencerPlaying = false
     @Published private(set) var currentDrumStep: Int?
@@ -44,6 +51,9 @@ final class MixerViewModel: ObservableObject {
     @Published var separationError: String?
     @Published private(set) var samplerDisplayName: String?
     @Published private(set) var samplerError: String?
+    @Published private(set) var sampleLibrary: [SampleLibraryItem] = []
+    @Published private(set) var isLoadingSampleLibrary = false
+    @Published private(set) var previewingSampleID: String?
     @Published private(set) var isRecordingInstrument = false
     @Published private(set) var recordingElapsed: TimeInterval = 0
     @Published private(set) var recordingError: String?
@@ -64,10 +74,12 @@ final class MixerViewModel: ObservableObject {
     private var wasPlayingBeforeScrub = false
     nonisolated(unsafe) private var playbackTask: Task<Void, Never>?
     nonisolated(unsafe) private var drumSequencerTask: Task<Void, Never>?
+    nonisolated(unsafe) private var samplePreviewTask: Task<Void, Never>?
     private var undoStack: [[UndoTrackState]] = []
     private var redoStack: [[UndoTrackState]] = []
     private var pendingUndoSnapshot: [UndoTrackState]?
     private let historyLimit = 50
+    private let minimumLoopLength: TimeInterval = 0.2
 
     init() {
         microphonePermissionGranted = AVAudioSession.sharedInstance().recordPermission == .granted
@@ -79,11 +91,17 @@ final class MixerViewModel: ObservableObject {
             tracks = session.tracks
             tempoBPM = min(200, max(60, session.tempoBPM))
             drumPattern = session.drumPattern
+            loopStart = max(0, session.loopStart)
+            loopEnd = max(loopStart, session.loopEnd)
+            isLoopEnabled = session.isLoopEnabled
+            masterVolume = min(1, max(0, session.masterVolume))
         }
         exports = MixExportStorage.loadExports()
         resolveClipMetadata()
         engine.load(tracks: tracks)
         duration = engine.duration
+        applyLoopChangeToEngine()
+        engine.setMasterVolume(masterVolume)
         loadWaveforms()
 
         playbackTask = Task { [weak self] in
@@ -97,6 +115,7 @@ final class MixerViewModel: ObservableObject {
     deinit {
         playbackTask?.cancel()
         drumSequencerTask?.cancel()
+        samplePreviewTask?.cancel()
     }
 
     func importTracks(from urls: [URL]) {
@@ -119,10 +138,140 @@ final class MixerViewModel: ObservableObject {
         engine.updateMix(tracks: tracks)
     }
 
+    /// Places a track in the stereo field, from -1 (left) to 1 (right).
+    func setPan(_ id: UUID, _ value: Float) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        tracks[index].pan = min(1, max(-1, value))
+        engine.updateMix(tracks: tracks)
+    }
+
+    /// Sets the overall output level of the master strip.
+    func setMasterVolume(_ value: Float) {
+        masterVolume = min(1, max(0, value))
+        engine.setMasterVolume(masterVolume)
+    }
+
+    func addVolumeAutomationPoint(
+        trackID: UUID,
+        at time: TimeInterval,
+        gain: Float,
+        snapInterval: TimeInterval,
+        maximumTime: TimeInterval
+    ) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        beginUndoableEdit()
+        let snapped = min(maximumTime, snappedTime(time, interval: snapInterval))
+        tracks[index].volumeAutomationPoints.append(
+            VolumeAutomationPoint(time: snapped, gain: min(1, max(0, gain)))
+        )
+        tracks[index].volumeAutomationPoints.sort { $0.time < $1.time }
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    func moveVolumeAutomationPoint(
+        trackID: UUID,
+        pointID: UUID,
+        to time: TimeInterval,
+        gain: Float,
+        snapInterval: TimeInterval,
+        maximumTime: TimeInterval
+    ) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let pointIndex = tracks[trackIndex].volumeAutomationPoints.firstIndex(where: { $0.id == pointID }) else { return }
+        beginUndoableEdit()
+        let snapped = min(maximumTime, snappedTime(time, interval: snapInterval))
+        tracks[trackIndex].volumeAutomationPoints[pointIndex].time = snapped
+        tracks[trackIndex].volumeAutomationPoints[pointIndex].gain = min(1, max(0, gain))
+        tracks[trackIndex].volumeAutomationPoints.sort { $0.time < $1.time }
+        engine.updateMix(tracks: tracks)
+    }
+
+    func deleteVolumeAutomationPoint(trackID: UUID, pointID: UUID) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let pointIndex = tracks[trackIndex].volumeAutomationPoints.firstIndex(where: { $0.id == pointID }) else { return }
+        beginUndoableEdit()
+        tracks[trackIndex].volumeAutomationPoints.remove(at: pointIndex)
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    // MARK: - Piano roll notes
+
+    func addSynthNote(
+        trackID: UUID,
+        pitch: Int,
+        startTime: TimeInterval,
+        duration noteDuration: TimeInterval,
+        snapInterval: TimeInterval
+    ) -> UUID? {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return nil }
+        beginUndoableEdit()
+        let note = SynthNote(
+            pitch: min(SynthNote.highestPitch, max(SynthNote.lowestPitch, pitch)),
+            startTime: snappedTime(startTime, interval: snapInterval),
+            duration: max(snapInterval, snappedTime(noteDuration, interval: snapInterval))
+        )
+        tracks[index].notes.append(note)
+        tracks[index].notes.sort { $0.startTime < $1.startTime }
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+        commitSession()
+        return note.id
+    }
+
+    func moveSynthNote(
+        trackID: UUID,
+        noteID: UUID,
+        startTime: TimeInterval,
+        pitch: Int,
+        snapInterval: TimeInterval
+    ) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let noteIndex = tracks[trackIndex].notes.firstIndex(where: { $0.id == noteID }) else { return }
+        beginUndoableEdit()
+        tracks[trackIndex].notes[noteIndex].startTime = snappedTime(startTime, interval: snapInterval)
+        tracks[trackIndex].notes[noteIndex].pitch = min(SynthNote.highestPitch, max(SynthNote.lowestPitch, pitch))
+        tracks[trackIndex].notes.sort { $0.startTime < $1.startTime }
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+    }
+
+    func resizeSynthNote(
+        trackID: UUID,
+        noteID: UUID,
+        duration newDuration: TimeInterval,
+        snapInterval: TimeInterval
+    ) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let noteIndex = tracks[trackIndex].notes.firstIndex(where: { $0.id == noteID }) else { return }
+        beginUndoableEdit()
+        tracks[trackIndex].notes[noteIndex].duration = max(snapInterval, snappedTime(newDuration, interval: snapInterval))
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+    }
+
+    func deleteSynthNote(trackID: UUID, noteID: UUID) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let noteIndex = tracks[trackIndex].notes.firstIndex(where: { $0.id == noteID }) else { return }
+        beginUndoableEdit()
+        tracks[trackIndex].notes.remove(at: noteIndex)
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+        commitSession()
+    }
+
     func setTrackEQ(_ id: UUID, settings: TrackEQSettings) {
         guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
         tracks[index].eqSettings = settings
         engine.updateEqualizer(trackID: id, settings: settings)
+        commitSession()
+    }
+
+    func setTrackCompressor(_ id: UUID, settings: TrackCompressorSettings) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        tracks[index].compressorSettings = settings
+        engine.updateCompressor(trackID: id, settings: settings)
         commitSession()
     }
 
@@ -206,6 +355,10 @@ final class MixerViewModel: ObservableObject {
         sessions[index].tracks = tracks
         sessions[index].tempoBPM = tempoBPM
         sessions[index].drumPattern = drumPattern
+        sessions[index].loopStart = loopStart
+        sessions[index].loopEnd = loopEnd
+        sessions[index].isLoopEnabled = isLoopEnabled
+        sessions[index].masterVolume = masterVolume
         if markEdited {
             sessions[index].lastEdited = Date()
         }
@@ -229,6 +382,10 @@ final class MixerViewModel: ObservableObject {
         tracks = session.tracks
         tempoBPM = min(200, max(60, session.tempoBPM))
         drumPattern = session.drumPattern
+        loopStart = max(0, session.loopStart)
+        loopEnd = max(loopStart, session.loopEnd)
+        isLoopEnabled = session.isLoopEnabled
+        masterVolume = min(1, max(0, session.masterVolume))
         pendingUndoSnapshot = nil
         undoStack.removeAll()
         redoStack.removeAll()
@@ -237,6 +394,8 @@ final class MixerViewModel: ObservableObject {
         resolveClipMetadata()
         engine.load(tracks: tracks)
         duration = engine.duration
+        applyLoopChangeToEngine()
+        engine.setMasterVolume(masterVolume)
         isPlaying = false
         currentTime = 0
         loadWaveforms()
@@ -300,7 +459,15 @@ final class MixerViewModel: ObservableObject {
 
     private func makeUndoSnapshot() -> [UndoTrackState] {
         tracks.map {
-            UndoTrackState(id: $0.id, clips: $0.clips, volume: $0.volume, isMuted: $0.isMuted, isSoloed: $0.isSoloed)
+            UndoTrackState(
+                id: $0.id,
+                clips: $0.clips,
+                volume: $0.volume,
+                isMuted: $0.isMuted,
+                isSoloed: $0.isSoloed,
+                volumeAutomationPoints: $0.volumeAutomationPoints,
+                notes: $0.notes
+            )
         }
     }
 
@@ -313,10 +480,13 @@ final class MixerViewModel: ObservableObject {
             tracks[index].volume = state.volume
             tracks[index].isMuted = state.isMuted
             tracks[index].isSoloed = state.isSoloed
+            tracks[index].volumeAutomationPoints = state.volumeAutomationPoints
+            tracks[index].notes = state.notes
         }
 
         engine.load(tracks: tracks)
         duration = engine.duration
+        applyLoopChangeToEngine()
         currentTime = duration > 0 ? min(max(0, resumeTime), duration) : max(0, resumeTime)
         engine.seek(to: currentTime)
         if wasPlaying { engine.play() }
@@ -445,6 +615,7 @@ final class MixerViewModel: ObservableObject {
             samplerFileURL = TrackStorage.url(forFileName: imported.storedName)
             samplerDisplayName = imported.displayName
             samplerError = nil
+            refreshSampleLibrary()
         } catch {
             samplerError = "The selected audio file could not be loaded."
         }
@@ -456,6 +627,80 @@ final class MixerViewModel: ObservableObject {
     }
 
     func clearSamplerError() {
+        samplerError = nil
+    }
+
+    // MARK: - Sample library
+
+    /// The library sound the sampler currently holds, when it came from the library.
+    var loadedSampleFileName: String? {
+        samplerFileURL?.lastPathComponent
+    }
+
+    /// Reads the audio files stored on device for the sample library.
+    func refreshSampleLibrary() {
+        guard !isLoadingSampleLibrary else { return }
+        isLoadingSampleLibrary = true
+
+        Task { [weak self] in
+            let items = await Task.detached(priority: .userInitiated) {
+                SampleLibrary.scan()
+            }.value
+
+            guard let self else { return }
+            self.sampleLibrary = items
+            self.isLoadingSampleLibrary = false
+
+            if let previewingSampleID = self.previewingSampleID,
+               !items.contains(where: { $0.id == previewingSampleID }) {
+                self.stopSamplePreview()
+            }
+        }
+    }
+
+    /// Plays a short preview of a library sound on the master output.
+    func previewSample(_ item: SampleLibraryItem) {
+        if previewingSampleID == item.id {
+            stopSamplePreview()
+            return
+        }
+
+        guard FileManager.default.fileExists(atPath: item.url.path) else {
+            samplerError = "That sound is no longer in the library."
+            refreshSampleLibrary()
+            return
+        }
+
+        samplePreviewTask?.cancel()
+        engine.stopPreviews()
+        engine.playInstrumentFile(at: item.url, destinationTrackID: nil)
+        previewingSampleID = item.id
+
+        let previewLength = min(max(item.duration, 0.6), 12)
+        samplePreviewTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(previewLength))
+            guard !Task.isCancelled else { return }
+            self?.stopSamplePreview()
+        }
+    }
+
+    func stopSamplePreview() {
+        samplePreviewTask?.cancel()
+        samplePreviewTask = nil
+        previewingSampleID = nil
+        engine.stopPreviews()
+    }
+
+    /// Points the sampler at a sound already stored on device.
+    func loadSamplerSample(_ item: SampleLibraryItem) {
+        guard FileManager.default.fileExists(atPath: item.url.path) else {
+            samplerError = "That sound is no longer in the library."
+            refreshSampleLibrary()
+            return
+        }
+        stopSamplePreview()
+        samplerFileURL = item.url
+        samplerDisplayName = item.name
         samplerError = nil
     }
 
@@ -589,6 +834,7 @@ final class MixerViewModel: ObservableObject {
 
         let outputURL = MixExportStorage.newExportURL()
         let tracksToBounce = tracks
+        let masterVolumeToBounce = masterVolume
         let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
             Task { @MainActor [weak self] in
                 self?.bounceProgress = fraction
@@ -599,7 +845,12 @@ final class MixerViewModel: ObservableObject {
         Task {
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try MixBounceRenderer.render(tracks: tracksToBounce, to: outputURL, progress: progressUpdate)
+                    try MixBounceRenderer.render(
+                        tracks: tracksToBounce,
+                        masterVolume: masterVolumeToBounce,
+                        to: outputURL,
+                        progress: progressUpdate
+                    )
                 }.value
                 refreshExports()
                 lastExportURL = outputURL
@@ -801,6 +1052,66 @@ final class MixerViewModel: ObservableObject {
         isPlaying = false
         currentTime = 0
         levels = [:]
+    }
+
+    // MARK: - Loop range
+
+    /// Whether the session has a section marked for looping.
+    var hasLoopRange: Bool {
+        loopEnd > loopStart + 0.01
+    }
+
+    private var isLoopingPlayback: Bool {
+        isLoopEnabled && hasLoopRange
+    }
+
+    /// Turns repeating playback on or off for the marked section.
+    func toggleLoop() {
+        guard hasLoopRange else { return }
+        isLoopEnabled.toggle()
+        applyLoopChangeToEngine()
+        persistActiveSession()
+    }
+
+    /// Marks a new section by dragging on the loop strip.
+    func setLoopRange(start: TimeInterval, end: TimeInterval) {
+        let lower = max(0, min(start, end))
+        var upper = max(start, end)
+        if duration > 0 {
+            upper = min(upper, duration)
+        }
+        loopStart = min(lower, max(0, upper - minimumLoopLength))
+        loopEnd = max(loopStart + minimumLoopLength, upper)
+    }
+
+    /// Moves the start marker of the loop.
+    func setLoopStart(_ time: TimeInterval) {
+        let maximumStart = max(0, loopEnd - minimumLoopLength)
+        loopStart = min(max(0, time), maximumStart)
+    }
+
+    /// Moves the end marker of the loop.
+    func setLoopEnd(_ time: TimeInterval) {
+        let upperLimit = duration > 0 ? duration : max(loopEnd, time)
+        loopEnd = min(upperLimit, max(loopStart + minimumLoopLength, time))
+    }
+
+    /// Applies finished marker edits to playback and saves them with the session.
+    func commitLoopChange() {
+        applyLoopChangeToEngine()
+        persistActiveSession()
+    }
+
+    private func applyLoopChangeToEngine() {
+        if duration > 0 {
+            loopStart = min(loopStart, max(0, duration - minimumLoopLength))
+            loopEnd = min(max(loopStart, loopEnd), duration)
+        }
+
+        let range = isLoopingPlayback
+            ? ClosedRange(uncheckedBounds: (loopStart, loopEnd))
+            : nil
+        engine.setLoopRange(range)
     }
 
     // MARK: - Timeline scrubbing
@@ -1007,6 +1318,7 @@ final class MixerViewModel: ObservableObject {
         resolveClipMetadata()
         engine.load(tracks: tracks)
         duration = engine.duration
+        applyLoopChangeToEngine()
         isPlaying = false
         currentTime = 0
         loadWaveforms()
@@ -1015,7 +1327,9 @@ final class MixerViewModel: ObservableObject {
 
     private func refresh() {
         let time = engine.currentTime
-        if isPlaying, duration > 0, time >= duration {
+        engine.updateAutomation(at: time)
+        engine.ensureLoopScheduling()
+        if isPlaying, !isLoopingPlayback, duration > 0, time >= duration {
             stop()
         } else {
             currentTime = time
@@ -1034,5 +1348,9 @@ final class MixerViewModel: ObservableObject {
             smoothedLevels[track.id] = smoothed
             levels[track.id] = smoothed
         }
+
+        let loudestTrack = tracks.map { levels[$0.id] ?? 0 }.max() ?? 0
+        let target = min(1, loudestTrack * masterVolume)
+        masterLevel = target > masterLevel ? target : masterLevel * 0.82
     }
 }

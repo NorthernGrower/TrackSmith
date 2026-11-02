@@ -12,6 +12,12 @@ private struct BounceClip {
     let player: AVAudioPlayerNode
 }
 
+private struct BounceNote {
+    let buffer: AVAudioPCMBuffer
+    let note: SynthNote
+    let player: AVAudioPlayerNode
+}
+
 enum MixBounceRenderer {
     enum RenderError: LocalizedError {
         case noAudio
@@ -32,6 +38,7 @@ enum MixBounceRenderer {
 
     static func render(
         tracks: [Track],
+        masterVolume: Float = 1,
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
     ) throws {
@@ -42,15 +49,23 @@ enum MixBounceRenderer {
 
         let engine = AVAudioEngine()
         var queuedClips: [BounceClip] = []
+        var queuedNotes: [BounceNote] = []
+        var trackMixers: [UUID: AVAudioMixerNode] = [:]
         var duration: TimeInterval = 0
         let anySolo = tracks.contains { $0.isSoloed }
 
         for track in tracks {
             let trackMixer = AVAudioMixerNode()
+            let compressor = TrackCompressorUnit.make()
             engine.attach(trackMixer)
-            engine.connect(trackMixer, to: engine.mainMixerNode, format: outputFormat)
+            engine.attach(compressor)
+            engine.connect(trackMixer, to: compressor, format: outputFormat)
+            engine.connect(compressor, to: engine.mainMixerNode, format: outputFormat)
             let audible = !track.isMuted && (!anySolo || track.isSoloed)
-            trackMixer.outputVolume = audible ? track.volume : 0
+            trackMixer.outputVolume = audible ? track.volume * track.automationGain(at: 0) : 0
+            trackMixer.pan = min(1, max(-1, track.pan))
+            trackMixers[track.id] = trackMixer
+            TrackCompressorUnit.configure(compressor, settings: track.compressorSettings)
 
             for clip in track.clips {
                 let sourceURL = TrackStorage.url(forFileName: clip.fileName)
@@ -69,9 +84,27 @@ enum MixBounceRenderer {
                 queuedClips.append(BounceClip(file: file, clip: clip, player: player))
                 duration = max(duration, clip.startTime + playableSourceDuration)
             }
+
+            for note in track.notes {
+                guard let buffer = InstrumentSoundGenerator.synthNote(
+                    frequency: SynthNote.frequency(for: note.pitch),
+                    waveform: SynthNoteVoice.waveform,
+                    cutoff: SynthNoteVoice.cutoff,
+                    attack: SynthNoteVoice.attack,
+                    release: SynthNoteVoice.release,
+                    duration: note.duration + SynthNoteVoice.release,
+                    format: outputFormat
+                ) else { continue }
+
+                let player = AVAudioPlayerNode()
+                engine.attach(player)
+                engine.connect(player, to: trackMixer, format: outputFormat)
+                queuedNotes.append(BounceNote(buffer: buffer, note: note, player: player))
+                duration = max(duration, note.endTime)
+            }
         }
 
-        guard !queuedClips.isEmpty, duration > 0 else { throw RenderError.noAudio }
+        guard !queuedClips.isEmpty || !queuedNotes.isEmpty, duration > 0 else { throw RenderError.noAudio }
 
         for queued in queuedClips {
             let sourceRate = queued.file.processingFormat.sampleRate
@@ -94,7 +127,15 @@ enum MixBounceRenderer {
             queued.player.play()
         }
 
-        let maximumFrameCount: AVAudioFrameCount = 4096
+        for queued in queuedNotes {
+            let startSample = AVAudioFramePosition(max(0, queued.note.startTime) * sampleRate)
+            let startTime = AVAudioTime(sampleTime: startSample, atRate: sampleRate)
+            queued.player.scheduleBuffer(queued.buffer, at: startTime, options: [])
+            queued.player.play()
+        }
+
+        let maximumFrameCount: AVAudioFrameCount = 512
+        engine.mainMixerNode.outputVolume = min(1, max(0, masterVolume))
         try engine.enableManualRenderingMode(.offline, format: outputFormat, maximumFrameCount: maximumFrameCount)
         engine.prepare()
         try engine.start()
@@ -112,6 +153,12 @@ enum MixBounceRenderer {
         while framesRendered < totalFrames {
             let framesRemaining = totalFrames - framesRendered
             let framesToRender = AVAudioFrameCount(min(Int64(maximumFrameCount), framesRemaining))
+            let automationTime = Double(framesRendered) / sampleRate
+            for track in tracks {
+                let audible = !track.isMuted && (!anySolo || track.isSoloed)
+                let automatedVolume = track.volume * track.automationGain(at: automationTime)
+                trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
+            }
             let status = try engine.renderOffline(framesToRender, to: buffer)
 
             switch status {
@@ -142,4 +189,5 @@ enum MixBounceRenderer {
 
         progress(1)
     }
+
 }
