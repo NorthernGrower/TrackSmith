@@ -13,6 +13,8 @@ struct SampleLibraryItem: Identifiable, Equatable, Sendable {
     let name: String
     let url: URL
     let duration: TimeInterval
+    /// True for the free sounds shipped inside the app.
+    var isBundled = false
 
     var formatLabel: String {
         let extensionName = url.pathExtension.uppercased()
@@ -24,7 +26,7 @@ struct SampleLibraryItem: Identifiable, Equatable, Sendable {
 enum SampleLibrary {
     private static let audioExtensions: Set<String> = ["wav", "caf", "aif", "aiff", "m4a", "mp3"]
 
-    /// Every audio file in the app's sample folder, sorted by name.
+    /// Every audio file in the app's sample folder plus the bundled starter sounds.
     static func scan(directory: URL = TrackStorage.stemsDirectory) -> [SampleLibraryItem] {
         let urls = (try? FileManager.default.contentsOfDirectory(
             at: directory,
@@ -32,7 +34,7 @@ enum SampleLibrary {
             options: [.skipsHiddenFiles]
         )) ?? []
 
-        return urls
+        let stored = urls
             .filter { audioExtensions.contains($0.pathExtension.lowercased()) }
             .map { url in
                 SampleLibraryItem(
@@ -42,7 +44,40 @@ enum SampleLibrary {
                     duration: duration(of: url)
                 )
             }
+
+        return (stored + bundledSounds())
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// The free starter sounds shipped inside the app bundle.
+    private static func bundledSounds() -> [SampleLibraryItem] {
+        guard let resourceURL = Bundle.main.resourceURL,
+              let enumerator = FileManager.default.enumerator(
+                at: resourceURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles],
+                errorHandler: nil
+              ) else {
+            return []
+        }
+
+        var urls: [URL] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension.lowercased() == "wav",
+                  url.lastPathComponent.hasPrefix("starter-") else { continue }
+            urls.append(url)
+        }
+
+        return urls.map { url in
+            var item = SampleLibraryItem(
+                id: url.lastPathComponent,
+                name: displayName(forFileName: url.lastPathComponent),
+                url: url,
+                duration: duration(of: url)
+            )
+            item.isBundled = true
+            return item
+        }
     }
 
     /// Reads a sound's length without loading its audio.
@@ -56,6 +91,12 @@ enum SampleLibrary {
     static func displayName(forFileName fileName: String) -> String {
         let base = (fileName as NSString).deletingPathExtension
         var name = base
+
+        if base.hasPrefix("starter-") {
+            let trimmed = String(base.dropFirst("starter-".count))
+                .replacingOccurrences(of: "-", with: " ")
+            return trimmed.capitalized
+        }
 
         if base.hasPrefix("stem-") {
             let rest = base.dropFirst("stem-".count)

@@ -126,6 +126,18 @@ struct SampleLibraryView: View {
                                         in: RoundedRectangle(cornerRadius: 3)
                                     )
                             }
+                            if item.isBundled {
+                                Text("STARTER")
+                                    .font(.system(size: 7, weight: .bold, design: .monospaced))
+                                    .tracking(0.6)
+                                    .foregroundStyle(Color.white.opacity(0.55))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        Color.white.opacity(0.08),
+                                        in: RoundedRectangle(cornerRadius: 3)
+                                    )
+                            }
                         }
 
                         Text("\(studioTimeString(item.duration))  ·  \(item.formatLabel)")
