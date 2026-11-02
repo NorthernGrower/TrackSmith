@@ -119,6 +119,7 @@ enum MixBounceRenderer {
                     attack: SynthNoteVoice.attack,
                     release: SynthNoteVoice.release,
                     duration: note.duration + SynthNoteVoice.release,
+                    velocity: note.velocity,
                     format: outputFormat
                 ) else { continue }
 

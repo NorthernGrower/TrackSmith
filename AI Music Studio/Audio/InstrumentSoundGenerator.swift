@@ -109,6 +109,7 @@ enum InstrumentSoundGenerator {
         attack: Double,
         release: Double,
         duration: Double = 0.9,
+        velocity: Float = 1,
         format: AVAudioFormat
     ) -> AVAudioPCMBuffer? {
         let sampleRate = format.sampleRate
@@ -152,7 +153,7 @@ enum InstrumentSoundGenerator {
                 }
 
                 filteredSample += filterCoefficient * (rawSample - filteredSample)
-                channels[channel][frame] = Float(filteredSample * envelope * 0.22)
+                channels[channel][frame] = Float(filteredSample * envelope * 0.22 * Double(min(1, max(0, velocity))))
             }
         }
 

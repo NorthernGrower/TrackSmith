@@ -11,12 +11,39 @@ struct SynthNote: Identifiable, Codable, Equatable {
     var pitch: Int
     var startTime: TimeInterval
     var duration: TimeInterval
+    /// How hard the note plays, from 0.05 to 1.
+    var velocity: Float
 
-    init(id: UUID = UUID(), pitch: Int, startTime: TimeInterval, duration: TimeInterval) {
+    init(
+        id: UUID = UUID(),
+        pitch: Int,
+        startTime: TimeInterval,
+        duration: TimeInterval,
+        velocity: Float = 0.8
+    ) {
         self.id = id
         self.pitch = pitch
         self.startTime = startTime
         self.duration = duration
+        self.velocity = min(1, max(0.05, velocity))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case pitch
+        case startTime
+        case duration
+        case velocity
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        pitch = try values.decode(Int.self, forKey: .pitch)
+        startTime = try values.decode(TimeInterval.self, forKey: .startTime)
+        duration = try values.decode(TimeInterval.self, forKey: .duration)
+        let storedVelocity = try values.decodeIfPresent(Float.self, forKey: .velocity) ?? 0.8
+        velocity = min(1, max(0.05, storedVelocity))
     }
 
     var endTime: TimeInterval {

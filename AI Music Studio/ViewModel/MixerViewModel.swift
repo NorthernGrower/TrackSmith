@@ -479,6 +479,45 @@ final class MixerViewModel: ObservableObject {
         commitSession()
     }
 
+    /// Removes every selected note as one undoable edit.
+    func deleteSynthNotes(trackID: UUID, noteIDs: Set<UUID>) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }), !noteIDs.isEmpty else { return }
+        beginUndoableEdit()
+        tracks[index].notes.removeAll { noteIDs.contains($0.id) }
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+        commitSession()
+    }
+
+    /// Sets how hard a note plays while the velocity handle is dragged.
+    func setSynthNoteVelocity(trackID: UUID, noteID: UUID, velocity: Float) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let noteIndex = tracks[trackIndex].notes.firstIndex(where: { $0.id == noteID }) else { return }
+        tracks[trackIndex].notes[noteIndex].velocity = min(1, max(0.05, velocity))
+        engine.updateMix(tracks: tracks)
+    }
+
+    /// Pulls the selected notes toward the beat while keeping some of their feel.
+    func quantizeSynthNotes(trackID: UUID, noteIDs: Set<UUID>, grid: TimeInterval, strength: Double) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              !noteIDs.isEmpty else { return }
+        let step = max(0.01, grid)
+        let amount = min(1, max(0, strength))
+        beginUndoableEdit()
+
+        for noteIndex in tracks[trackIndex].notes.indices where noteIDs.contains(tracks[trackIndex].notes[noteIndex].id) {
+            let note = tracks[trackIndex].notes[noteIndex]
+            let target = (note.startTime / step).rounded() * step
+            let shifted = note.startTime + (target - note.startTime) * amount
+            tracks[trackIndex].notes[noteIndex].startTime = max(0, shifted)
+        }
+
+        tracks[trackIndex].notes.sort { $0.startTime < $1.startTime }
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+        commitSession()
+    }
+
     func setTrackEQ(_ id: UUID, settings: TrackEQSettings) {
         guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
         tracks[index].eqSettings = settings

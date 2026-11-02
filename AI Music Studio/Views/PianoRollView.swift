@@ -13,11 +13,13 @@ struct PianoRollView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    @State private var selectedNoteID: UUID?
+    @State private var selectedNoteIDs: Set<UUID> = []
     @State private var noteStep = PianoRollStep.eighth
     @State private var chordType = ChordType.single
+    @State private var quantizeStrength: Double = 0.75
     @State private var dragOrigin: SynthNote?
     @State private var resizeOrigin: SynthNote?
+    @State private var velocityOrigin: Float?
 
     private let rowHeight: CGFloat = 24
     private let keyboardWidth: CGFloat = 46
@@ -50,15 +52,13 @@ struct PianoRollView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(role: .destructive) {
-                        if let id = selectedNoteID {
-                            model.deleteSynthNote(trackID: trackID, noteID: id)
-                            selectedNoteID = nil
-                        }
+                        model.deleteSynthNotes(trackID: trackID, noteIDs: selectedNoteIDs)
+                        selectedNoteIDs.removeAll()
                     } label: {
                         Image(systemName: "trash")
                     }
-                    .disabled(selectedNoteID == nil)
-                    .accessibilityLabel("Delete selected note")
+                    .disabled(selectedNoteIDs.isEmpty)
+                    .accessibilityLabel("Delete selected notes")
                 }
             }
             .safeAreaInset(edge: .bottom) { transportFooter }
@@ -126,6 +126,47 @@ struct PianoRollView: View {
                 }
                 .pickerStyle(.segmented)
                 .accessibilityLabel("Chord type")
+            }
+
+            HStack(spacing: 10) {
+                Text("QUANTIZE")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+
+                Slider(value: $quantizeStrength, in: 0...1)
+                    .frame(maxWidth: 120)
+                    .tint(Color.studioAccent)
+                    .accessibilityLabel("Quantize strength")
+
+                Text("\(Int((quantizeStrength * 100).rounded()))%")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .leading)
+
+                Spacer(minLength: 4)
+
+                Button {
+                    model.quantizeSynthNotes(
+                        trackID: trackID,
+                        noteIDs: selectedNoteIDs,
+                        grid: snapDuration,
+                        strength: quantizeStrength
+                    )
+                } label: {
+                    Text("Quantize")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(selectedNoteIDs.isEmpty ? Color.white.opacity(0.4) : Color.black)
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .background(
+                            selectedNoteIDs.isEmpty ? Color.studioPanelHighlight.opacity(0.6) : Color.studioAccent,
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedNoteIDs.isEmpty)
+                .accessibilityLabel("Quantize selected notes")
             }
         }
         .padding(.horizontal, 14)
@@ -207,14 +248,15 @@ struct PianoRollView: View {
             .gesture(
                 SpatialTapGesture()
                     .onEnded { value in
-                        selectedNoteID = model.addSynthChord(
+                        let ids = model.addSynthChord(
                             trackID: trackID,
                             pitch: pitch(atY: value.location.y),
                             startTime: snappedTime(atX: value.location.x),
                             duration: snapDuration,
                             chordType: chordType,
                             snapInterval: snapDuration
-                        ).first
+                        )
+                        selectedNoteIDs = Set(ids)
                     }
             )
 
@@ -231,46 +273,62 @@ struct PianoRollView: View {
     }
 
     private func noteLayer(_ note: SynthNote) -> some View {
-        let isSelected = selectedNoteID == note.id
+        let isSelected = selectedNoteIDs.contains(note.id)
         let width = max(12, CGFloat(note.duration) * pixelsPerSecond)
         let y = CGFloat(SynthNote.highestPitch - note.pitch) * rowHeight
 
         return RoundedRectangle(cornerRadius: 4)
             .fill(Color.studioAccent.opacity(isSelected ? 0.95 : 0.72))
-            .overlay(alignment: .bottomLeading) {
+            .overlay(alignment: .topLeading) {
                 Text(SynthNote.name(for: note.pitch))
                     .font(.system(size: 7, weight: .bold, design: .monospaced))
                     .foregroundStyle(Color.black.opacity(0.75))
                     .padding(.leading, 3)
-                    .padding(.bottom, 1)
+                    .padding(.top, 1)
+            }
+            .overlay(alignment: .bottom) {
+                GeometryReader { geometry in
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(Color.black.opacity(0.5))
+                            .frame(width: max(1, geometry.size.width * CGFloat(note.velocity)))
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: 2.5)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                }
+                .allowsHitTesting(false)
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 4)
                     .stroke(isSelected ? Color.white.opacity(0.85) : Color.clear, lineWidth: 1)
             }
-            .overlay(alignment: .trailing) {
+            .overlay(alignment: .topTrailing) {
                 if isSelected {
                     resizeHandle(note)
                 }
             }
+            .overlay(alignment: .bottomTrailing) {
+                velocityHandle(note)
+            }
             .frame(width: width, height: rowHeight - 3)
             .offset(x: CGFloat(note.startTime) * pixelsPerSecond, y: y + 1.5)
             .contentShape(Rectangle())
-            .onTapGesture { selectedNoteID = note.id }
+            .onTapGesture { toggleSelection(note.id) }
             .highPriorityGesture(moveGesture(note))
             .accessibilityLabel("Note \(SynthNote.name(for: note.pitch))")
+            .accessibilityValue("Velocity \(Int(note.velocity * 100)) percent")
     }
 
     private func resizeHandle(_ note: SynthNote) -> some View {
-        RoundedRectangle(cornerRadius: 3)
-            .fill(Color.white.opacity(0.4))
-            .frame(width: 6, height: rowHeight - 9)
-            .frame(width: 16, height: rowHeight - 3)
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Color.white.opacity(0.45))
+            .frame(width: 12, height: 8)
             .contentShape(Rectangle())
             .highPriorityGesture(
                 DragGesture(minimumDistance: 2)
                     .onChanged { value in
-                        selectedNoteID = note.id
+                        selectedNoteIDs = [note.id]
                         if resizeOrigin == nil { resizeOrigin = note }
                         guard let origin = resizeOrigin else { return }
                         model.resizeSynthNote(
@@ -288,10 +346,35 @@ struct PianoRollView: View {
             .accessibilityLabel("Resize note")
     }
 
+    private func velocityHandle(_ note: SynthNote) -> some View {
+        Image(systemName: "arrow.up.and.down")
+            .font(.system(size: 7, weight: .bold))
+            .foregroundStyle(Color.black.opacity(0.55))
+            .frame(width: 14, height: 10)
+            .contentShape(Rectangle())
+            .highPriorityGesture(velocityGesture(note))
+            .accessibilityLabel("Velocity of \(SynthNote.name(for: note.pitch))")
+    }
+
+    private func velocityGesture(_ note: SynthNote) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                selectedNoteIDs.insert(note.id)
+                if velocityOrigin == nil { velocityOrigin = note.velocity }
+                guard let origin = velocityOrigin else { return }
+                let next = min(1, max(0.05, origin - Float(value.translation.height / 70)))
+                model.setSynthNoteVelocity(trackID: trackID, noteID: note.id, velocity: next)
+            }
+            .onEnded { _ in
+                velocityOrigin = nil
+                model.commitSession()
+            }
+    }
+
     private func moveGesture(_ note: SynthNote) -> some Gesture {
         DragGesture(minimumDistance: 3)
             .onChanged { value in
-                selectedNoteID = note.id
+                selectedNoteIDs = [note.id]
                 if dragOrigin == nil { dragOrigin = note }
                 guard let origin = dragOrigin else { return }
 
@@ -309,6 +392,14 @@ struct PianoRollView: View {
                 dragOrigin = nil
                 model.commitSession()
             }
+    }
+
+    private func toggleSelection(_ noteID: UUID) {
+        if selectedNoteIDs.contains(noteID) {
+            selectedNoteIDs.remove(noteID)
+        } else {
+            selectedNoteIDs.insert(noteID)
+        }
     }
 
     private var transportFooter: some View {
@@ -352,7 +443,9 @@ struct PianoRollView: View {
         .padding(.vertical, 8)
         .background(Color.studioPanel)
         .overlay(alignment: .top) {
-            Rectangle().fill(Color.white.opacity(0.09)).frame(height: 1)
+            Rectangle()
+                .fill(Color.white.opacity(0.09))
+                .frame(height: 1)
         }
     }
 

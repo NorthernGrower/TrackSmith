@@ -77,6 +77,7 @@ enum TrackFreezeRenderer {
                 attack: SynthNoteVoice.attack,
                 release: SynthNoteVoice.release,
                 duration: note.duration + SynthNoteVoice.release,
+                velocity: note.velocity,
                 format: format
             ) else { continue }
 

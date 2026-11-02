@@ -664,7 +664,7 @@ final class MixerEngine {
 
     /// Builds (and caches) the synth audio for one piano-roll note.
     private func noteBuffer(for note: SynthNote, trackID: UUID, format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        let key = "\(trackID.uuidString)-\(note.pitch)-\(Int(note.duration * 1000))"
+        let key = "\(trackID.uuidString)-\(note.pitch)-\(Int(note.duration * 1000))-\(Int(note.velocity * 100))"
         if let cached = noteBufferCache[key] { return cached }
 
         guard let buffer = InstrumentSoundGenerator.synthNote(
@@ -674,6 +674,7 @@ final class MixerEngine {
             attack: SynthNoteVoice.attack,
             release: SynthNoteVoice.release,
             duration: note.duration + SynthNoteVoice.release,
+            velocity: note.velocity,
             format: format
         ) else { return nil }
 
