@@ -6,7 +6,9 @@ automation, piano roll, looping, metronome and count-in, sessions, bounce and
 track freeze.
 
 Everything runs locally in the browser with the Web Audio API. Sessions are kept
-in `localStorage`, audio files live in IndexedDB, and nothing is uploaded.
+in `localStorage`, audio files live in IndexedDB, and nothing is uploaded. There
+is no Flash, Java or plugin involved — sound uses the browser's built-in audio
+engine, which works in Safari on iPhone.
 
 ## Running it
 
@@ -33,9 +35,18 @@ build from GitHub Actions.
 - Master effects: tempo-synced delay and reverb on the master output, with a
   bypass switch, applied to playback and the bounce.
 - Piano roll sequencer for the built-in synthesizer, snapped to the beat grid.
+- Instruments rack: a playable synth, the 808-style drum pads, a TB-303 acid bass
+  and a sampler that loads the bundled starter sounds, a session's own audio or a
+  file from the device, all played through the selected track's mixer.
 - Bounce the arrangement to a WAV file.
+
+## Bundled sounds
+
+The `sounds` folder holds the free, CC0 starter sounds that also ship with the
+iOS app (see the app's `Starter Sounds/CREDITS.md`); the sampler can load them
+straight from the page.
 
 ## Still iOS-only
 
-Live microphone recording, the sampler sound library and on-device stem
-separation are not part of the web version yet.
+Live microphone recording and on-device stem separation are not part of the web
+version yet.

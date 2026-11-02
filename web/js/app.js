@@ -2,6 +2,7 @@
 
 import * as model from './model.js';
 import { StudioEngine, encodeWav } from './audio-engine.js';
+import { InstrumentEngine, DRUM_PADS, STARTER_SOUNDS } from './instruments.js';
 
 const ROW_HEIGHT = 92;
 const RULER_HEIGHT = 62;
@@ -35,8 +36,25 @@ const state = {
   freezing: false,
   bouncing: false,
   presets: [],
+  instrumentTab: 'synth',
+  instrumentTrackId: null,
+  synthWaveform: 'sawtooth',
+  synthCutoff: 6500,
+  synthAttack: 0.02,
+  synthRelease: 0.28,
+  tb303Waveform: 'sawtooth',
+  tb303Cutoff: 1250,
+  tb303Resonance: 0.68,
+  tb303Envelope: 0.58,
+  tb303Decay: 0.42,
+  tb303Accent: false,
+  samplerBuffer: null,
+  samplerName: null,
+  samplerSoundId: null,
   modal: null
 };
+
+let instrumentVoice = null;
 
 const el = {
   sessionName: document.getElementById('sessionName'),
@@ -49,6 +67,7 @@ const el = {
   sessionsBtn: document.getElementById('sessionsBtn'),
   addTrackBtn: document.getElementById('addTrackBtn'),
   blankTrackBtn: document.getElementById('blankTrackBtn'),
+  instrumentsBtn: document.getElementById('instrumentsBtn'),
   bounceBtn: document.getElementById('bounceBtn'),
   fileInput: document.getElementById('fileInput'),
   emptyImportBtn: document.getElementById('emptyImportBtn'),
@@ -1306,6 +1325,7 @@ function closeModal() {
   state.modal = null;
   el.modalRoot.innerHTML = '';
   el.modalRoot.style.pointerEvents = 'none';
+  if (instrumentVoice) instrumentVoice.stopAll();
 }
 
 // ---------- Mixer ----------
@@ -1861,6 +1881,306 @@ function openChannelPresets() {
   }
 }
 
+// ---------- Instruments ----------
+
+function instrumentEngineInstance() {
+  engine.ensureContext();
+  if (!instrumentVoice || instrumentVoice.ctx !== engine.ctx) {
+    instrumentVoice = new InstrumentEngine(engine.ctx);
+  }
+  return instrumentVoice;
+}
+
+function instrumentDestination() {
+  const nodes = state.instrumentTrackId ? engine.trackNodes.get(state.instrumentTrackId) : null;
+  return nodes ? nodes.input : engine.masterGain;
+}
+
+function instrumentValueLabel(key) {
+  switch (key) {
+    case 'synthCutoff': return `${Math.round(state.synthCutoff)} Hz`;
+    case 'synthAttack': return `${Math.round(state.synthAttack * 1000)} ms`;
+    case 'synthRelease': return `${Math.round(state.synthRelease * 1000)} ms`;
+    case 'tb303Cutoff': return `${Math.round(state.tb303Cutoff)} Hz`;
+    case 'tb303Resonance': return `${Math.round(state.tb303Resonance * 100)}%`;
+    case 'tb303Envelope': return `${Math.round(state.tb303Envelope * 100)}%`;
+    case 'tb303Decay': return `${Math.round(state.tb303Decay * 1000)} ms`;
+    default: return '';
+  }
+}
+
+function instrumentSliderField(title, key, min, max, step) {
+  return `<div class="field">
+    <div class="label-row"><span>${title}</span><span data-instrument-value="${key}">${instrumentValueLabel(key)}</span></div>
+    <input type="range" min="${min}" max="${max}" step="${step}" value="${state[key]}" data-instrument-slider="${key}">
+  </div>`;
+}
+
+function instrumentNoteButtons(from, to, attribute) {
+  const notes = [];
+  for (let pitch = from; pitch <= to; pitch += 1) {
+    const black = model.isBlackKey(pitch);
+    notes.push(`<button class="key ${black ? 'black' : ''}" data-${attribute}="${pitch}">${model.noteName(pitch)}</button>`);
+  }
+  return notes.join('');
+}
+
+function instrumentTabContent() {
+  if (state.instrumentTab === 'drums') {
+    return `<div class="panel">
+      <h3>808 DRUM MACHINE</h3>
+      <div class="pads">
+        ${DRUM_PADS.map((pad) => `<button class="pad" data-drum="${pad.id}">${pad.name}</button>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  if (state.instrumentTab === 'tb303') {
+    return `<div class="panel">
+      <h3>TB-303 ACID BASS</h3>
+      <div class="control-row" style="padding:0 0 10px">
+        ${['sawtooth', 'square'].map((wave) => `<button class="pill ${state.tb303Waveform === wave ? 'on' : ''}" data-tb-wave="${wave}">${wave === 'sawtooth' ? 'SAW' : 'SQUARE'}</button>`).join('')}
+        <button class="pill ${state.tb303Accent ? 'on' : ''}" data-tb-accent>ACCENT</button>
+      </div>
+      ${instrumentSliderField('Cutoff', 'tb303Cutoff', 100, 6000, 10)}
+      ${instrumentSliderField('Resonance', 'tb303Resonance', 0, 1, 0.01)}
+      ${instrumentSliderField('Envelope', 'tb303Envelope', 0, 1, 0.01)}
+      ${instrumentSliderField('Decay', 'tb303Decay', 0.16, 1.2, 0.01)}
+      <div class="keys" style="margin-top:10px">
+        ${instrumentNoteButtons(36, 48, 'tb-note')}
+      </div>
+    </div>`;
+  }
+
+  if (state.instrumentTab === 'sampler') {
+    const loaded = state.samplerBuffer ? (state.samplerName || 'Sample') : 'Nothing loaded';
+    return `<div class="panel">
+      <h3>SAMPLER</h3>
+      <div class="label-row" style="margin-bottom:8px"><span>Loaded</span><span>${escapeHtml(loaded)}</span></div>
+      <input type="file" id="samplerFile" accept="audio/*" hidden>
+      <div class="control-row" style="padding:0 0 12px">
+        <button class="pill" id="samplerChooseBtn">CHOOSE FILE</button>
+        <button class="pill ${state.samplerBuffer ? 'on' : ''}" id="samplerTriggerBtn" ${state.samplerBuffer ? '' : 'disabled'}>TRIGGER</button>
+      </div>
+      <div class="label-row"><span>Starter sounds</span></div>
+      <div style="margin:8px 0 12px">
+        ${STARTER_SOUNDS.map((sound) => `<button class="sound-button ${state.samplerSoundId === sound.file ? 'loaded' : ''}" data-sampler-sound="${sound.file}">${sound.name}</button>`).join('')}
+      </div>
+      ${sessionSoundButtons()}
+    </div>`;
+  }
+
+  return `<div class="panel">
+    <h3>SYNTH</h3>
+    <div class="control-row" style="padding:0 0 10px">
+      ${['sine', 'triangle', 'sawtooth', 'square'].map((wave) => `<button class="pill ${state.synthWaveform === wave ? 'on' : ''}" data-synth-wave="${wave}">${wave === 'sawtooth' ? 'SAW' : wave.toUpperCase()}</button>`).join('')}
+    </div>
+    ${instrumentSliderField('Cutoff', 'synthCutoff', 100, 12000, 10)}
+    ${instrumentSliderField('Attack', 'synthAttack', 0.005, 1, 0.005)}
+    ${instrumentSliderField('Release', 'synthRelease', 0.02, 2, 0.01)}
+    <div class="keys" style="margin-top:10px">
+      ${instrumentNoteButtons(60, 72, 'synth-note')}
+    </div>
+  </div>`;
+}
+
+function sessionSoundButtons() {
+  const seen = new Map();
+  for (const track of state.session.tracks) {
+    for (const clip of model.playbackClips(track)) {
+      if (engine.buffers.has(clip.fileId)) seen.set(clip.fileId, clip.name);
+    }
+  }
+  if (!seen.size) return '';
+  const buttons = Array.from(seen.entries()).map(([id, name]) => (
+    `<button class="sound-button ${state.samplerSoundId === id ? 'loaded' : ''}" data-sampler-file="${id}">${escapeHtml(name)}</button>`
+  )).join('');
+  return `<div class="label-row"><span>Session audio</span></div><div style="margin:8px 0 0">${buttons}</div>`;
+}
+
+function openInstruments() {
+  if (!state.session) return;
+  state.modal = 'instruments';
+  if (!state.instrumentTrackId && state.session.tracks.length) {
+    state.instrumentTrackId = state.session.tracks[0].id;
+  }
+
+  const destinationOptions = [
+    `<option value="" ${state.instrumentTrackId ? '' : 'selected'}>Master Output</option>`,
+    ...state.session.tracks.map((track) => (
+      `<option value="${track.id}" ${track.id === state.instrumentTrackId ? 'selected' : ''}>${escapeHtml(track.name)}</option>`
+    ))
+  ].join('');
+
+  const tabs = [['synth', 'SYNTH'], ['drums', 'DRUMS'], ['tb303', '303'], ['sampler', 'SAMPLER']]
+    .map(([id, label]) => `<button class="pill ${state.instrumentTab === id ? 'on' : ''}" data-instrument-tab="${id}">${label}</button>`)
+    .join('');
+
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0">
+        <h2>Instruments</h2>
+        <div class="sub">PLAY THROUGH THE SELECTED TRACK</div>
+      </div>
+      <button class="modal-close" data-close>Done</button>
+    </header>
+    <div class="modal-body">
+      <div class="field">
+        <div class="label-row"><span>Destination</span></div>
+        <select id="instrumentDestination" style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
+          ${destinationOptions}
+        </select>
+      </div>
+      <div class="control-row" style="padding:0 0 10px">${tabs}</div>
+      ${instrumentTabContent()}
+    </div>`, { tall: true });
+
+  bindInstrumentControls();
+}
+
+function bindInstrumentControls() {
+  const destination = document.getElementById('instrumentDestination');
+  if (destination) {
+    destination.addEventListener('change', () => {
+      state.instrumentTrackId = destination.value || null;
+    });
+  }
+
+  el.modalRoot.querySelectorAll('[data-instrument-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.instrumentTab = button.dataset.instrumentTab;
+      openInstruments();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-synth-wave]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.synthWaveform = button.dataset.synthWave;
+      openInstruments();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-tb-wave]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.tb303Waveform = button.dataset.tbWave;
+      openInstruments();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-instrument-slider]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const key = input.dataset.instrumentSlider;
+      state[key] = Number(input.value);
+      const label = el.modalRoot.querySelector(`[data-instrument-value="${key}"]`);
+      if (label) label.textContent = instrumentValueLabel(key);
+    });
+  });
+
+  const accent = el.modalRoot.querySelector('[data-tb-accent]');
+  if (accent) {
+    accent.addEventListener('click', () => {
+      state.tb303Accent = !state.tb303Accent;
+      accent.classList.toggle('on', state.tb303Accent);
+    });
+  }
+
+  el.modalRoot.querySelectorAll('[data-synth-note]').forEach((button) => {
+    button.addEventListener('click', () => playSynth(Number(button.dataset.synthNote)));
+  });
+
+  el.modalRoot.querySelectorAll('[data-tb-note]').forEach((button) => {
+    button.addEventListener('click', () => playTB303(Number(button.dataset.tbNote)));
+  });
+
+  el.modalRoot.querySelectorAll('[data-drum]').forEach((button) => {
+    button.addEventListener('click', () => {
+      instrumentEngineInstance().playDrum(button.dataset.drum, instrumentDestination());
+    });
+  });
+
+  const choose = document.getElementById('samplerChooseBtn');
+  const fileInput = document.getElementById('samplerFile');
+  if (choose && fileInput) {
+    choose.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const buffer = await engine.decode(arrayBuffer);
+        state.samplerBuffer = buffer;
+        state.samplerName = file.name.replace(/\.[^.]+$/, '');
+        state.samplerSoundId = 'device-file';
+        openInstruments();
+      } catch (error) {
+        toast('That audio file could not be loaded');
+      }
+    });
+  }
+
+  el.modalRoot.querySelectorAll('[data-sampler-sound]').forEach((button) => {
+    button.addEventListener('click', () => loadStarterSound(button.dataset.samplerSound));
+  });
+
+  el.modalRoot.querySelectorAll('[data-sampler-file]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const buffer = engine.buffers.get(button.dataset.samplerFile);
+      if (!buffer) {
+        toast('That sound is not loaded yet');
+        return;
+      }
+      state.samplerBuffer = buffer;
+      state.samplerName = button.textContent.trim();
+      state.samplerSoundId = button.dataset.samplerFile;
+      openInstruments();
+    });
+  });
+
+  const trigger = document.getElementById('samplerTriggerBtn');
+  if (trigger) {
+    trigger.addEventListener('click', () => {
+      if (!state.samplerBuffer) return;
+      instrumentEngineInstance().playBuffer(state.samplerBuffer, instrumentDestination());
+    });
+  }
+}
+
+function playSynth(pitch) {
+  instrumentEngineInstance().playSynthNote(model.noteFrequency(pitch), {
+    waveform: state.synthWaveform,
+    cutoff: state.synthCutoff,
+    attack: state.synthAttack,
+    release: state.synthRelease,
+    duration: 0.8
+  }, instrumentDestination());
+}
+
+function playTB303(pitch) {
+  instrumentEngineInstance().playTB303(model.noteFrequency(pitch), {
+    waveform: state.tb303Waveform,
+    cutoff: state.tb303Cutoff,
+    resonance: state.tb303Resonance,
+    envelopeAmount: state.tb303Envelope,
+    decay: state.tb303Decay,
+    accent: state.tb303Accent
+  }, instrumentDestination());
+}
+
+async function loadStarterSound(file) {
+  try {
+    const response = await fetch(`sounds/${file}`);
+    if (!response.ok) throw new Error('missing sound');
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = await engine.decode(arrayBuffer);
+    state.samplerBuffer = buffer;
+    state.samplerName = STARTER_SOUNDS.find((sound) => sound.file === file)?.name ?? file;
+    state.samplerSoundId = file;
+    openInstruments();
+  } catch (error) {
+    toast('That sound could not be loaded');
+  }
+}
+
 // ---------- Sessions ----------
 
 function openSessions() {
@@ -1991,6 +2311,7 @@ function bindEvents() {
     el.fileInput.value = '';
   });
   el.blankTrackBtn.addEventListener('click', addBlankTrack);
+  el.instrumentsBtn.addEventListener('click', openInstruments);
   el.bounceBtn.addEventListener('click', bounceMix);
 
   el.undoBtn.addEventListener('click', undo);

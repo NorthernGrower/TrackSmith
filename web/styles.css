@@ -735,6 +735,73 @@ button { cursor: pointer; }
 }
 .toast.visible { opacity: 1; transform: translate(-50%, 0); }
 
+/* Instrument rack */
+
+.keys {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.key {
+  flex: 1 0 34px;
+  height: 76px;
+  border: none;
+  border-radius: 8px;
+  background: #e9e6df;
+  color: #151515;
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+  cursor: pointer;
+}
+.key.black {
+  background: #202024;
+  color: #c9c9ce;
+  height: 54px;
+  align-self: flex-start;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.key:active { background: var(--accent); color: #151515; }
+
+.pads {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.pad {
+  height: 62px;
+  border: none;
+  border-radius: 10px;
+  background: var(--panel-highlight);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pad:active { background: var(--accent); color: #151515; }
+
+.sound-button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 6px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.sound-button:active { background: var(--panel-highlight); }
+.sound-button.loaded { border-color: var(--accent); color: var(--accent); }
+
 @media (min-width: 760px) {
   :root { --gutter: 176px; }
   .studio { max-width: 1100px; margin: 0 auto; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
