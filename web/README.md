@@ -22,6 +22,8 @@ uses ES modules and IndexedDB).
   metronome click with level, and a one-bar count-in.
 - Named song sections marked on the ruler: add, drag, rename, delete, and tap
   one to jump the playhead there.
+- Channel presets: save a track's EQ, compressor, pan and level on device and
+  apply it to any other track.
 - Channel mixer with pan, faders, dB readouts, meters and a master strip.
 - Master effects: tempo-synced delay and reverb on the master output, with a
   bypass switch, applied to playback and the bounce.

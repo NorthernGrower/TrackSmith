@@ -145,6 +145,10 @@ struct MixerView: View {
                 MasterEffectsView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .channelPresets:
+                ChannelPresetsView(model: model, initialTrackID: nil)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
             case .pianoRoll:
                 if let selectedPianoRollTrackID {
                     PianoRollView(model: model, trackID: selectedPianoRollTrackID)
@@ -261,6 +265,11 @@ struct MixerView: View {
                         activeSheet = .exports
                     } label: {
                         Label("Mix Exports", systemImage: "square.stack")
+                    }
+                    Button {
+                        activeSheet = .channelPresets
+                    } label: {
+                        Label("Channel Presets", systemImage: "bookmark")
                     }
                 } label: {
                     Image(systemName: "folder")
@@ -488,6 +497,7 @@ private enum StudioSheet: String, Identifiable {
     case sessions
     case mixer
     case masterEffects
+    case channelPresets
     case pianoRoll
 
     var id: String { rawValue }

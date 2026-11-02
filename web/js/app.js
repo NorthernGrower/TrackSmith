@@ -33,6 +33,7 @@ const state = {
   countInRemaining: 0,
   freezing: false,
   bouncing: false,
+  presets: [],
   modal: null
 };
 
@@ -43,6 +44,7 @@ const el = {
   redoBtn: document.getElementById('redoBtn'),
   mixerBtn: document.getElementById('mixerBtn'),
   fxBtn: document.getElementById('fxBtn'),
+  presetBtn: document.getElementById('presetBtn'),
   sessionsBtn: document.getElementById('sessionsBtn'),
   addTrackBtn: document.getElementById('addTrackBtn'),
   blankTrackBtn: document.getElementById('blankTrackBtn'),
@@ -1605,6 +1607,199 @@ function openMasterEffects() {
   }
 }
 
+// ---------- Channel presets ----------
+
+const PRESET_KEY = 'ai-studio.web.presets.v1';
+
+function loadPresets() {
+  try {
+    const raw = localStorage.getItem(PRESET_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (error) {
+    console.warn('Could not read presets', error);
+  }
+  return [];
+}
+
+function savePresets() {
+  try {
+    localStorage.setItem(PRESET_KEY, JSON.stringify(state.presets));
+  } catch (error) {
+    console.warn('Could not save presets', error);
+  }
+}
+
+function presetSummary(preset) {
+  const compression = preset.comp?.bypassed === false ? 'COMP' : 'NO COMP';
+  return `FROM ${String(preset.source || '').toUpperCase()} · 3 BANDS · ${compression}`;
+}
+
+function openChannelPresets() {
+  const session = state.session;
+  if (!session) return;
+  state.modal = 'presets';
+  let selectedPreset = null;
+  let sourceTrackId = session.tracks[0]?.id ?? null;
+  let targetTrackId = session.tracks.find((track) => track.id !== sourceTrackId)?.id
+    ?? session.tracks[0]?.id
+    ?? null;
+
+  const trackOptions = (selected) => session.tracks.map((track) => (
+    `<option value="${track.id}" ${track.id === selected ? 'selected' : ''}>${escapeHtml(track.name)}</option>`
+  )).join('');
+
+  const presetRows = state.presets.map((preset) => `
+    <div class="list-row" data-preset-row="${preset.id}" style="cursor:pointer">
+      <div class="icon">❐</div>
+      <div class="meta">
+        <strong>${escapeHtml(preset.name)}</strong>
+        <span>${escapeHtml(presetSummary(preset))}</span>
+      </div>
+      <button class="icon-btn" data-preset-rename="${preset.id}" title="Rename">✎</button>
+      <button class="icon-btn" data-preset-delete="${preset.id}" title="Delete">🗑</button>
+    </div>`).join('');
+
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0">
+        <h2>Channel Presets</h2>
+        <div class="sub">SAVED EQ, COMPRESSOR, PAN AND LEVEL</div>
+      </div>
+      <button class="modal-close" data-close>Done</button>
+    </header>
+    <div class="modal-body">
+      <div class="panel">
+        <h3>SAVE THIS CHANNEL</h3>
+        <div class="field">
+          <div class="label-row"><span>Source track</span></div>
+          <select id="presetSource" style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
+            ${trackOptions(sourceTrackId)}
+          </select>
+        </div>
+        <button class="tool primary" id="presetSaveBtn" style="width:100%">Save Preset</button>
+      </div>
+      <div class="panel">
+        <h3>LIBRARY</h3>
+        ${state.presets.length ? `<div class="list">${presetRows}</div>` : '<p class="range-label">No presets yet. Save a channel above to reuse its EQ, compressor, pan and level.</p>'}
+      </div>
+      <div class="panel">
+        <h3>APPLY TO</h3>
+        <div class="field">
+          <select id="presetTarget" style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
+            ${trackOptions(targetTrackId)}
+          </select>
+        </div>
+        <button class="tool" id="presetApplyBtn" style="width:100%;background:var(--accent);color:#151515">Apply Preset</button>
+        <p class="range-label" id="presetStatus" style="margin:8px 0 0">Select a preset in the library first.</p>
+      </div>
+    </div>`, { tall: true });
+
+  const sourceSelect = document.getElementById('presetSource');
+  const targetSelect = document.getElementById('presetTarget');
+  const status = document.getElementById('presetStatus');
+
+  if (sourceSelect) {
+    sourceSelect.addEventListener('change', () => {
+      sourceTrackId = sourceSelect.value;
+    });
+  }
+  if (targetSelect) {
+    targetSelect.addEventListener('change', () => {
+      targetTrackId = targetSelect.value;
+    });
+  }
+
+  const saveBtn = document.getElementById('presetSaveBtn');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      const track = session.tracks.find((item) => item.id === sourceTrackId);
+      if (!track) return;
+      const entered = window.prompt('Preset name', `${track.name} Preset`);
+      if (entered === null) return;
+      const preset = {
+        id: model.uid(),
+        name: entered.trim() || `${track.name} Preset`,
+        source: track.name,
+        volume: track.volume,
+        pan: track.pan,
+        eq: JSON.parse(JSON.stringify(track.eq)),
+        comp: JSON.parse(JSON.stringify(track.comp)),
+        createdAt: Date.now()
+      };
+      state.presets.unshift(preset);
+      savePresets();
+      selectedPreset = preset.id;
+      openChannelPresets();
+      toast(`Preset "${preset.name}" saved`);
+    });
+  }
+
+  el.modalRoot.querySelectorAll('[data-preset-row]').forEach((row) => {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
+      selectedPreset = row.dataset.presetRow;
+      el.modalRoot.querySelectorAll('[data-preset-row]').forEach((item) => {
+        item.classList.toggle('open', item === row);
+      });
+      if (status) {
+        const preset = state.presets.find((item) => item.id === selectedPreset);
+        status.textContent = preset ? `Selected "${preset.name}"` : 'Select a preset in the library first.';
+      }
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-preset-rename]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const preset = state.presets.find((item) => item.id === button.dataset.presetRename);
+      if (!preset) return;
+      const entered = window.prompt('Preset name', preset.name);
+      if (entered === null) return;
+      const name = entered.trim();
+      if (!name) return;
+      preset.name = name;
+      savePresets();
+      openChannelPresets();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-preset-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const preset = state.presets.find((item) => item.id === button.dataset.presetDelete);
+      if (!preset) return;
+      if (!window.confirm(`Delete preset "${preset.name}"?`)) return;
+      state.presets = state.presets.filter((item) => item.id !== preset.id);
+      savePresets();
+      openChannelPresets();
+    });
+  });
+
+  const applyBtn = document.getElementById('presetApplyBtn');
+  if (applyBtn) {
+    applyBtn.addEventListener('click', () => {
+      const preset = state.presets.find((item) => item.id === selectedPreset);
+      const track = session.tracks.find((item) => item.id === targetTrackId);
+      if (!preset || !track) {
+        if (status) status.textContent = 'Select a preset and a track first.';
+        return;
+      }
+      snapshot();
+      track.volume = model.clamp(preset.volume ?? 1, 0, 1);
+      track.pan = model.clamp(preset.pan ?? 0, -1, 1);
+      track.eq = JSON.parse(JSON.stringify(preset.eq || track.eq));
+      track.comp = JSON.parse(JSON.stringify(preset.comp || track.comp));
+      const nodes = engine.trackNodes.get(track.id);
+      if (nodes) engine.applyTrackSettings(track, nodes);
+      persist();
+      render();
+      if (status) status.textContent = `Applied to ${track.name}`;
+      toast(`Applied "${preset.name}" to ${track.name}`);
+    });
+  }
+}
+
 // ---------- Sessions ----------
 
 function openSessions() {
@@ -1741,6 +1936,7 @@ function bindEvents() {
   el.redoBtn.addEventListener('click', redo);
   el.mixerBtn.addEventListener('click', openMixer);
   el.fxBtn.addEventListener('click', openMasterEffects);
+  el.presetBtn.addEventListener('click', openChannelPresets);
   el.sessionsBtn.addEventListener('click', openSessions);
 
   el.playBtn.addEventListener('click', togglePlay);
@@ -2139,6 +2335,7 @@ function boot() {
   state.store.activeId = state.session.id;
   engine.setSession(state.session);
   ensureClipToolbar();
+  state.presets = loadPresets();
   bindEvents();
   render();
   requestAnimationFrame(frame);

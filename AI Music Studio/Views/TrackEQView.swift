@@ -11,6 +11,7 @@ struct TrackEQView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var settings: TrackEQSettings
     @State private var compressorSettings: TrackCompressorSettings
+    @State private var showingPresets = false
 
     init(model: MixerViewModel, trackID: UUID) {
         self.model = model
@@ -63,6 +64,14 @@ struct TrackEQView: View {
             .navigationTitle("Track EQ")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showingPresets = true
+                    } label: {
+                        Image(systemName: "bookmark")
+                    }
+                    .accessibilityLabel("Channel presets")
+                }
                 ToolbarItem(placement: .principal) {
                     VStack(spacing: 2) {
                         Text("Track EQ")
@@ -83,6 +92,11 @@ struct TrackEQView: View {
         }
         .onChange(of: compressorSettings) { _, newSettings in
             model.setTrackCompressor(trackID, settings: newSettings)
+        }
+        .sheet(isPresented: $showingPresets) {
+            ChannelPresetsView(model: model, initialTrackID: trackID)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
         }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)

@@ -29,6 +29,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var masterVolume: Float = 1
     @Published private(set) var masterEffects = MasterEffectsSettings()
     @Published private(set) var sections: [SongSection] = []
+    @Published private(set) var channelPresets: [ChannelPreset] = []
     @Published private(set) var masterLevel: Float = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var tempoBPM = 120
@@ -94,6 +95,7 @@ final class MixerViewModel: ObservableObject {
 
     init() {
         microphonePermissionGranted = AVAudioSession.sharedInstance().recordPermission == .granted
+        channelPresets = ChannelPresetStorage.load()
         let storedSessions = StudioSessionStorage.load()
         sessions = storedSessions.sessions
         activeSessionID = storedSessions.activeSessionID
@@ -232,6 +234,56 @@ final class MixerViewModel: ObservableObject {
             return min(snapped, duration)
         }
         return max(0, snapped)
+    }
+
+    // MARK: - Channel presets
+
+    /// Captures a track's EQ, compressor, pan and level as a named preset.
+    @discardableResult
+    func saveChannelPreset(from trackID: UUID, name: String) -> UUID? {
+        guard let track = tracks.first(where: { $0.id == trackID }) else { return nil }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preset = ChannelPreset(
+            name: trimmed.isEmpty ? "\(track.name) Preset" : trimmed,
+            sourceTrackName: track.name,
+            volume: track.volume,
+            pan: track.pan,
+            eqSettings: track.eqSettings,
+            compressorSettings: track.compressorSettings
+        )
+        channelPresets.insert(preset, at: 0)
+        ChannelPresetStorage.save(channelPresets)
+        return preset.id
+    }
+
+    /// Applies a preset's EQ, compressor, pan and level to a track.
+    func applyChannelPreset(_ presetID: UUID, to trackID: UUID) {
+        guard let preset = channelPresets.first(where: { $0.id == presetID }),
+              let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+
+        beginUndoableEdit()
+        tracks[index].volume = preset.volume
+        tracks[index].pan = preset.pan
+        tracks[index].eqSettings = preset.eqSettings
+        tracks[index].compressorSettings = preset.compressorSettings
+
+        engine.updateMix(tracks: tracks)
+        engine.updateEqualizer(trackID: trackID, settings: preset.eqSettings)
+        engine.updateCompressor(trackID: trackID, settings: preset.compressorSettings)
+        commitSession()
+    }
+
+    func renameChannelPreset(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = channelPresets.firstIndex(where: { $0.id == id }) else { return }
+        channelPresets[index].name = trimmed
+        ChannelPresetStorage.save(channelPresets)
+    }
+
+    func deleteChannelPreset(_ id: UUID) {
+        channelPresets.removeAll { $0.id == id }
+        ChannelPresetStorage.save(channelPresets)
     }
 
     func addVolumeAutomationPoint(
