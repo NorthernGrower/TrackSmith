@@ -21,6 +21,7 @@ final class MixerViewModel: ObservableObject {
     }
 
     @Published private(set) var tracks: [Track] = []
+    @Published private(set) var groups: [TrackGroup] = []
     @Published private(set) var sessions: [StudioSession] = []
     @Published private(set) var activeSessionID = UUID()
     @Published private(set) var sessionName = "Untitled Session"
@@ -107,6 +108,7 @@ final class MixerViewModel: ObservableObject {
             sessionName = session.name
             activeTemplateID = session.templateID
             tracks = session.tracks
+            groups = session.groups
             tempoBPM = min(200, max(60, session.tempoBPM))
             drumPattern = session.drumPattern
             loopStart = max(0, session.loopStart)
@@ -122,6 +124,7 @@ final class MixerViewModel: ObservableObject {
         exports = MixExportStorage.loadExports()
         resolveClipMetadata()
         engine.load(tracks: tracks)
+        engine.updateGroups(groups)
         duration = engine.duration
         applyLoopChangeToEngine()
         engine.setMasterVolume(masterVolume)
@@ -552,15 +555,25 @@ final class MixerViewModel: ObservableObject {
         duplicate.name = uniqueSessionName("\(source.name) Copy")
         duplicate.lastEdited = Date()
 
+        var trackIDMap: [UUID: UUID] = [:]
         for trackIndex in duplicate.tracks.indices {
             let originalTrackID = duplicate.tracks[trackIndex].id
             let newTrackID = UUID()
+            trackIDMap[originalTrackID] = newTrackID
             duplicate.tracks[trackIndex].id = newTrackID
             for clipIndex in duplicate.tracks[trackIndex].clips.indices {
                 var clip = duplicate.tracks[trackIndex].clips[clipIndex]
                 clip.id = clip.isOriginal && clip.id == originalTrackID ? newTrackID : UUID()
                 duplicate.tracks[trackIndex].clips[clipIndex] = clip
             }
+        }
+        duplicate.groups = duplicate.groups.compactMap { group in
+            let members = group.trackIDs.compactMap { trackIDMap[$0] }
+            guard !members.isEmpty else { return nil }
+            var copy = group
+            copy.id = UUID()
+            copy.trackIDs = members
+            return copy
         }
 
         sessions.append(duplicate)
@@ -590,6 +603,7 @@ final class MixerViewModel: ObservableObject {
         sessions[index].name = sessionName
         sessions[index].templateID = activeTemplateID
         sessions[index].tracks = tracks
+        sessions[index].groups = groups
         sessions[index].tempoBPM = tempoBPM
         sessions[index].drumPattern = drumPattern
         sessions[index].loopStart = loopStart
@@ -623,6 +637,7 @@ final class MixerViewModel: ObservableObject {
         sessionName = session.name
         activeTemplateID = session.templateID
         tracks = session.tracks
+        groups = session.groups
         tempoBPM = min(200, max(60, session.tempoBPM))
         drumPattern = session.drumPattern
         loopStart = max(0, session.loopStart)
@@ -1090,6 +1105,7 @@ final class MixerViewModel: ObservableObject {
 
         let outputURL = MixExportStorage.newExportURL()
         let tracksToBounce = tracks
+        let groupsToBounce = groups
         let masterVolumeToBounce = masterVolume
         let masterEffectsToBounce = masterEffects
         let tempoToBounce = tempoBPM
@@ -1105,6 +1121,7 @@ final class MixerViewModel: ObservableObject {
                 try await Task.detached(priority: .userInitiated) {
                     try MixBounceRenderer.render(
                         tracks: tracksToBounce,
+                        groups: groupsToBounce,
                         masterVolume: masterVolumeToBounce,
                         masterEffects: masterEffectsToBounce,
                         tempoBPM: tempoToBounce,
@@ -1146,6 +1163,7 @@ final class MixerViewModel: ObservableObject {
         let effects = masterEffects
         let tempo = tempoBPM
         let session = sessionName
+        let groupsToBounce = groups
 
         Task {
             do {
@@ -1165,6 +1183,7 @@ final class MixerViewModel: ObservableObject {
                     try await Task.detached(priority: .userInitiated) {
                         try MixBounceRenderer.renderStem(
                             track: track,
+                            groups: groupsToBounce,
                             masterVolume: master,
                             masterEffects: effects,
                             tempoBPM: tempo,
@@ -1412,6 +1431,81 @@ final class MixerViewModel: ObservableObject {
         tracks[index].isSoloed = isSoloed
         engine.updateMix(tracks: tracks)
         commitSession()
+    }
+
+    // MARK: - Track groups
+
+    /// The group a track belongs to, when it has been put in one.
+    func group(forTrack trackID: UUID) -> TrackGroup? {
+        groups.first { $0.trackIDs.contains(trackID) }
+    }
+
+    /// The colour slot a new group should take.
+    var nextGroupColorIndex: Int {
+        let used = Set(groups.map(\.colorIndex))
+        return (0..<4).first { !used.contains($0) } ?? groups.count % 4
+    }
+
+    /// Puts tracks in a new named bus and returns its id.
+    @discardableResult
+    func createGroup(name: String, colorIndex: Int, trackIDs: [UUID]) -> UUID? {
+        let members = trackIDs.filter { trackID in tracks.contains { $0.id == trackID } }
+        guard !members.isEmpty else { return nil }
+
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let groupName = trimmed.isEmpty ? "Group \(groups.count + 1)" : trimmed
+
+        // A track belongs to one bus, so take its members out of any other.
+        for index in groups.indices {
+            groups[index].trackIDs.removeAll { members.contains($0) }
+        }
+        groups.removeAll { $0.trackIDs.isEmpty }
+
+        let group = TrackGroup(
+            name: groupName,
+            colorIndex: min(3, max(0, colorIndex)),
+            trackIDs: members
+        )
+        groups.append(group)
+        applyGroups()
+        return group.id
+    }
+
+    func renameGroup(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[index].name = trimmed
+        applyGroups()
+    }
+
+    /// Removes a bus, leaving its tracks in the session.
+    func deleteGroup(_ id: UUID) {
+        guard groups.contains(where: { $0.id == id }) else { return }
+        groups.removeAll { $0.id == id }
+        applyGroups()
+    }
+
+    func setGroupVolume(_ id: UUID, _ value: Float) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[index].volume = min(1, max(0, value))
+        engine.updateGroups(groups)
+    }
+
+    func toggleGroupMute(_ id: UUID) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[index].isMuted.toggle()
+        applyGroups()
+    }
+
+    func toggleGroupSolo(_ id: UUID) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[index].isSoloed.toggle()
+        applyGroups()
+    }
+
+    private func applyGroups() {
+        engine.updateGroups(groups)
+        persistActiveSession()
     }
 
     /// Finds a track by fuzzy name match (used by the agent chat).
@@ -1813,6 +1907,7 @@ final class MixerViewModel: ObservableObject {
         }
         resolveClipMetadata()
         engine.load(tracks: tracks)
+        engine.updateGroups(groups)
         duration = engine.duration
         applyLoopChangeToEngine()
         isPlaying = false

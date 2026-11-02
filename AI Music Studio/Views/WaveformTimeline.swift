@@ -389,8 +389,9 @@ struct WaveformTimeline: View {
 
     private func controlStrip(for track: Track, index: Int) -> some View {
         let color = Color.studioTrackColor(for: index)
+        let group = model.group(forTrack: track.id)
 
-        return VStack(alignment: .leading, spacing: 7) {
+        return VStack(alignment: .leading, spacing: group == nil ? 7 : 5) {
             HStack(spacing: 5) {
                 Text(String(format: "%02d", index + 1))
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -439,6 +440,10 @@ struct WaveformTimeline: View {
                 Spacer(minLength: 0)
             }
 
+            if let group {
+                groupBadge(group)
+            }
+
             HStack(spacing: 7) {
                 VStack(spacing: 4) {
                     miniToggle("M", isOn: track.isMuted, accessibilityLabel: "Mute \(track.name)") {
@@ -483,7 +488,7 @@ struct WaveformTimeline: View {
                     .frame(width: 6, height: 48)
                     .accessibilityLabel("Level for \(track.name)")
             }
-            .frame(height: 49)
+            .frame(height: group == nil ? 49 : 42)
         }
         .padding(.leading, 8)
         .padding(.trailing, 7)
@@ -495,6 +500,26 @@ struct WaveformTimeline: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
         }
+    }
+
+    private func groupBadge(_ group: TrackGroup) -> some View {
+        let color = Color.studioTrackColor(for: group.colorIndex)
+
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 5, height: 5)
+
+            Text(group.name.uppercased())
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .tracking(0.5)
+                .lineLimit(1)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.15), in: Capsule())
+        .accessibilityLabel("Group \(group.name)")
     }
 
     private func miniToggle(

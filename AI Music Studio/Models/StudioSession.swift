@@ -11,6 +11,8 @@ struct StudioSession: Identifiable, Codable, Equatable {
     /// Id of the template the session was started from, when it came from one.
     var templateID: String?
     var tracks: [Track]
+    /// Buses that link several tracks to one fader, mute and solo.
+    var groups: [TrackGroup]
     var tempoBPM: Int
     var drumPattern: DrumPattern
     /// Start of the timeline section that repeats during playback.
@@ -33,6 +35,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         name: String,
         templateID: String? = nil,
         tracks: [Track] = [],
+        groups: [TrackGroup] = [],
         tempoBPM: Int = 120,
         drumPattern: DrumPattern = DrumPattern(),
         loopStart: TimeInterval = 0,
@@ -50,6 +53,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         self.name = name
         self.templateID = templateID
         self.tracks = tracks
+        self.groups = groups
         self.tempoBPM = tempoBPM
         self.drumPattern = drumPattern
         self.loopStart = loopStart
@@ -69,6 +73,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         case name
         case templateID
         case tracks
+        case groups
         case tempoBPM
         case drumPattern
         case loopStart
@@ -89,6 +94,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         name = try values.decodeIfPresent(String.self, forKey: .name) ?? "Untitled Session"
         templateID = try values.decodeIfPresent(String.self, forKey: .templateID)
         tracks = try values.decodeIfPresent([Track].self, forKey: .tracks) ?? []
+        groups = try values.decodeIfPresent([TrackGroup].self, forKey: .groups) ?? []
         tempoBPM = try values.decodeIfPresent(Int.self, forKey: .tempoBPM) ?? 120
         drumPattern = try values.decodeIfPresent(DrumPattern.self, forKey: .drumPattern) ?? DrumPattern()
         loopStart = try values.decodeIfPresent(TimeInterval.self, forKey: .loopStart) ?? 0

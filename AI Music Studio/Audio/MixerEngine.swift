@@ -86,6 +86,7 @@ final class MixerEngine {
     private let masterDelay = AVAudioUnitDelay()
     private var masterEffectsSettings = MasterEffectsSettings()
     private var mixTracks: [Track] = []
+    private var mixGroups: [TrackGroup] = []
     private var automationTime: TimeInterval = 0
     private var activeLoop: ClosedRange<TimeInterval>?
     private var playbackHostStart: UInt64 = 0
@@ -316,17 +317,34 @@ final class MixerEngine {
         applyMix()
     }
 
+    /// Applies group faders, mute and solo to the running mix.
+    func updateGroups(_ groups: [TrackGroup]) {
+        mixGroups = groups
+        applyMix()
+    }
+
     private func applyMix() {
-        let anySolo = mixTracks.contains { $0.isSoloed }
+        let mutedTrackIDs = Set(mixGroups.filter(\.isMuted).flatMap(\.trackIDs))
+        let soloedTrackIDs = Set(mixGroups.filter(\.isSoloed).flatMap(\.trackIDs))
+        let anySolo = mixTracks.contains { $0.isSoloed || soloedTrackIDs.contains($0.id) }
+
         for track in mixTracks {
-            let audible = !track.isMuted && (!anySolo || track.isSoloed)
-            let automatedVolume = track.volume * track.automationGain(at: automationTime)
+            let isMuted = track.isMuted || mutedTrackIDs.contains(track.id)
+            let isSoloed = track.isSoloed || soloedTrackIDs.contains(track.id)
+            let audible = !isMuted && (!anySolo || isSoloed)
+            let automatedVolume = track.volume * groupGain(for: track.id) * track.automationGain(at: automationTime)
             trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
             let automatedPan = track.panAutomationPoints.isEmpty
                 ? track.pan
                 : track.panAutomationValue(at: automationTime)
             trackMixers[track.id]?.pan = min(1, max(-1, automatedPan))
         }
+    }
+
+    /// The gain of the group a track belongs to, or 1 when it is not grouped.
+    private func groupGain(for trackID: UUID) -> Float {
+        guard let group = mixGroups.first(where: { $0.trackIDs.contains(trackID) }) else { return 1 }
+        return min(1, max(0, group.volume))
     }
 
     /// Sets the overall output level of the studio.

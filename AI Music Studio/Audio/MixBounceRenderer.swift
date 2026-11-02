@@ -38,6 +38,7 @@ enum MixBounceRenderer {
 
     static func render(
         tracks: [Track],
+        groups: [TrackGroup] = [],
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
         tempoBPM: Int = 120,
@@ -55,7 +56,9 @@ enum MixBounceRenderer {
         var queuedNotes: [BounceNote] = []
         var trackMixers: [UUID: AVAudioMixerNode] = [:]
         var duration: TimeInterval = 0
-        let anySolo = tracks.contains { $0.isSoloed }
+        let mutedTrackIDs = Set(groups.filter(\.isMuted).flatMap(\.trackIDs))
+        let soloedTrackIDs = Set(groups.filter(\.isSoloed).flatMap(\.trackIDs))
+        let anySolo = tracks.contains { $0.isSoloed || soloedTrackIDs.contains($0.id) }
 
         let masterBus = AVAudioMixerNode()
         let reverb = AVAudioUnitReverb()
@@ -75,8 +78,12 @@ enum MixBounceRenderer {
             engine.attach(compressor)
             engine.connect(trackMixer, to: compressor, format: outputFormat)
             engine.connect(compressor, to: masterBus, format: outputFormat)
-            let audible = !applyMuteSolo || (!track.isMuted && (!anySolo || track.isSoloed))
-            trackMixer.outputVolume = audible ? track.volume * track.automationGain(at: 0) : 0
+            let audible = !applyMuteSolo
+                || (!(track.isMuted || mutedTrackIDs.contains(track.id))
+                    && (!anySolo || track.isSoloed || soloedTrackIDs.contains(track.id)))
+            trackMixer.outputVolume = audible
+                ? track.volume * groupGain(for: track.id, groups: groups) * track.automationGain(at: 0)
+                : 0
             trackMixer.pan = min(1, max(-1, track.panAutomationValue(at: 0)))
             trackMixers[track.id] = trackMixer
             var compressorSettings = track.compressorSettings
@@ -173,8 +180,12 @@ enum MixBounceRenderer {
             let framesToRender = AVAudioFrameCount(min(Int64(maximumFrameCount), framesRemaining))
             let automationTime = Double(framesRendered) / sampleRate
             for track in tracks {
-                let audible = !applyMuteSolo || (!track.isMuted && (!anySolo || track.isSoloed))
-                let automatedVolume = track.volume * track.automationGain(at: automationTime)
+                let audible = !applyMuteSolo
+                    || (!(track.isMuted || mutedTrackIDs.contains(track.id))
+                        && (!anySolo || track.isSoloed || soloedTrackIDs.contains(track.id)))
+                let automatedVolume = track.volume
+                    * groupGain(for: track.id, groups: groups)
+                    * track.automationGain(at: automationTime)
                 trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
                 trackMixers[track.id]?.pan = min(1, max(-1, track.panAutomationValue(at: automationTime)))
             }
@@ -212,6 +223,7 @@ enum MixBounceRenderer {
     /// Renders one track on its own, with its mixer settings but without mute or solo.
     static func renderStem(
         track: Track,
+        groups: [TrackGroup] = [],
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
         tempoBPM: Int = 120,
@@ -220,6 +232,7 @@ enum MixBounceRenderer {
     ) throws {
         try render(
             tracks: [track],
+            groups: groups,
             masterVolume: masterVolume,
             masterEffects: masterEffects,
             tempoBPM: tempoBPM,
@@ -227,6 +240,12 @@ enum MixBounceRenderer {
             to: outputURL,
             progress: progress
         )
+    }
+
+    /// The gain of the group a track belongs to, or 1 when it is not grouped.
+    private static func groupGain(for trackID: UUID, groups: [TrackGroup]) -> Float {
+        guard let group = groups.first(where: { $0.trackIDs.contains(trackID) }) else { return 1 }
+        return min(1, max(0, group.volume))
     }
 
     private static func applyMasterEffects(

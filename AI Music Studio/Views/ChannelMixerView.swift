@@ -6,14 +6,25 @@
 import Foundation
 import SwiftUI
 
-/// Full channel mixer: one vertical strip per track plus the master output.
+/// Full channel mixer: one vertical strip per track plus the master output,
+/// with track groups shown as buses above the channels.
 struct ChannelMixerView: View {
     @ObservedObject var model: MixerViewModel
     @Environment(\.dismiss) private var dismiss
 
-    private let stripWidth: CGFloat = 84
+    private let stripWidth: CGFloat = 88
     private let masterWidth: CGFloat = 96
     private let meterHeight: CGFloat = 168
+
+    @State private var isSelectingGroup = false
+    @State private var selectedTrackIDs: Set<UUID> = []
+    @State private var isNamingGroup = false
+    @State private var groupNameDraft = ""
+    @State private var renamingGroupID: UUID?
+    @State private var renameDraft = ""
+    @State private var isRenamingGroup = false
+    @State private var dissolvingGroupID: UUID?
+    @State private var isConfirmingDissolve = false
 
     var body: some View {
         NavigationStack {
@@ -33,11 +44,65 @@ struct ChannelMixerView: View {
             .navigationTitle("Mixer")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if model.tracks.count > 1 {
+                        if isSelectingGroup {
+                            Button("Cancel") { endGroupSelection() }
+                        } else {
+                            Button {
+                                beginGroupSelection()
+                            } label: {
+                                Image(systemName: "square.3.layers.3d")
+                            }
+                            .accessibilityLabel("Group tracks")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
-            .safeAreaInset(edge: .bottom) { transportFooter }
+            .safeAreaInset(edge: .bottom) {
+                if isSelectingGroup {
+                    groupSelectionBar
+                } else {
+                    transportFooter
+                }
+            }
+            .alert("New Group", isPresented: $isNamingGroup) {
+                TextField("Group name", text: $groupNameDraft)
+                Button("Cancel", role: .cancel) { groupNameDraft = "" }
+                Button("Create") { createGroupFromSelection() }
+            } message: {
+                Text("The selected tracks get one fader, mute and solo.")
+            }
+            .alert("Rename Group", isPresented: $isRenamingGroup) {
+                TextField("Group name", text: $renameDraft)
+                Button("Cancel", role: .cancel) { renamingGroupID = nil }
+                Button("Save") {
+                    if let renamingGroupID {
+                        model.renameGroup(renamingGroupID, to: renameDraft)
+                    }
+                    renamingGroupID = nil
+                }
+            } message: {
+                Text("Choose a name for this group.")
+            }
+            .confirmationDialog(
+                "Dissolve this group?",
+                isPresented: $isConfirmingDissolve,
+                titleVisibility: .visible
+            ) {
+                Button("Dissolve Group", role: .destructive) {
+                    if let dissolvingGroupID {
+                        model.deleteGroup(dissolvingGroupID)
+                    }
+                    dissolvingGroupID = nil
+                }
+                Button("Cancel", role: .cancel) { dissolvingGroupID = nil }
+            } message: {
+                Text("The tracks stay in the session and keep their own levels.")
+            }
         }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
@@ -46,15 +111,17 @@ struct ChannelMixerView: View {
     private var mixerBoard: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text(model.sessionName.uppercased())
+                Text(isSelectingGroup ? "SELECT TRACKS TO GROUP" : model.sessionName.uppercased())
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .tracking(0.8)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelectingGroup ? Color.studioAccent : Color.secondary)
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
 
-                Text("\(model.tracks.count) \(model.tracks.count == 1 ? "CHANNEL" : "CHANNELS")")
+                Text(isSelectingGroup
+                    ? "\(selectedTrackIDs.count) SELECTED"
+                    : "\(model.tracks.count) \(model.tracks.count == 1 ? "CHANNEL" : "CHANNELS")")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .tracking(0.8)
                     .foregroundStyle(Color.studioAccent)
@@ -63,10 +130,14 @@ struct ChannelMixerView: View {
             .padding(.top, 12)
             .padding(.bottom, 8)
 
+            if !model.groups.isEmpty {
+                groupBusRow
+            }
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 9) {
                     ForEach(Array(model.tracks.enumerated()), id: \.element.id) { index, track in
-                        channelStrip(track, index: index)
+                        channelColumn(track, index: index)
                     }
 
                     masterStrip
@@ -75,6 +146,221 @@ struct ChannelMixerView: View {
                 .padding(.bottom, 14)
             }
         }
+    }
+
+    // MARK: - Track groups
+
+    private var groupBusRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(model.groups) { group in
+                    groupBusCard(group)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
+        }
+    }
+
+    private func groupBusCard(_ group: TrackGroup) -> some View {
+        let color = Color.studioTrackColor(for: group.colorIndex)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 7, height: 7)
+
+                Text(group.name.uppercased())
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+
+                Text("\(group.trackIDs.count)")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 4)
+
+                Menu {
+                    Button {
+                        renamingGroupID = group.id
+                        renameDraft = group.name
+                        isRenamingGroup = true
+                    } label: {
+                        Label("Rename Group", systemImage: "pencil")
+                    }
+
+                    Button(role: .destructive) {
+                        dissolvingGroupID = group.id
+                        isConfirmingDissolve = true
+                    } label: {
+                        Label("Dissolve Group", systemImage: "rectangle.badge.minus")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Group actions for \(group.name)")
+            }
+
+            HStack(spacing: 8) {
+                stripToggle("M", isOn: group.isMuted, accessibilityLabel: "Mute \(group.name)") {
+                    model.toggleGroupMute(group.id)
+                }
+                stripToggle("S", isOn: group.isSoloed, accessibilityLabel: "Solo \(group.name)") {
+                    model.toggleGroupSolo(group.id)
+                }
+
+                Slider(
+                    value: Binding(
+                        get: { Double(group.volume) },
+                        set: { model.setGroupVolume(group.id, Float($0)) }
+                    ),
+                    in: 0...1,
+                    onEditingChanged: { isEditing in
+                        if !isEditing { model.commitSession() }
+                    }
+                )
+                .tint(color)
+                .frame(width: 88)
+                .accessibilityLabel("Group level for \(group.name)")
+
+                Text(dbLabel(group.volume))
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .frame(width: 46, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(width: 258)
+        .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(color.opacity(0.45), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Group \(group.name)")
+    }
+
+    private func channelColumn(_ track: Track, index: Int) -> some View {
+        VStack(spacing: 6) {
+            groupBadge(for: track)
+                .frame(height: 15)
+
+            channelStrip(track, index: index)
+                .overlay {
+                    if isSelectingGroup {
+                        selectionOverlay(for: track.id)
+                    }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func groupBadge(for track: Track) -> some View {
+        if let group = model.group(forTrack: track.id) {
+            let color = Color.studioTrackColor(for: group.colorIndex)
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 5, height: 5)
+                Text(group.name.uppercased())
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.5)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.16), in: Capsule())
+            .frame(maxWidth: stripWidth)
+            .accessibilityLabel("Group \(group.name)")
+        }
+    }
+
+    private func selectionOverlay(for trackID: UUID) -> some View {
+        let isSelected = selectedTrackIDs.contains(trackID)
+        return ZStack(alignment: .topTrailing) {
+            Color.black.opacity(0.28)
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.studioAccent : Color.white.opacity(0.55))
+                .padding(7)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture { toggleSelection(trackID) }
+    }
+
+    private var groupSelectionBar: some View {
+        HStack(spacing: 10) {
+            Text("\(selectedTrackIDs.count) SELECTED")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(selectedTrackIDs.count > 1 ? Color.primary : Color.secondary)
+
+            Spacer(minLength: 0)
+
+            Button("Cancel") { endGroupSelection() }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Button {
+                groupNameDraft = ""
+                isNamingGroup = true
+            } label: {
+                Text("Create Group")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.black)
+                    .padding(.horizontal, 14)
+                    .frame(height: 38)
+                    .background(Color.studioAccent, in: RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedTrackIDs.count < 2)
+            .opacity(selectedTrackIDs.count > 1 ? 1 : 0.4)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(Color.studioPanel)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.09))
+                .frame(height: 1)
+        }
+    }
+
+    private func beginGroupSelection() {
+        selectedTrackIDs.removeAll()
+        isSelectingGroup = true
+    }
+
+    private func endGroupSelection() {
+        isSelectingGroup = false
+        selectedTrackIDs.removeAll()
+        groupNameDraft = ""
+    }
+
+    private func toggleSelection(_ trackID: UUID) {
+        if selectedTrackIDs.contains(trackID) {
+            selectedTrackIDs.remove(trackID)
+        } else {
+            selectedTrackIDs.insert(trackID)
+        }
+    }
+
+    private func createGroupFromSelection() {
+        let members = model.tracks.map(\.id).filter { selectedTrackIDs.contains($0) }
+        guard members.count > 1 else {
+            groupNameDraft = ""
+            return
+        }
+        model.createGroup(name: groupNameDraft, colorIndex: model.nextGroupColorIndex, trackIDs: members)
+        endGroupSelection()
     }
 
     // MARK: - Channel strips
