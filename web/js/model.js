@@ -122,6 +122,7 @@ export function createSession(name = 'Untitled Session') {
     },
     loop: { start: 0, end: 0, enabled: false },
     metronome: { enabled: false, level: 0.7, countIn: false },
+    sections: [],
     tracks: [],
     editedAt: Date.now()
   };
@@ -214,6 +215,13 @@ export function normalizeSession(session) {
   normal.metronome.level = clamp(Number(normal.metronome.level ?? 0.7), 0, 1);
   normal.metronome.enabled = Boolean(normal.metronome.enabled);
   normal.metronome.countIn = Boolean(normal.metronome.countIn);
+  normal.sections = Array.isArray(normal.sections) ? normal.sections : [];
+  normal.sections.forEach((section) => {
+    section.id = section.id || uid();
+    section.name = section.name || 'Section';
+    section.time = Math.max(0, Number(section.time) || 0);
+  });
+  normal.sections.sort((a, b) => a.time - b.time);
   normal.tracks = Array.isArray(normal.tracks) ? normal.tracks : [];
   normal.editedAt = normal.editedAt || Date.now();
 

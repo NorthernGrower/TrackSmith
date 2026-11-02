@@ -21,11 +21,16 @@ struct WaveformTimeline: View {
     @State private var leftTrimOrigins: [UUID: AudioClip] = [:]
     @State private var rightTrimOrigins: [UUID: AudioClip] = [:]
     @State private var loopDragAnchor: TimeInterval?
+    @State private var sectionDragOrigins: [UUID: TimeInterval] = [:]
+    @State private var renameSectionID: UUID?
+    @State private var renameDraft = ""
+    @State private var showingRename = false
 
     private let gutterWidth: CGFloat = 122
     private let rowHeight: CGFloat = 92
-    private let rulerHeight: CGFloat = 44
+    private let rulerHeight: CGFloat = 62
     private let loopStripHeight: CGFloat = 14
+    private let sectionStripHeight: CGFloat = 24
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,6 +63,18 @@ struct WaveformTimeline: View {
             .frame(maxHeight: .infinity)
         }
         .background(Color.studioBackground)
+        .alert("Rename Section", isPresented: $showingRename) {
+            TextField("Section name", text: $renameDraft)
+            Button("Cancel", role: .cancel) { renameSectionID = nil }
+            Button("Save") {
+                if let id = renameSectionID {
+                    model.renameSection(id, to: renameDraft)
+                }
+                renameSectionID = nil
+            }
+        } message: {
+            Text("Name this part of the song.")
+        }
     }
 
     private var contentWidth: CGFloat {
@@ -381,6 +398,20 @@ struct WaveformTimeline: View {
                 let beatSpacing = CGFloat(beatDuration) * zoom
                 let beatCount = Int(ceil(model.duration / beatDuration))
 
+                context.fill(
+                    Path(CGRect(x: 0, y: loopStripHeight, width: size.width, height: sectionStripHeight)),
+                    with: .color(Color.white.opacity(0.02))
+                )
+
+                for section in model.sections {
+                    let x = CGFloat(section.time) * zoom
+                    guard x <= size.width else { continue }
+                    var stem = Path()
+                    stem.move(to: CGPoint(x: x, y: loopStripHeight))
+                    stem.addLine(to: CGPoint(x: x, y: size.height))
+                    context.stroke(stem, with: .color(Color.studioAccent.opacity(0.45)), lineWidth: 1)
+                }
+
                 for beatIndex in 0...max(1, beatCount) {
                     let time = Double(beatIndex) * beatDuration
                     let x = CGFloat(time) * zoom
@@ -404,7 +435,7 @@ struct WaveformTimeline: View {
                             Text(label)
                                 .font(.system(size: isBar ? 9 : 8, weight: isBar ? .semibold : .regular, design: .monospaced))
                                 .foregroundColor(isBar ? .primary : .secondary),
-                            at: CGPoint(x: x + 4, y: loopStripHeight + 8),
+                            at: CGPoint(x: x + 4, y: loopStripHeight + sectionStripHeight + 8),
                             anchor: .leading
                         )
                     }
@@ -413,12 +444,78 @@ struct WaveformTimeline: View {
             .contentShape(Rectangle())
             .gesture(scrubGesture)
 
+            sectionMarkers
+
             loopStrip
         }
         .background(Color.studioBackground)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.12)).frame(height: 1)
         }
+    }
+
+    // MARK: - Section markers
+
+    private var sectionMarkers: some View {
+        let sections = model.sections
+        return ZStack(alignment: .topLeading) {
+            ForEach(sections) { section in
+                sectionMarker(section)
+                    .offset(x: CGFloat(section.time) * zoom, y: loopStripHeight + 3)
+            }
+        }
+        .frame(width: contentWidth, height: rulerHeight, alignment: .topLeading)
+    }
+
+    private func sectionMarker(_ section: SongSection) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "flag.fill")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(Color.black)
+            Text(section.name.uppercased())
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .lineLimit(1)
+                .foregroundStyle(Color.black)
+        }
+        .padding(.horizontal, 5)
+        .frame(height: 18)
+        .background(Color.studioAccent, in: RoundedRectangle(cornerRadius: 4))
+        .contentShape(Rectangle())
+        .onTapGesture { model.seek(to: section.time) }
+        .highPriorityGesture(sectionDragGesture(section))
+        .contextMenu {
+            Button {
+                renameSectionID = section.id
+                renameDraft = section.name
+                showingRename = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                model.deleteSection(section.id)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel("Section \(section.name)")
+        .accessibilityHint("Tap to jump to this section.")
+    }
+
+    private func sectionDragGesture(_ section: SongSection) -> some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                if sectionDragOrigins[section.id] == nil {
+                    sectionDragOrigins[section.id] = section.time
+                }
+                let origin = sectionDragOrigins[section.id] ?? section.time
+                let proposed = origin + Double(value.translation.width / max(zoom, 1))
+                model.moveSection(section.id, to: proposed)
+            }
+            .onEnded { _ in
+                sectionDragOrigins[section.id] = nil
+                model.commitSections()
+            }
     }
 
     // MARK: - Loop strip

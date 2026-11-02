@@ -4,7 +4,9 @@ import * as model from './model.js';
 import { StudioEngine, encodeWav } from './audio-engine.js';
 
 const ROW_HEIGHT = 92;
-const RULER_HEIGHT = 44;
+const RULER_HEIGHT = 62;
+const SECTION_TOP = 14;
+const SECTION_HEIGHT = 24;
 const NOTE_HEIGHT = 24;
 const ROLL_BEAT_WIDTH = 76;
 
@@ -55,6 +57,8 @@ const el = {
   ruler: document.getElementById('ruler'),
   rulerCanvas: document.getElementById('rulerCanvas'),
   loopStrip: document.getElementById('loopStrip'),
+  sectionLayer: document.getElementById('sectionLayer'),
+  sectionBtn: document.getElementById('sectionBtn'),
   loopRegion: document.getElementById('loopRegion'),
   loopStartHandle: document.getElementById('loopStartHandle'),
   loopEndHandle: document.getElementById('loopEndHandle'),
@@ -333,6 +337,7 @@ function renderTimeline() {
   renderRuler(contentWidth, beatPx);
   renderLanes(contentWidth, pps, beatPx);
   renderLoopStrip(contentWidth, pps);
+  renderSections(pps);
   updatePlayhead();
   updateClipToolbar();
 }
@@ -381,6 +386,21 @@ function renderRuler(width, beatPx) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, RULER_HEIGHT);
 
+  ctx.fillStyle = 'rgba(255,255,255,0.02)';
+  ctx.fillRect(0, SECTION_TOP, width, SECTION_HEIGHT);
+
+  const sections = state.session.sections || [];
+  ctx.strokeStyle = 'rgba(245, 158, 42, 0.45)';
+  ctx.lineWidth = 1;
+  sections.forEach((section) => {
+    const x = section.time * state.zoom;
+    if (x > width) return;
+    ctx.beginPath();
+    ctx.moveTo(x, SECTION_TOP);
+    ctx.lineTo(x, RULER_HEIGHT);
+    ctx.stroke();
+  });
+
   const beatCount = Math.ceil(width / Math.max(1, beatPx)) + 1;
   for (let index = 0; index < beatCount; index += 1) {
     const x = index * beatPx;
@@ -398,7 +418,7 @@ function renderRuler(width, beatPx) {
       const label = isBar ? String(bar) : beatPx >= 34 ? `${bar}.${beat}` : String(beat);
       ctx.fillStyle = isBar ? 'rgba(244,242,238,0.9)' : 'rgba(154,154,159,0.9)';
       ctx.font = `${isBar ? 9 : 8}px "SF Mono", ui-monospace, monospace`;
-      ctx.fillText(label, x + 4, 24);
+      ctx.fillText(label, x + 4, SECTION_TOP + SECTION_HEIGHT + 8);
     }
   }
 }
@@ -808,6 +828,55 @@ function addBlankTrack() {
   engine.rebuild();
   render();
   toast('Blank track added · open its piano roll to add notes');
+}
+
+function renderSections(pps) {
+  const sections = state.session.sections || [];
+  el.sectionLayer.innerHTML = sections.map((section) => (
+    `<div class="section-flag" data-section="${section.id}" style="left:${Math.max(0, section.time) * pps}px">
+      <span class="sf-name">${escapeHtml(section.name.toUpperCase())}</span>
+      <button class="sf-del" data-section-delete="${section.id}" title="Delete section">×</button>
+    </div>`
+  )).join('');
+}
+
+function snappedBarTime(time) {
+  const bar = beatDuration() * 4;
+  const snapped = Math.round(Math.max(0, time) / bar) * bar;
+  const duration = sessionDuration();
+  return duration > 0 ? Math.min(snapped, duration) : snapped;
+}
+
+function suggestSectionName() {
+  const base = ['Intro', 'Verse', 'Chorus', 'Bridge', 'Outro'];
+  const used = new Set((state.session.sections || []).map((section) => section.name.toLowerCase()));
+  const free = base.find((name) => !used.has(name.toLowerCase()));
+  if (free) return free;
+  let index = (state.session.sections || []).length + 1;
+  while (used.has(`section ${index}`)) index += 1;
+  return `Section ${index}`;
+}
+
+function seekTo(time) {
+  const duration = sessionDuration();
+  const position = duration > 0 ? Math.min(Math.max(0, time), duration) : Math.max(0, time);
+  engine.seek(position);
+  state.playhead = engine.position;
+  renderTransport();
+  updatePlayhead();
+}
+
+function addSectionAtPlayhead() {
+  const suggested = suggestSectionName();
+  const entered = window.prompt('Section name', suggested);
+  if (entered === null) return;
+  const name = entered.trim() || suggested;
+  snapshot();
+  state.session.sections.push({ id: model.uid(), name, time: snappedBarTime(engine.position) });
+  state.session.sections.sort((a, b) => a.time - b.time);
+  persist();
+  renderTimeline();
+  toast(`Section "${name}" added`);
 }
 
 // ---------- Clip editing ----------
@@ -1690,6 +1759,74 @@ function bindEvents() {
     session.loop.enabled = !session.loop.enabled;
     persist();
     render();
+  });
+
+  if (el.sectionBtn) {
+    el.sectionBtn.addEventListener('click', addSectionAtPlayhead);
+  }
+
+  el.sectionLayer.addEventListener('pointerdown', (event) => {
+    const flag = event.target.closest('.section-flag');
+    if (!flag) return;
+    const sections = state.session.sections || [];
+    const deleteButton = event.target.closest('[data-section-delete]');
+
+    if (deleteButton) {
+      event.preventDefault();
+      const id = deleteButton.dataset.sectionDelete;
+      const section = sections.find((item) => item.id === id);
+      if (!section) return;
+      if (!window.confirm(`Delete section "${section.name}"?`)) return;
+      snapshot();
+      state.session.sections = sections.filter((item) => item.id !== id);
+      persist();
+      renderTimeline();
+      return;
+    }
+
+    const section = sections.find((item) => item.id === flag.dataset.section);
+    if (!section) return;
+    event.preventDefault();
+
+    const startX = event.clientX;
+    const origin = section.time;
+    let moved = false;
+    let tookSnapshot = false;
+
+    startDrag((moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      if (Math.abs(dx) > 4) moved = true;
+      if (!moved) return;
+      if (!tookSnapshot) {
+        snapshot();
+        tookSnapshot = true;
+      }
+      section.time = snappedBarTime(origin + dx / state.zoom);
+      flag.style.left = `${section.time * state.zoom}px`;
+    }, () => {
+      if (!tookSnapshot) {
+        seekTo(section.time);
+        return;
+      }
+      state.session.sections.sort((a, b) => a.time - b.time);
+      persist();
+      renderTimeline();
+    });
+  });
+
+  el.sectionLayer.addEventListener('dblclick', (event) => {
+    const flag = event.target.closest('.section-flag');
+    if (!flag) return;
+    const section = (state.session.sections || []).find((item) => item.id === flag.dataset.section);
+    if (!section) return;
+    const entered = window.prompt('Section name', section.name);
+    if (entered === null) return;
+    const name = entered.trim();
+    if (!name) return;
+    snapshot();
+    section.name = name;
+    persist();
+    renderTimeline();
   });
 
   el.metronomeBtn.addEventListener('click', () => {

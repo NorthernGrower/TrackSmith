@@ -28,6 +28,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var levels: [UUID: Float] = [:]
     @Published private(set) var masterVolume: Float = 1
     @Published private(set) var masterEffects = MasterEffectsSettings()
+    @Published private(set) var sections: [SongSection] = []
     @Published private(set) var masterLevel: Float = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var tempoBPM = 120
@@ -106,6 +107,7 @@ final class MixerViewModel: ObservableObject {
             isLoopEnabled = session.isLoopEnabled
             masterVolume = min(1, max(0, session.masterVolume))
             masterEffects = session.masterEffects
+            sections = session.sections
             isMetronomeEnabled = session.isMetronomeEnabled
             metronomeLevel = min(1, max(0, session.metronomeLevel))
             isCountInEnabled = session.isCountInEnabled
@@ -173,6 +175,63 @@ final class MixerViewModel: ObservableObject {
     func updateMasterEffects(_ settings: MasterEffectsSettings) {
         masterEffects = settings
         engine.updateMasterEffects(settings, tempoBPM: tempoBPM)
+    }
+
+    // MARK: - Song sections
+
+    /// Adds a named section marker at the playhead and returns its id.
+    func addSection(at time: TimeInterval) -> UUID? {
+        let section = SongSection(
+            name: SongSection.suggestedName(existing: sections),
+            time: snappedSectionTime(time)
+        )
+        sections.append(section)
+        sections.sort { $0.time < $1.time }
+        persistActiveSession()
+        return section.id
+    }
+
+    /// Moves a section marker, snapping it to the bar grid.
+    func moveSection(_ id: UUID, to time: TimeInterval) {
+        guard let index = sections.firstIndex(where: { $0.id == id }) else { return }
+        sections[index].time = snappedSectionTime(time)
+        sections.sort { $0.time < $1.time }
+    }
+
+    func renameSection(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = sections.firstIndex(where: { $0.id == id }) else { return }
+        sections[index].name = trimmed
+        persistActiveSession()
+    }
+
+    func deleteSection(_ id: UUID) {
+        sections.removeAll { $0.id == id }
+        persistActiveSession()
+    }
+
+    /// Saves finished marker edits with the session.
+    func commitSections() {
+        persistActiveSession()
+    }
+
+    /// Moves the playhead, keeping playback running when it was playing.
+    func seek(to time: TimeInterval) {
+        let position = duration > 0 ? min(max(0, time), duration) : max(0, time)
+        scrubTime = nil
+        currentTime = position
+        engine.seek(to: position)
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+    }
+
+    private func snappedSectionTime(_ time: TimeInterval) -> TimeInterval {
+        let bar = beatDuration * 4
+        let snapped = (max(0, time) / bar).rounded() * bar
+        if duration > 0 {
+            return min(snapped, duration)
+        }
+        return max(0, snapped)
     }
 
     func addVolumeAutomationPoint(
@@ -384,6 +443,7 @@ final class MixerViewModel: ObservableObject {
         sessions[index].isLoopEnabled = isLoopEnabled
         sessions[index].masterVolume = masterVolume
         sessions[index].masterEffects = masterEffects
+        sessions[index].sections = sections
         sessions[index].isMetronomeEnabled = isMetronomeEnabled
         sessions[index].metronomeLevel = metronomeLevel
         sessions[index].isCountInEnabled = isCountInEnabled
@@ -415,6 +475,7 @@ final class MixerViewModel: ObservableObject {
         isLoopEnabled = session.isLoopEnabled
         masterVolume = min(1, max(0, session.masterVolume))
         masterEffects = session.masterEffects
+        sections = session.sections
         isMetronomeEnabled = session.isMetronomeEnabled
         metronomeLevel = min(1, max(0, session.metronomeLevel))
         isCountInEnabled = session.isCountInEnabled

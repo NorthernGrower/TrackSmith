@@ -9,6 +9,9 @@ struct TransportBarView: View {
     @ObservedObject var model: MixerViewModel
     @State private var showingTempoEditor = false
     @State private var tempoDraft = ""
+    @State private var showingSectionName = false
+    @State private var sectionDraft = ""
+    @State private var newSectionID: UUID?
 
     var body: some View {
         VStack(spacing: 10) {
@@ -99,6 +102,18 @@ struct TransportBarView: View {
         } message: {
             Text("Choose a tempo from 60 to 200 BPM.")
         }
+        .alert("Name Section", isPresented: $showingSectionName) {
+            TextField("Section name", text: $sectionDraft)
+            Button("Cancel", role: .cancel) { newSectionID = nil }
+            Button("Save") {
+                if let id = newSectionID {
+                    model.renameSection(id, to: sectionDraft)
+                }
+                newSectionID = nil
+            }
+        } message: {
+            Text("Give this part of the song a name.")
+        }
     }
 
     private var loopControls: some View {
@@ -135,9 +150,31 @@ struct TransportBarView: View {
                 .lineLimit(1)
 
             Spacer(minLength: 0)
+
+            Button {
+                addSection()
+            } label: {
+                Text("+ SECTION")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.5)
+                    .foregroundStyle(Color.studioAccent)
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(Color.studioAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .disabled(model.duration <= 0)
+            .accessibilityLabel("Add a song section at the playhead")
         }
         .padding(.horizontal, 15)
         .padding(.bottom, 8)
+    }
+
+    private func addSection() {
+        guard let id = model.addSection(at: model.currentTime) else { return }
+        newSectionID = id
+        sectionDraft = model.sections.first(where: { $0.id == id })?.name ?? "Section"
+        showingSectionName = true
     }
 
     private var metronomeControls: some View {

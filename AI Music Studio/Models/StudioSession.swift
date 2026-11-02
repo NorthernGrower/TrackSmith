@@ -19,6 +19,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
     /// Overall output level of the master strip, from 0 to 1.
     var masterVolume: Float
     var masterEffects: MasterEffectsSettings
+    var sections: [SongSection]
     var isMetronomeEnabled: Bool
     /// Click level of the metronome and count-in, from 0 to 1.
     var metronomeLevel: Float
@@ -36,6 +37,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         isLoopEnabled: Bool = false,
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
+        sections: [SongSection] = [],
         isMetronomeEnabled: Bool = false,
         metronomeLevel: Float = 0.7,
         isCountInEnabled: Bool = false,
@@ -51,6 +53,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         self.isLoopEnabled = isLoopEnabled
         self.masterVolume = masterVolume
         self.masterEffects = masterEffects
+        self.sections = sections
         self.isMetronomeEnabled = isMetronomeEnabled
         self.metronomeLevel = metronomeLevel
         self.isCountInEnabled = isCountInEnabled
@@ -68,6 +71,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         case isLoopEnabled
         case masterVolume
         case masterEffects
+        case sections
         case isMetronomeEnabled
         case metronomeLevel
         case isCountInEnabled
@@ -86,6 +90,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         isLoopEnabled = try values.decodeIfPresent(Bool.self, forKey: .isLoopEnabled) ?? false
         masterVolume = try values.decodeIfPresent(Float.self, forKey: .masterVolume) ?? 1
         masterEffects = try values.decodeIfPresent(MasterEffectsSettings.self, forKey: .masterEffects) ?? MasterEffectsSettings()
+        sections = try values.decodeIfPresent([SongSection].self, forKey: .sections) ?? []
         isMetronomeEnabled = try values.decodeIfPresent(Bool.self, forKey: .isMetronomeEnabled) ?? false
         metronomeLevel = try values.decodeIfPresent(Float.self, forKey: .metronomeLevel) ?? 0.7
         isCountInEnabled = try values.decodeIfPresent(Bool.self, forKey: .isCountInEnabled) ?? false
