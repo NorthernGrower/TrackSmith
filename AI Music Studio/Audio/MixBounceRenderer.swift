@@ -65,9 +65,13 @@ enum MixBounceRenderer {
             trackMixer.outputVolume = audible ? track.volume * track.automationGain(at: 0) : 0
             trackMixer.pan = min(1, max(-1, track.pan))
             trackMixers[track.id] = trackMixer
-            TrackCompressorUnit.configure(compressor, settings: track.compressorSettings)
+            var compressorSettings = track.compressorSettings
+            if track.isFrozen {
+                compressorSettings.isBypassed = true
+            }
+            TrackCompressorUnit.configure(compressor, settings: compressorSettings)
 
-            for clip in track.clips {
+            for clip in track.playbackClips {
                 let sourceURL = TrackStorage.url(forFileName: clip.fileName)
                 guard let file = try? AVAudioFile(forReading: sourceURL),
                       file.processingFormat.sampleRate > 0 else { continue }
@@ -85,7 +89,7 @@ enum MixBounceRenderer {
                 duration = max(duration, clip.startTime + playableSourceDuration)
             }
 
-            for note in track.notes {
+            for note in track.sequencedNotes {
                 guard let buffer = InstrumentSoundGenerator.synthNote(
                     frequency: SynthNote.frequency(for: note.pitch),
                     waveform: SynthNoteVoice.waveform,

@@ -33,6 +33,11 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var loopStart: TimeInterval = 0
     @Published private(set) var loopEnd: TimeInterval = 0
     @Published private(set) var isLoopEnabled = false
+    @Published private(set) var isMetronomeEnabled = false
+    @Published private(set) var metronomeLevel: Float = 0.7
+    @Published private(set) var isCountInEnabled = false
+    @Published private(set) var isCountingIn = false
+    @Published private(set) var countInBeatsRemaining = 0
     @Published private(set) var drumPattern = DrumPattern()
     @Published private(set) var isDrumSequencerPlaying = false
     @Published private(set) var currentDrumStep: Int?
@@ -54,6 +59,9 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var sampleLibrary: [SampleLibraryItem] = []
     @Published private(set) var isLoadingSampleLibrary = false
     @Published private(set) var previewingSampleID: String?
+    @Published private(set) var isFreezingTrack = false
+    @Published private(set) var freezeStatus = ""
+    @Published var freezeError: String?
     @Published private(set) var isRecordingInstrument = false
     @Published private(set) var recordingElapsed: TimeInterval = 0
     @Published private(set) var recordingError: String?
@@ -75,6 +83,7 @@ final class MixerViewModel: ObservableObject {
     nonisolated(unsafe) private var playbackTask: Task<Void, Never>?
     nonisolated(unsafe) private var drumSequencerTask: Task<Void, Never>?
     nonisolated(unsafe) private var samplePreviewTask: Task<Void, Never>?
+    nonisolated(unsafe) private var countInTask: Task<Void, Never>?
     private var undoStack: [[UndoTrackState]] = []
     private var redoStack: [[UndoTrackState]] = []
     private var pendingUndoSnapshot: [UndoTrackState]?
@@ -95,6 +104,9 @@ final class MixerViewModel: ObservableObject {
             loopEnd = max(loopStart, session.loopEnd)
             isLoopEnabled = session.isLoopEnabled
             masterVolume = min(1, max(0, session.masterVolume))
+            isMetronomeEnabled = session.isMetronomeEnabled
+            metronomeLevel = min(1, max(0, session.metronomeLevel))
+            isCountInEnabled = session.isCountInEnabled
         }
         exports = MixExportStorage.loadExports()
         resolveClipMetadata()
@@ -102,6 +114,8 @@ final class MixerViewModel: ObservableObject {
         duration = engine.duration
         applyLoopChangeToEngine()
         engine.setMasterVolume(masterVolume)
+        engine.setTempo(tempoBPM)
+        engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
         loadWaveforms()
 
         playbackTask = Task { [weak self] in
@@ -116,6 +130,7 @@ final class MixerViewModel: ObservableObject {
         playbackTask?.cancel()
         drumSequencerTask?.cancel()
         samplePreviewTask?.cancel()
+        countInTask?.cancel()
     }
 
     func importTracks(from urls: [URL]) {
@@ -359,6 +374,9 @@ final class MixerViewModel: ObservableObject {
         sessions[index].loopEnd = loopEnd
         sessions[index].isLoopEnabled = isLoopEnabled
         sessions[index].masterVolume = masterVolume
+        sessions[index].isMetronomeEnabled = isMetronomeEnabled
+        sessions[index].metronomeLevel = metronomeLevel
+        sessions[index].isCountInEnabled = isCountInEnabled
         if markEdited {
             sessions[index].lastEdited = Date()
         }
@@ -386,6 +404,9 @@ final class MixerViewModel: ObservableObject {
         loopEnd = max(loopStart, session.loopEnd)
         isLoopEnabled = session.isLoopEnabled
         masterVolume = min(1, max(0, session.masterVolume))
+        isMetronomeEnabled = session.isMetronomeEnabled
+        metronomeLevel = min(1, max(0, session.metronomeLevel))
+        isCountInEnabled = session.isCountInEnabled
         pendingUndoSnapshot = nil
         undoStack.removeAll()
         redoStack.removeAll()
@@ -396,6 +417,8 @@ final class MixerViewModel: ObservableObject {
         duration = engine.duration
         applyLoopChangeToEngine()
         engine.setMasterVolume(masterVolume)
+        engine.setTempo(tempoBPM)
+        engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
         isPlaying = false
         currentTime = 0
         loadWaveforms()
@@ -505,6 +528,7 @@ final class MixerViewModel: ObservableObject {
         let clamped = min(200, max(60, bpm))
         guard clamped != tempoBPM else { return }
         tempoBPM = clamped
+        engine.setTempo(clamped)
         persistActiveSession()
     }
 
@@ -546,7 +570,7 @@ final class MixerViewModel: ObservableObject {
 
     func startDrumSequencer(destinationTrackID: UUID?) {
         guard !isDrumSequencerPlaying else { return }
-        if !isPlaying { play() }
+        if !isPlaying { beginPlayback() }
 
         isDrumSequencerPlaying = true
         let wallStart = Date()
@@ -747,7 +771,7 @@ final class MixerViewModel: ObservableObject {
         }
 
         if !isPlaying {
-            play()
+            beginPlayback()
         }
         recordingStartTime = engine.currentTime
         recordingElapsed = 0
@@ -776,7 +800,7 @@ final class MixerViewModel: ObservableObject {
         }
 
         if !isPlaying {
-            play()
+            beginPlayback()
         }
         recordingStartTime = engine.currentTime
         recordingElapsed = 0
@@ -867,6 +891,74 @@ final class MixerViewModel: ObservableObject {
 
     func refreshExports() {
         exports = MixExportStorage.loadExports()
+    }
+
+    func clearFreezeError() {
+        freezeError = nil
+    }
+
+    /// Freezes a track into one rendered clip, or restores its source arrangement.
+    func toggleFreeze(trackID: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }), !isFreezingTrack else { return }
+        if tracks[index].isFrozen {
+            unfreezeTrack(at: index)
+        } else {
+            freezeTrack(at: index)
+        }
+    }
+
+    private func unfreezeTrack(at index: Int) {
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+        tracks[index].frozenFileName = nil
+        tracks[index].frozenDuration = 0
+        reloadEngine()
+        if wasPlaying {
+            resumePlayback(after: resumeTime)
+        }
+        commitSession()
+    }
+
+    private func freezeTrack(at index: Int) {
+        let track = tracks[index]
+        let outputURL = TrackStorage.uniqueStemURL(baseName: "\(track.name)-freeze", fileExtension: "wav")
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+
+        isFreezingTrack = true
+        freezeStatus = "Freezing \(track.name)…"
+        freezeError = nil
+        if wasPlaying { pause() }
+
+        Task { [weak self] in
+            do {
+                let duration = try await Task.detached(priority: .userInitiated) {
+                    try TrackFreezeRenderer.render(track: track, to: outputURL)
+                }.value
+
+                guard let self,
+                      let currentIndex = self.tracks.firstIndex(where: { $0.id == track.id }) else { return }
+                self.tracks[currentIndex].frozenFileName = outputURL.lastPathComponent
+                self.tracks[currentIndex].frozenDuration = duration
+                self.reloadEngine()
+                if wasPlaying {
+                    self.resumePlayback(after: resumeTime)
+                }
+                self.freezeStatus = "Frozen \(track.name)"
+            } catch {
+                try? FileManager.default.removeItem(at: outputURL)
+                self?.freezeError = (error as? LocalizedError)?.errorDescription ?? "The track could not be frozen."
+                self?.freezeStatus = ""
+            }
+            self?.isFreezingTrack = false
+        }
+    }
+
+    private func resumePlayback(after time: TimeInterval) {
+        let position = duration > 0 ? min(max(0, time), duration) : max(0, time)
+        currentTime = position
+        engine.seek(to: position)
+        beginPlayback()
     }
 
     func clearBounceError() {
@@ -1024,16 +1116,68 @@ final class MixerViewModel: ObservableObject {
     }
 
     func togglePlay() {
-        if isPlaying { pause() } else { play() }
+        if isPlaying || isCountingIn {
+            pause()
+        } else {
+            play()
+        }
     }
 
     func play() {
+        if isCountInEnabled, !isCountingIn, !isPlaying {
+            startCountIn()
+            return
+        }
+        beginPlayback()
+    }
+
+    private func beginPlayback() {
+        countInTask?.cancel()
+        countInTask = nil
+        isCountingIn = false
+        countInBeatsRemaining = 0
+
         engine.play()
         isPlaying = engine.isPlaying
         currentTime = engine.currentTime
     }
 
+    private func startCountIn() {
+        let beats = 4
+        countInTask?.cancel()
+
+        guard let length = engine.playCountIn(beats: beats) else {
+            beginPlayback()
+            return
+        }
+
+        isCountingIn = true
+        countInBeatsRemaining = beats
+
+        let beatLength = length / Double(beats)
+        countInTask = Task { @MainActor [weak self] in
+            for beat in 1..<beats {
+                try? await Task.sleep(for: .seconds(beatLength))
+                guard let self, self.isCountingIn else { return }
+                self.countInBeatsRemaining = beats - beat
+            }
+            try? await Task.sleep(for: .seconds(beatLength))
+            guard let self, self.isCountingIn else { return }
+            self.beginPlayback()
+        }
+    }
+
+    private func cancelCountIn() {
+        countInTask?.cancel()
+        countInTask = nil
+        guard isCountingIn else { return }
+        isCountingIn = false
+        countInBeatsRemaining = 0
+        engine.silenceMetronome()
+    }
+
     func pause() {
+        cancelCountIn()
         stopDrumSequencer()
         if isRecordingInstrument {
             stopInstrumentRecording()
@@ -1044,6 +1188,7 @@ final class MixerViewModel: ObservableObject {
     }
 
     func stop() {
+        cancelCountIn()
         stopDrumSequencer()
         if isRecordingInstrument {
             stopInstrumentRecording()
@@ -1052,6 +1197,43 @@ final class MixerViewModel: ObservableObject {
         isPlaying = false
         currentTime = 0
         levels = [:]
+    }
+
+    // MARK: - Metronome and count-in
+
+    var beatDuration: TimeInterval {
+        60.0 / Double(max(60, tempoBPM))
+    }
+
+    /// Turns the click track on or off.
+    func toggleMetronome() {
+        isMetronomeEnabled.toggle()
+        engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
+        persistActiveSession()
+    }
+
+    /// Sets the click level for the metronome and the count-in.
+    func setMetronomeLevel(_ value: Float) {
+        metronomeLevel = min(1, max(0, value))
+        engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
+    }
+
+    /// Arms or disarms the one-bar count-in before playback and recording.
+    func toggleCountIn() {
+        isCountInEnabled.toggle()
+        if !isCountInEnabled {
+            cancelCountIn()
+        }
+        persistActiveSession()
+    }
+
+    /// Plays a count-in of clicks on the metronome voices.
+    func playMetronomeCountIn(beats: Int) {
+        _ = engine.playCountIn(beats: beats)
+    }
+
+    func stopMetronomeCountIn() {
+        engine.silenceMetronome()
     }
 
     // MARK: - Loop range
@@ -1133,7 +1315,7 @@ final class MixerViewModel: ObservableObject {
         }
         scrubTime = nil
         if wasPlayingBeforeScrub {
-            play()
+            beginPlayback()
         }
     }
 
@@ -1200,7 +1382,7 @@ final class MixerViewModel: ObservableObject {
         var result: [UUID: [Float]] = [:]
         let bucketCount = 1000
 
-        for clip in tracks.flatMap(\.clips) {
+        for clip in tracks.flatMap(\.playbackClips) {
             let url = TrackStorage.url(forFileName: clip.fileName)
             guard let file = try? AVAudioFile(forReading: url),
                   let buffer = try? AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 16384) else {

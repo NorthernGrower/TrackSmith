@@ -27,11 +27,15 @@ struct TransportBarView: View {
             .padding(.horizontal, 15)
 
             HStack(spacing: 10) {
-                Text(studioTimeString(displayTime))
+                Text(model.isCountingIn ? "COUNT-IN \(model.countInBeatsRemaining)" : studioTimeString(displayTime))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Color.studioAccent)
-                    .frame(width: 74, alignment: .leading)
-                    .accessibilityLabel("Current time \(studioTimeString(displayTime))")
+                    .frame(width: 84, alignment: .leading)
+                    .accessibilityLabel(
+                        model.isCountingIn
+                            ? "Count-in, \(model.countInBeatsRemaining) beats remaining"
+                            : "Current time \(studioTimeString(displayTime))"
+                    )
 
                 Spacer(minLength: 0)
 
@@ -43,14 +47,14 @@ struct TransportBarView: View {
                     Button {
                         model.togglePlay()
                     } label: {
-                        Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                        Image(systemName: model.isPlaying || model.isCountingIn ? "pause.fill" : "play.fill")
                             .font(.system(size: 19, weight: .bold))
                             .foregroundStyle(Color.black)
                             .frame(width: 48, height: 48)
                             .background(Color.studioAccent, in: Circle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(model.isPlaying ? "Pause" : "Play")
+                    .accessibilityLabel(model.isCountingIn ? "Cancel count-in" : (model.isPlaying ? "Pause" : "Play"))
 
                     transportButton(symbol: "stop.fill", label: "Stop") {
                         model.stop()
@@ -71,6 +75,8 @@ struct TransportBarView: View {
             .padding(.bottom, 8)
 
             loopControls
+
+            metronomeControls
 
             tempoControls
         }
@@ -127,6 +133,70 @@ struct TransportBarView: View {
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 15)
+        .padding(.bottom, 8)
+    }
+
+    private var metronomeControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.toggleMetronome()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "metronome")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(model.isMetronomeEnabled ? "CLICK ON" : "CLICK")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.6)
+                }
+                .foregroundStyle(model.isMetronomeEnabled ? Color.black : Color.white.opacity(0.7))
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(
+                    model.isMetronomeEnabled ? Color.studioAccent : Color.studioPanelHighlight,
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(model.isMetronomeEnabled ? "Turn metronome off" : "Turn metronome on")
+            .accessibilityAddTraits(model.isMetronomeEnabled ? .isSelected : [])
+
+            Slider(
+                value: Binding(
+                    get: { Double(model.metronomeLevel) },
+                    set: { model.setMetronomeLevel(Float($0)) }
+                ),
+                in: 0...1,
+                onEditingChanged: { isEditing in
+                    if !isEditing {
+                        model.commitSession()
+                    }
+                }
+            )
+            .frame(width: 86)
+            .tint(Color.studioAccent)
+            .accessibilityLabel("Metronome level")
+
+            Button {
+                model.toggleCountIn()
+            } label: {
+                Text(model.isCountInEnabled ? "COUNT-IN ON" : "COUNT-IN")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.5)
+                    .foregroundStyle(model.isCountInEnabled ? Color.black : Color.white.opacity(0.7))
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(
+                        model.isCountInEnabled ? Color.studioAccent : Color.studioPanelHighlight,
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(model.isCountInEnabled ? "Turn count-in off" : "Turn count-in on")
+            .accessibilityAddTraits(model.isCountInEnabled ? .isSelected : [])
 
             Spacer(minLength: 0)
         }

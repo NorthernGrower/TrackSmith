@@ -72,6 +72,11 @@ struct MixerView: View {
             }
         }
         .overlay {
+            if model.isFreezingTrack {
+                freezeProgressCard
+            }
+        }
+        .overlay {
             if showChat {
                 ZStack(alignment: .bottom) {
                     Color.black.opacity(0.42)
@@ -151,13 +156,14 @@ struct MixerView: View {
                 activeSheet = .exports
             }
         }
-        .alert(Text(model.bounceError == nil ? "Separation Failed" : "Bounce Failed"), isPresented: studioErrorBinding) {
+        .alert(Text(alertTitle), isPresented: studioErrorBinding) {
             Button("OK", role: .cancel) {
                 model.separationError = nil
                 model.clearBounceError()
+                model.clearFreezeError()
             }
         } message: {
-            Text(model.bounceError ?? model.separationError ?? "")
+            Text(model.freezeError ?? model.bounceError ?? model.separationError ?? "")
         }
     }
 
@@ -390,13 +396,41 @@ struct MixerView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
     }
 
+    private var alertTitle: String {
+        if model.freezeError != nil { return "Freeze Failed" }
+        if model.bounceError != nil { return "Bounce Failed" }
+        return "Separation Failed"
+    }
+
+    private var freezeProgressCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "snowflake")
+                    .foregroundStyle(Color.studioAccent)
+                Text(model.freezeStatus)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                ProgressView()
+                    .tint(Color.studioAccent)
+            }
+            Text("Rendering the track through its mixer settings.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(20)
+        .frame(maxWidth: 320)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
     private var studioErrorBinding: Binding<Bool> {
         Binding(
-            get: { model.separationError != nil || model.bounceError != nil },
+            get: { model.separationError != nil || model.bounceError != nil || model.freezeError != nil },
             set: { shouldShow in
                 if !shouldShow {
                     model.separationError = nil
                     model.clearBounceError()
+                    model.clearFreezeError()
                 }
             }
         )

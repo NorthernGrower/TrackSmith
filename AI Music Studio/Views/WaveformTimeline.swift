@@ -277,6 +277,8 @@ struct WaveformTimeline: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.studioAccent)
+                .disabled(track.isFrozen)
+                .opacity(track.isFrozen ? 0.35 : 1)
                 .accessibilityLabel("Piano roll for \(track.name)")
                 Button {
                     automationTrackID = automationTrackID == track.id ? nil : track.id
@@ -304,7 +306,24 @@ struct WaveformTimeline: View {
                     }
                 }
 
-                Spacer(minLength: 3)
+                Button {
+                    model.toggleFreeze(trackID: track.id)
+                } label: {
+                    Image(systemName: "snowflake")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 22)
+                        .foregroundStyle(track.isFrozen ? Color.black : Color.white.opacity(0.7))
+                        .background(
+                            track.isFrozen ? Color.studioAccent : Color.studioPanelHighlight.opacity(0.7),
+                            in: RoundedRectangle(cornerRadius: 5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isFreezingTrack)
+                .accessibilityLabel(track.isFrozen ? "Unfreeze \(track.name)" : "Freeze \(track.name) to audio")
+                .accessibilityAddTraits(track.isFrozen ? .isSelected : [])
+
+                Spacer(minLength: 2)
 
                 CompactFaderView(
                     value: Binding(
@@ -524,10 +543,10 @@ struct WaveformTimeline: View {
             Color.white.opacity(0.025)
             timelineGrid
 
-            ForEach(track.clips) { clip in
+            ForEach(track.playbackClips) { clip in
                 editableClip(trackID: track.id, clip: clip, color: color)
                     .offset(x: CGFloat(clip.startTime) * zoom)
-                    .allowsHitTesting(automationTrackID != track.id)
+                    .allowsHitTesting(automationTrackID != track.id && !track.isFrozen)
             }
 
             if automationTrackID == track.id {

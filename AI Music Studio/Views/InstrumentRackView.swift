@@ -770,16 +770,37 @@ struct InstrumentRackView: View {
 
     private func startCountIn() {
         guard canStartRecording else { return }
+        let usesClick = model.isCountInEnabled
+        let beats = 4
+        if usesClick {
+            model.playMetronomeCountIn(beats: beats)
+        }
+
         countInTask = Task { @MainActor in
-            for count in [3, 2, 1] {
-                guard !Task.isCancelled else {
-                    countInValue = nil
-                    countInTask = nil
-                    return
+            if usesClick {
+                let beatLength = model.beatDuration
+                for beat in stride(from: beats, through: 1, by: -1) {
+                    guard !Task.isCancelled else {
+                        countInValue = nil
+                        countInTask = nil
+                        model.stopMetronomeCountIn()
+                        return
+                    }
+                    countInValue = beat
+                    try? await Task.sleep(for: .seconds(beatLength))
                 }
-                countInValue = count
-                try? await Task.sleep(for: .seconds(1))
+            } else {
+                for count in [3, 2, 1] {
+                    guard !Task.isCancelled else {
+                        countInValue = nil
+                        countInTask = nil
+                        return
+                    }
+                    countInValue = count
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
+
             guard !Task.isCancelled else {
                 countInValue = nil
                 countInTask = nil
@@ -799,6 +820,7 @@ struct InstrumentRackView: View {
         countInTask?.cancel()
         countInTask = nil
         countInValue = nil
+        model.stopMetronomeCountIn()
     }
 
     private func sliderControl(

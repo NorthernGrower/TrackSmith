@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#131315">
+<title>AI Music Studio</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="studio">
+  <header class="studio-header">
+    <div class="session-bar">
+      <div class="studio-mark" aria-hidden="true">∿</div>
+      <div class="session-meta">
+        <h1 id="sessionName">Untitled Session</h1>
+        <p id="sessionSubtitle">No tracks</p>
+      </div>
+      <div class="session-actions">
+        <button class="icon-btn" id="undoBtn" title="Undo" aria-label="Undo">↶</button>
+        <button class="icon-btn" id="redoBtn" title="Redo" aria-label="Redo">↷</button>
+        <button class="icon-btn" id="mixerBtn" title="Channel mixer" aria-label="Channel mixer">▥</button>
+        <button class="icon-btn" id="sessionsBtn" title="Sessions" aria-label="Sessions">◫</button>
+      </div>
+    </div>
+    <div class="tool-row">
+      <button class="tool primary" id="addTrackBtn">+ Import Audio</button>
+      <input id="fileInput" type="file" accept="audio/*" multiple hidden>
+      <button class="tool" id="blankTrackBtn">+ Blank Track</button>
+      <button class="tool" id="bounceBtn">Bounce</button>
+    </div>
+  </header>
+
+  <main class="arrangement" id="arrangement">
+    <div class="arr-scroll" id="arrScroll">
+      <div class="arr-grid" id="arrGrid">
+        <div class="arr-heads" id="arrHeads"></div>
+        <div class="arr-content" id="arrContent">
+          <div class="ruler" id="ruler">
+            <div class="loop-strip" id="loopStrip">
+              <div class="loop-region" id="loopRegion"></div>
+              <div class="loop-handle loop-handle-start" data-edge="start" id="loopStartHandle"></div>
+              <div class="loop-handle loop-handle-end" data-edge="end" id="loopEndHandle"></div>
+              <span class="loop-hint" id="loopHint">DRAG TO SET A LOOP</span>
+            </div>
+            <canvas id="rulerCanvas"></canvas>
+          </div>
+          <div class="lanes" id="lanes"></div>
+          <div class="playhead" id="playhead"></div>
+        </div>
+      </div>
+    </div>
+    <div class="arr-empty" id="emptyState">
+      <div class="empty-mark">∿</div>
+      <h2>Start a session</h2>
+      <p>Import audio stems to build your arrangement, or add a blank track and sequence the built-in synth.</p>
+      <button class="tool primary" id="emptyImportBtn">Import Audio</button>
+    </div>
+  </main>
+
+  <footer class="transport">
+    <div class="progress"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="transport-row">
+      <span class="timecode" id="timecode">00:00.0</span>
+      <div class="transport-buttons">
+        <button class="tbtn" id="rewindBtn" aria-label="Return to start">⏮</button>
+        <button class="play-btn" id="playBtn" aria-label="Play">▶</button>
+        <button class="tbtn" id="stopBtn" aria-label="Stop">⏹</button>
+      </div>
+      <span class="duration" id="durationLabel">00:00.0</span>
+    </div>
+    <div class="control-row">
+      <button class="pill" id="loopBtn">⟲ LOOP</button>
+      <span class="range-label" id="loopRangeLabel">Drag markers on the ruler</span>
+    </div>
+    <div class="control-row">
+      <button class="pill" id="metronomeBtn">◔ CLICK</button>
+      <input type="range" id="metronomeLevel" min="0" max="1" step="0.01" value="0.7" class="level-slider" aria-label="Click level">
+      <button class="pill" id="countInBtn">COUNT-IN</button>
+    </div>
+    <div class="control-row tempo-row">
+      <span class="row-label">TEMPO</span>
+      <button class="step-btn" id="tempoDown" aria-label="Decrease tempo">−</button>
+      <button class="tempo-value" id="tempoValue">120 BPM</button>
+      <button class="step-btn" id="tempoUp" aria-label="Increase tempo">+</button>
+    </div>
+  </footer>
+</div>
+
+<div class="modal-root" id="modalRoot"></div>
+<div class="toast" id="toast" role="status"></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

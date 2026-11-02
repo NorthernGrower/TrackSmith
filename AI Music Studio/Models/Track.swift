@@ -52,6 +52,9 @@ struct Track: Identifiable, Codable, Equatable {
     var compressorSettings: TrackCompressorSettings
     var volumeAutomationPoints: [VolumeAutomationPoint]
     var notes: [SynthNote]
+    /// Rendered audio of this track while it is frozen.
+    var frozenFileName: String?
+    var frozenDuration: TimeInterval
     private var clipLayoutInitialized: Bool
 
     init(
@@ -66,7 +69,9 @@ struct Track: Identifiable, Codable, Equatable {
         eqSettings: TrackEQSettings = TrackEQSettings(),
         compressorSettings: TrackCompressorSettings = TrackCompressorSettings(),
         volumeAutomationPoints: [VolumeAutomationPoint] = [],
-        notes: [SynthNote] = []
+        notes: [SynthNote] = [],
+        frozenFileName: String? = nil,
+        frozenDuration: TimeInterval = 0
     ) {
         self.id = id
         self.name = name
@@ -89,6 +94,8 @@ struct Track: Identifiable, Codable, Equatable {
         self.compressorSettings = compressorSettings
         self.volumeAutomationPoints = volumeAutomationPoints
         self.notes = notes
+        self.frozenFileName = frozenFileName
+        self.frozenDuration = frozenDuration
         clipLayoutInitialized = true
     }
 
@@ -105,6 +112,8 @@ struct Track: Identifiable, Codable, Equatable {
         case compressorSettings
         case volumeAutomationPoints
         case notes
+        case frozenFileName
+        case frozenDuration
         case clipLayoutInitialized
     }
 
@@ -139,7 +148,36 @@ struct Track: Identifiable, Codable, Equatable {
         compressorSettings = try values.decodeIfPresent(TrackCompressorSettings.self, forKey: .compressorSettings) ?? TrackCompressorSettings()
         volumeAutomationPoints = try values.decodeIfPresent([VolumeAutomationPoint].self, forKey: .volumeAutomationPoints) ?? []
         notes = try values.decodeIfPresent([SynthNote].self, forKey: .notes) ?? []
+        frozenFileName = try values.decodeIfPresent(String.self, forKey: .frozenFileName)
+        frozenDuration = try values.decodeIfPresent(TimeInterval.self, forKey: .frozenDuration) ?? 0
         clipLayoutInitialized = true
+    }
+
+    /// Whether the track currently plays rendered audio instead of its source material.
+    var isFrozen: Bool {
+        frozenFileName != nil
+    }
+
+    /// The clips the engine plays: one frozen clip while the track is frozen.
+    var playbackClips: [AudioClip] {
+        if let frozenFileName, frozenDuration > 0 {
+            return [AudioClip(
+                id: id,
+                name: "\(name) (Frozen)",
+                fileName: frozenFileName,
+                startTime: 0,
+                duration: frozenDuration,
+                sourceStartTime: 0,
+                sourceDuration: frozenDuration,
+                isOriginal: true
+            )]
+        }
+        return clips
+    }
+
+    /// Arrangement notes stay silent while the track is frozen.
+    var sequencedNotes: [SynthNote] {
+        isFrozen ? [] : notes
     }
 
     func automationGain(at time: TimeInterval) -> Float {

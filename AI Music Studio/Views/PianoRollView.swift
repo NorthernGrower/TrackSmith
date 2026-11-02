@@ -297,7 +297,7 @@ struct PianoRollView: View {
             Button {
                 model.togglePlay()
             } label: {
-                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                Image(systemName: model.isPlaying || model.isCountingIn ? "pause.fill" : "play.fill")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(Color.black)
                     .frame(width: 44, height: 44)
@@ -305,7 +305,7 @@ struct PianoRollView: View {
             }
             .buttonStyle(.plain)
             .disabled(model.tracks.isEmpty)
-            .accessibilityLabel(model.isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(model.isCountingIn ? "Cancel count-in" : (model.isPlaying ? "Pause" : "Play"))
 
             Button {
                 model.stop()

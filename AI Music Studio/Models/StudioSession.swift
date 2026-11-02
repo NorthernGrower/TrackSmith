@@ -18,6 +18,10 @@ struct StudioSession: Identifiable, Codable, Equatable {
     var isLoopEnabled: Bool
     /// Overall output level of the master strip, from 0 to 1.
     var masterVolume: Float
+    var isMetronomeEnabled: Bool
+    /// Click level of the metronome and count-in, from 0 to 1.
+    var metronomeLevel: Float
+    var isCountInEnabled: Bool
     var lastEdited: Date
 
     init(
@@ -30,6 +34,9 @@ struct StudioSession: Identifiable, Codable, Equatable {
         loopEnd: TimeInterval = 0,
         isLoopEnabled: Bool = false,
         masterVolume: Float = 1,
+        isMetronomeEnabled: Bool = false,
+        metronomeLevel: Float = 0.7,
+        isCountInEnabled: Bool = false,
         lastEdited: Date = Date()
     ) {
         self.id = id
@@ -41,6 +48,9 @@ struct StudioSession: Identifiable, Codable, Equatable {
         self.loopEnd = loopEnd
         self.isLoopEnabled = isLoopEnabled
         self.masterVolume = masterVolume
+        self.isMetronomeEnabled = isMetronomeEnabled
+        self.metronomeLevel = metronomeLevel
+        self.isCountInEnabled = isCountInEnabled
         self.lastEdited = lastEdited
     }
 
@@ -54,6 +64,9 @@ struct StudioSession: Identifiable, Codable, Equatable {
         case loopEnd
         case isLoopEnabled
         case masterVolume
+        case isMetronomeEnabled
+        case metronomeLevel
+        case isCountInEnabled
         case lastEdited
     }
 
@@ -68,6 +81,9 @@ struct StudioSession: Identifiable, Codable, Equatable {
         loopEnd = try values.decodeIfPresent(TimeInterval.self, forKey: .loopEnd) ?? 0
         isLoopEnabled = try values.decodeIfPresent(Bool.self, forKey: .isLoopEnabled) ?? false
         masterVolume = try values.decodeIfPresent(Float.self, forKey: .masterVolume) ?? 1
+        isMetronomeEnabled = try values.decodeIfPresent(Bool.self, forKey: .isMetronomeEnabled) ?? false
+        metronomeLevel = try values.decodeIfPresent(Float.self, forKey: .metronomeLevel) ?? 0.7
+        isCountInEnabled = try values.decodeIfPresent(Bool.self, forKey: .isCountInEnabled) ?? false
         lastEdited = try values.decodeIfPresent(Date.self, forKey: .lastEdited) ?? Date()
     }
 }

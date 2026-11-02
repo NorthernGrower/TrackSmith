@@ -73,6 +73,14 @@ final class MixerEngine {
     private var notePlayerBusy: [UUID: [TimeInterval]] = [:]
     private var noteBufferCache: [String: AVAudioPCMBuffer] = [:]
     private let noteVoiceCount = 6
+    private var metronomeMixer: AVAudioMixerNode?
+    private var metronomeVoices: [AVAudioPlayerNode] = []
+    private var metronomeFormat: AVAudioFormat?
+    private var metronomeBuffers: [String: AVAudioPCMBuffer] = [:]
+    private var metronomeEnabled = false
+    private var metronomeVolume: Float = 0.7
+    private var songTempoBPM = 120
+    private let metronomeVoiceCount = 4
     private var mixTracks: [Track] = []
     private var automationTime: TimeInterval = 0
     private var activeLoop: ClosedRange<TimeInterval>?
@@ -94,11 +102,37 @@ final class MixerEngine {
 
     init() {
         try? AVAudioSession.sharedInstance().setCategory(.playback)
+        buildMetronomeGraph()
+    }
+
+    /// Connects the click track once, so it never needs building during playback.
+    private func buildMetronomeGraph() {
+        guard let clickFormat = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2) else {
+            return
+        }
+
+        let outputFormat = engine.outputNode.outputFormat(forBus: 0)
+        let connectionFormat = outputFormat.sampleRate > 0 ? outputFormat : clickFormat
+
+        let mixer = AVAudioMixerNode()
+        engine.attach(mixer)
+        engine.connect(mixer, to: engine.mainMixerNode, format: connectionFormat)
+        mixer.outputVolume = metronomeVolume
+
+        for _ in 0..<metronomeVoiceCount {
+            let voice = AVAudioPlayerNode()
+            engine.attach(voice)
+            engine.connect(voice, to: mixer, format: clickFormat)
+            metronomeVoices.append(voice)
+        }
+
+        metronomeMixer = mixer
+        metronomeFormat = clickFormat
     }
 
     /// Rebuilds the playback graph for tracks and their audio clips.
     func load(tracks: [Track]) {
-        let newClipSignatures = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0.clips) })
+        let newClipSignatures = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0.playbackClips) })
         guard tracks.map(\.id) != trackIDs || newClipSignatures != clipSignatures else {
             updateMix(tracks: tracks)
             ensurePreviewVoices()
@@ -113,7 +147,7 @@ final class MixerEngine {
         duration = 0
 
         for track in tracks {
-            let clipFiles: [(clip: AudioClip, file: AVAudioFile)] = track.clips.compactMap { clip in
+            let clipFiles: [(clip: AudioClip, file: AVAudioFile)] = track.playbackClips.compactMap { clip in
                 let url = TrackStorage.url(forFileName: clip.fileName)
                 guard let file = try? AVAudioFile(forReading: url) else { return nil }
                 return (clip, file)
@@ -186,8 +220,14 @@ final class MixerEngine {
             instrumentVoices[track.id] = voices
             notePlayers[track.id] = sequencingVoices
             instrumentFormats[track.id] = instrumentFormat
-            configureEqualizer(equalizer, settings: track.eqSettings)
-            TrackCompressorUnit.configure(compressor, settings: track.compressorSettings)
+            var eqSettings = track.eqSettings
+            var compressorSettings = track.compressorSettings
+            if track.isFrozen {
+                eqSettings.isBypassed = true
+                compressorSettings.isBypassed = true
+            }
+            configureEqualizer(equalizer, settings: eqSettings)
+            TrackCompressorUnit.configure(compressor, settings: compressorSettings)
         }
 
         updateMix(tracks: tracks)
@@ -197,11 +237,11 @@ final class MixerEngine {
     func updateMix(tracks: [Track]) {
         mixTracks = tracks
         let clipEnd = tracks.flatMap { track in
-            track.clips.map { clip in
+            track.playbackClips.map { clip in
                 max(0, clip.startTime) + min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
             }
         }.max() ?? 0
-        let noteEnd = tracks.flatMap { $0.notes.map(\.endTime) }.max() ?? 0
+        let noteEnd = tracks.flatMap { $0.sequencedNotes.map(\.endTime) }.max() ?? 0
         duration = max(clipEnd, noteEnd)
         applyMix()
     }
@@ -229,13 +269,110 @@ final class MixerEngine {
         }
     }
 
+    func setTempo(_ bpm: Int) {
+        songTempoBPM = min(200, max(60, bpm))
+    }
+
+    /// Turns the click track on or off and sets its level.
+    func setMetronome(enabled: Bool, level: Float) {
+        metronomeVolume = min(1, max(0, level))
+        metronomeMixer?.outputVolume = metronomeVolume
+
+        guard enabled != metronomeEnabled else { return }
+        metronomeEnabled = enabled
+
+        if enabled, isPlaying {
+            seek(to: currentTime)
+        } else if !enabled {
+            metronomeVoices.forEach { $0.stop() }
+        }
+    }
+
+    /// Plays a bar of count-in clicks and returns how long they last.
+    func playCountIn(beats: Int) -> TimeInterval? {
+        guard beats > 0, let format = ensureMetronomeGraph() else { return nil }
+        let beatDuration = 60.0 / Double(max(60, songTempoBPM))
+        let startUptime = ProcessInfo.processInfo.systemUptime + 0.1
+
+        guard startAudioEngine() else { return nil }
+        metronomeMixer?.outputVolume = metronomeVolume
+        metronomeVoices.forEach { $0.stop() }
+
+        for index in 0..<beats {
+            guard let buffer = metronomeClickBuffer(accented: index == 0, format: format) else { continue }
+            let voice = metronomeVoices[index % metronomeVoices.count]
+            let hostTime = AVAudioTime.hostTime(forSeconds: startUptime + Double(index) * beatDuration)
+            voice.scheduleBuffer(buffer, at: AVAudioTime(hostTime: hostTime), options: [])
+        }
+        metronomeVoices.forEach { $0.play() }
+
+        return Double(beats) * beatDuration
+    }
+
+    /// Stops any clicks that are still queued.
+    func silenceMetronome() {
+        metronomeVoices.forEach { $0.stop() }
+    }
+
+    private func ensureMetronomeGraph() -> AVAudioFormat? {
+        metronomeFormat
+    }
+
+    private func metronomeClickBuffer(accented: Bool, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let key = "\(accented)-\(Int(format.sampleRate))-\(format.channelCount)"
+        if let cached = metronomeBuffers[key] { return cached }
+
+        guard let base = InstrumentSoundGenerator.drumHit(.closedHat, format: format),
+              let channels = base.floatChannelData else { return nil }
+
+        let gain: Float = accented ? 1.0 : 0.45
+        for channel in 0..<Int(format.channelCount) {
+            let samples = channels[channel]
+            for frame in 0..<Int(base.frameLength) {
+                samples[frame] *= gain
+            }
+        }
+
+        metronomeBuffers[key] = base
+        return base
+    }
+
+    /// Schedules a click on every beat inside a timeline window.
+    private func scheduleMetronome(from start: TimeInterval, to end: TimeInterval, timeOffset: TimeInterval) {
+        guard let format = metronomeFormat, !metronomeVoices.isEmpty, end > start else { return }
+        let beatDuration = 60.0 / Double(max(60, songTempoBPM))
+        var beatIndex = Int(ceil(max(0, start) / beatDuration))
+        var voiceIndex = 0
+
+        while true {
+            let beatTime = Double(beatIndex) * beatDuration
+            if beatTime >= end { break }
+            guard let buffer = metronomeClickBuffer(accented: beatIndex % 4 == 0, format: format) else { break }
+
+            let seconds = loopScheduleDelay + timeOffset + (beatTime - start)
+            let hostTime = playbackHostStart + AVAudioTime.hostTime(forSeconds: seconds)
+            let voice = metronomeVoices[voiceIndex % metronomeVoices.count]
+            voice.scheduleBuffer(buffer, at: AVAudioTime(hostTime: hostTime), options: [])
+            voiceIndex += 1
+            beatIndex += 1
+        }
+    }
+
     func updateEqualizer(trackID: UUID, settings: TrackEQSettings) {
         guard let equalizer = equalizers[trackID] else { return }
+        var settings = settings
+        if mixTracks.first(where: { $0.id == trackID })?.isFrozen == true {
+            settings.isBypassed = true
+        }
         configureEqualizer(equalizer, settings: settings)
     }
 
     func updateCompressor(trackID: UUID, settings: TrackCompressorSettings) {
         guard let compressor = compressors[trackID] else { return }
+        var settings = settings
+        if mixTracks.first(where: { $0.id == trackID })?.isFrozen == true {
+            settings.isBypassed = true
+        }
         TrackCompressorUnit.configure(compressor, settings: settings)
     }
 
@@ -282,7 +419,11 @@ final class MixerEngine {
     }
 
     func play() {
-        guard !trackIDs.isEmpty, startAudioEngine() else { return }
+        guard !trackIDs.isEmpty else { return }
+        if metronomeEnabled {
+            _ = ensureMetronomeGraph()
+        }
+        guard startAudioEngine() else { return }
 
         let loop = activeLoop
         if let loop,
@@ -312,6 +453,7 @@ final class MixerEngine {
             }
         }
         notePlayerBusy.removeAll()
+        metronomeVoices.forEach { $0.stop() }
 
         if loop != nil {
             scheduleLoopPasses(ahead: 30)
@@ -328,6 +470,9 @@ final class MixerEngine {
             for player in players {
                 player.play(at: playbackStart)
             }
+        }
+        for voice in metronomeVoices {
+            voice.play(at: playbackStart)
         }
     }
 
@@ -359,6 +504,10 @@ final class MixerEngine {
     private func scheduleWindow(from start: TimeInterval, to end: TimeInterval, timeOffset: TimeInterval) {
         guard end > start else { return }
 
+        if metronomeEnabled {
+            scheduleMetronome(from: start, to: end, timeOffset: timeOffset)
+        }
+
         for id in trackIDs {
             for loadedClip in clipPlayers[id] ?? [] {
                 let clip = loadedClip.clip
@@ -383,9 +532,9 @@ final class MixerEngine {
                 )
             }
 
-            if let track = mixTracks.first(where: { $0.id == id }), !track.notes.isEmpty {
+            if let track = mixTracks.first(where: { $0.id == id }), !track.sequencedNotes.isEmpty {
                 scheduleSynthNotes(
-                    track.notes,
+                    track.sequencedNotes,
                     trackID: id,
                     start: start,
                     end: end,
@@ -478,6 +627,7 @@ final class MixerEngine {
         updateAutomation(at: playHeadOffset)
         clipPlayers.values.flatMap { $0 }.forEach { $0.player.pause() }
         notePlayers.values.flatMap { $0 }.forEach { $0.pause() }
+        metronomeVoices.forEach { $0.pause() }
         isPlaying = false
         playStartDate = nil
     }
@@ -489,6 +639,7 @@ final class MixerEngine {
         clipPlayers.values.flatMap { $0 }.forEach { $0.player.stop() }
         notePlayers.values.flatMap { $0 }.forEach { $0.stop() }
         notePlayerBusy.removeAll()
+        metronomeVoices.forEach { $0.stop() }
         instrumentVoices.values.flatMap { $0 }.forEach { $0.stop() }
         previewVoices.forEach { $0.stop() }
     }
@@ -504,6 +655,7 @@ final class MixerEngine {
         clipPlayers.values.flatMap { $0 }.forEach { $0.player.stop() }
         notePlayers.values.flatMap { $0 }.forEach { $0.stop() }
         notePlayerBusy.removeAll()
+        metronomeVoices.forEach { $0.stop() }
         if wasPlaying {
             play()
         }
