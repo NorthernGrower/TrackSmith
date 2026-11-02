@@ -74,6 +74,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var bounceProgress = 0.0
     @Published private(set) var bounceStatus = ""
     @Published private(set) var bounceError: String?
+    @Published var audioError: String?
     @Published private(set) var exports: [MixExport] = []
     @Published private(set) var lastExportURL: URL?
 
@@ -1270,6 +1271,12 @@ final class MixerViewModel: ObservableObject {
         engine.play()
         isPlaying = engine.isPlaying
         currentTime = engine.currentTime
+
+        if let startError = engine.lastStartError {
+            audioError = "Audio could not start: \(startError)"
+        } else if isPlaying {
+            audioError = nil
+        }
     }
 
     private func startCountIn() {

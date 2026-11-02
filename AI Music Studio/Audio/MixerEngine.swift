@@ -101,20 +101,32 @@ final class MixerEngine {
 
     private(set) var duration: TimeInterval = 0
     private(set) var isPlaying = false
+    /// Why playback last failed to start, if it did.
+    private(set) var lastStartError: String?
     private var playHeadOffset: TimeInterval = 0
     private var playStartDate: Date?
 
     init() {
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         buildMasterEffectsGraph()
         buildMetronomeGraph()
     }
 
+    /// The format the hardware is actually running at, falling back to 44.1 kHz stereo.
+    private func masterConnectionFormat() -> AVAudioFormat? {
+        let output = engine.outputNode.outputFormat(forBus: 0)
+        if output.sampleRate > 0, output.channelCount > 0 {
+            return AVAudioFormat(
+                standardFormatWithSampleRate: output.sampleRate,
+                channels: min(max(output.channelCount, 1), 2)
+            )
+        }
+        return AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)
+    }
+
     /// Connects the master reverb and delay once, between the tracks and the output.
     private func buildMasterEffectsGraph() {
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2) else {
-            return
-        }
+        guard let format = masterConnectionFormat() else { return }
 
         engine.attach(masterBus)
         engine.attach(masterReverb)
@@ -161,8 +173,7 @@ final class MixerEngine {
             return
         }
 
-        let outputFormat = engine.outputNode.outputFormat(forBus: 0)
-        let connectionFormat = outputFormat.sampleRate > 0 ? outputFormat : clickFormat
+        let connectionFormat = masterConnectionFormat() ?? clickFormat
 
         let mixer = AVAudioMixerNode()
         engine.attach(mixer)
@@ -880,13 +891,22 @@ final class MixerEngine {
     }
 
     private func startAudioEngine() -> Bool {
-        try? AVAudioSession.sharedInstance().setActive(true)
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+        } catch {
+            lastStartError = "The audio session could not start: \(error.localizedDescription)"
+        }
+
         guard !engine.isRunning else { return true }
         engine.prepare()
         do {
             try engine.start()
+            lastStartError = nil
             return true
         } catch {
+            lastStartError = error.localizedDescription
             return false
         }
     }

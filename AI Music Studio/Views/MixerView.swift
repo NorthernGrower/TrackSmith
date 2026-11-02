@@ -169,9 +169,10 @@ struct MixerView: View {
                 model.separationError = nil
                 model.clearBounceError()
                 model.clearFreezeError()
+                model.audioError = nil
             }
         } message: {
-            Text(model.freezeError ?? model.bounceError ?? model.separationError ?? "")
+            Text(model.audioError ?? model.freezeError ?? model.bounceError ?? model.separationError ?? "")
         }
     }
 
@@ -429,6 +430,7 @@ struct MixerView: View {
     }
 
     private var alertTitle: String {
+        if model.audioError != nil { return "Audio Unavailable" }
         if model.freezeError != nil { return "Freeze Failed" }
         if model.bounceError != nil { return "Bounce Failed" }
         return "Separation Failed"
@@ -457,12 +459,13 @@ struct MixerView: View {
 
     private var studioErrorBinding: Binding<Bool> {
         Binding(
-            get: { model.separationError != nil || model.bounceError != nil || model.freezeError != nil },
+            get: { model.separationError != nil || model.bounceError != nil || model.freezeError != nil || model.audioError != nil },
             set: { shouldShow in
                 if !shouldShow {
                     model.separationError = nil
                     model.clearBounceError()
                     model.clearFreezeError()
+                    model.audioError = nil
                 }
             }
         )
