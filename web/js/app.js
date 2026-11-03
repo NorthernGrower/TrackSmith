@@ -93,6 +93,7 @@ const el = {
   sessionsBtn: document.getElementById('sessionsBtn'),
   addTrackBtn: document.getElementById('addTrackBtn'),
   blankTrackBtn: document.getElementById('blankTrackBtn'),
+  instrumentTrackBtn: document.getElementById('instrumentTrackBtn'),
   templatesBtn: document.getElementById('templatesBtn'),
   emptyTemplatesBtn: document.getElementById('emptyTemplatesBtn'),
   instrumentsBtn: document.getElementById('instrumentsBtn'),
@@ -100,6 +101,7 @@ const el = {
   bounceBtn: document.getElementById('bounceBtn'),
   fileInput: document.getElementById('fileInput'),
   emptyImportBtn: document.getElementById('emptyImportBtn'),
+  emptyInstrumentTrackBtn: document.getElementById('emptyInstrumentTrackBtn'),
   arrangement: document.getElementById('arrangement'),
   arrGrid: document.getElementById('arrGrid'),
   arrHeads: document.getElementById('arrHeads'),
@@ -437,6 +439,7 @@ function renderHeads() {
             <button class="mini ${track.soloed ? 'on' : ''}" data-act="solo" data-track="${track.id}" title="Solo">S</button>
           </div>
           <button class="mini snow ${frozen ? 'frozen' : ''}" data-act="freeze" data-track="${track.id}" title="${frozen ? 'Unfreeze' : 'Freeze to audio'}">❄</button>
+          <button class="mini instrument-open" data-act="instrument" data-track="${track.id}" title="Open instruments for ${escapeHtml(track.name)}">♫</button>
           <div class="spacer"></div>
           <input type="range" class="fader" min="0" max="1" step="0.01" value="${track.volume}" data-act="volume" data-track="${track.id}" aria-label="Volume for ${escapeHtml(track.name)}">
           <div class="meter" data-meter="${track.id}"><div class="meter-fill"></div></div>
@@ -1130,6 +1133,24 @@ function addBlankTrack() {
   engine.rebuild();
   render();
   toast('Blank track added · open its piano roll to add notes');
+}
+
+function addInstrumentTrack() {
+  const used = new Set(state.session.tracks.map((track) => track.name.toLowerCase()));
+  let number = 1;
+  while (used.has(`instrument layer ${number}`)) number += 1;
+  snapshot();
+  const track = model.createTrack({
+    name: `Instrument Layer ${number}`,
+    index: state.session.tracks.length
+  });
+  state.session.tracks.push(track);
+  state.instrumentTrackId = track.id;
+  state.instrumentTab = 'drums';
+  persist();
+  engine.rebuild();
+  render();
+  openInstruments(track.id);
 }
 
 function renderSections(pps) {
@@ -2672,9 +2693,12 @@ function sessionSoundButtons() {
   return `<div class="label-row"><span>Session audio</span></div><div style="margin:8px 0 0">${buttons}</div>`;
 }
 
-function openInstruments() {
+function openInstruments(destinationTrackID = null) {
   if (!state.session) return;
   state.modal = 'instruments';
+  if (destinationTrackID && state.session.tracks.some((track) => track.id === destinationTrackID)) {
+    state.instrumentTrackId = destinationTrackID;
+  }
   if (!state.instrumentTrackId && state.session.tracks.length) {
     state.instrumentTrackId = state.session.tracks[0].id;
   }
@@ -3128,6 +3152,8 @@ function bindEvents() {
     el.fileInput.value = '';
   });
   el.blankTrackBtn.addEventListener('click', addBlankTrack);
+  el.instrumentTrackBtn?.addEventListener('click', addInstrumentTrack);
+  el.emptyInstrumentTrackBtn?.addEventListener('click', addInstrumentTrack);
   el.templatesBtn.addEventListener('click', openTemplates);
   el.emptyTemplatesBtn?.addEventListener('click', openTemplates);
   el.instrumentsBtn.addEventListener('click', openInstruments);
@@ -3276,6 +3302,7 @@ function bindEvents() {
       case 'freeze': toggleFreeze(trackId); break;
       case 'eq': openEQ(trackId); break;
       case 'roll': openRoll(trackId); break;
+      case 'instrument': openInstruments(trackId); break;
       case 'automation': toggleAutomation(trackId); break;
       case 'automation-pan': toggleAutomation(trackId, 'pan'); break;
       default: break;

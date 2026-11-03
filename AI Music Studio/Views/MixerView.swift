@@ -34,6 +34,7 @@ struct MixerView: View {
     @State private var activeSheet: StudioSheet?
     @State private var selectedEQTrackID: UUID?
     @State private var selectedPianoRollTrackID: UUID?
+    @State private var instrumentDestinationTrackID: UUID?
     @State private var bounceMode: BounceSettingsView.Mode = .mix
 
     var body: some View {
@@ -56,7 +57,12 @@ struct MixerView: View {
                         onOpenPianoRoll: { trackID in
                             selectedPianoRollTrackID = trackID
                             activeSheet = .pianoRoll
-                        }
+                        },
+                        onOpenInstrumentsForTrack: { trackID in
+                            instrumentDestinationTrackID = trackID
+                            activeSheet = .instruments
+                        },
+                        onAddInstrumentTrack: createInstrumentLayerAndOpen
                     )
                 }
 
@@ -120,7 +126,7 @@ struct MixerView: View {
             case .settings:
                 SettingsView()
             case .instruments:
-                InstrumentRackView(model: model)
+                InstrumentRackView(model: model, initialTrackID: instrumentDestinationTrackID)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             case .exports:
@@ -197,6 +203,11 @@ struct MixerView: View {
         } message: {
             Text(model.audioError ?? model.freezeError ?? model.bounceError ?? model.separationError ?? "")
         }
+    }
+
+    private func createInstrumentLayerAndOpen() {
+        instrumentDestinationTrackID = model.addInstrumentTrack()
+        activeSheet = .instruments
     }
 
     // MARK: - Session header
@@ -334,11 +345,16 @@ struct MixerView: View {
                     } label: {
                         Label("Split Song Into Stems", systemImage: "waveform.path.ecg")
                     }
+
+                    Button(action: createInstrumentLayerAndOpen) {
+                        Label("New Instrument Layer", systemImage: "pianokeys")
+                    }
                 } label: {
                     StudioToolbarButton(title: "Add Track", systemImage: "plus", isProminent: true)
                 }
 
                 Button {
+                    instrumentDestinationTrackID = nil
                     activeSheet = .instruments
                 } label: {
                     StudioToolbarButton(title: "Instruments", systemImage: "pianokeys")
@@ -417,6 +433,10 @@ struct MixerView: View {
                     showSplitPicker = true
                 } label: {
                     Label("Split Song Into Stems", systemImage: "waveform.path.ecg")
+                }
+
+                Button(action: createInstrumentLayerAndOpen) {
+                    Label("New Instrument Layer", systemImage: "pianokeys")
                 }
             } label: {
                 StudioToolbarButton(title: "Add Track", systemImage: "plus", isProminent: true)

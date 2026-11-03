@@ -1128,3 +1128,14 @@ button { cursor: pointer; }
   clip: rect(0, 0, 0, 0);
 }
 .hardware-knob:focus-within .knob-face { outline: 2px solid var(--accent); }
+
+
+
+.mini.instrument-open {
+  width: 24px;
+  flex: 0 0 24px;
+  color: var(--accent);
+  font-size: 13px;
+  background: rgba(245, 158, 42, 0.12);
+}
+.mini.instrument-open:active { background: var(--accent); color: #151515; }

@@ -164,6 +164,34 @@ final class MixerViewModel: ObservableObject {
         reloadEngine()
     }
 
+    /// Adds an empty audio layer and returns its id for immediate instrument routing.
+    @discardableResult
+    func addInstrumentTrack() -> UUID {
+        var number = 1
+        let existingNames = Set(tracks.map { $0.name.lowercased() })
+        while existingNames.contains("instrument layer \(number)") {
+            number += 1
+        }
+
+        let track = Track(name: "Instrument Layer \(number)", fileName: "", clips: [])
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+        tracks.append(track)
+        resolveClipMetadata()
+        engine.load(tracks: tracks)
+        engine.updateGroups(groups)
+        duration = engine.duration
+        applyLoopChangeToEngine()
+        currentTime = min(max(0, resumeTime), duration)
+        engine.seek(to: currentTime)
+        if wasPlaying { engine.play() }
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+        loadWaveforms()
+        commitSession()
+        return track.id
+    }
+
     func setVolume(_ id: UUID, _ value: Float) {
         guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
         beginUndoableEdit()

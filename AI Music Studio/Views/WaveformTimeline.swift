@@ -10,6 +10,8 @@ struct WaveformTimeline: View {
     @ObservedObject var model: MixerViewModel
     var onOpenTrackEQ: (UUID) -> Void = { _ in }
     var onOpenPianoRoll: (UUID) -> Void = { _ in }
+    var onOpenInstrumentsForTrack: (UUID) -> Void = { _ in }
+    var onAddInstrumentTrack: () -> Void = {}
 
     @State private var zoom: CGFloat = 24
     @State private var pinchBase: CGFloat?
@@ -346,9 +348,15 @@ struct WaveformTimeline: View {
                 .tracking(0.8)
                 .foregroundStyle(.secondary)
             Spacer()
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.tertiary)
+            Button(action: onAddInstrumentTrack) {
+                Image(systemName: "pianokeys")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.studioAccent)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Add instrument layer")
         }
         .padding(.horizontal, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -470,6 +478,18 @@ struct WaveformTimeline: View {
                 .disabled(model.isFreezingTrack)
                 .accessibilityLabel(track.isFrozen ? "Unfreeze \(track.name)" : "Freeze \(track.name) to audio")
                 .accessibilityAddTraits(track.isFrozen ? .isSelected : [])
+
+                Button {
+                    onOpenInstrumentsForTrack(track.id)
+                } label: {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 22)
+                        .foregroundStyle(Color.studioAccent)
+                        .background(Color.studioPanelHighlight.opacity(0.7), in: RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open instruments for \(track.name)")
 
                 Spacer(minLength: 2)
 

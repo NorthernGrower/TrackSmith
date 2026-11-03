@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 
 struct InstrumentRackView: View {
     @ObservedObject var model: MixerViewModel
+    var initialTrackID: UUID? = nil
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedInstrument = InstrumentSelection.synth
@@ -94,7 +95,9 @@ struct InstrumentRackView: View {
             }
         }
         .onAppear {
-            selectedTrackID = model.tracks.first?.id
+            selectedTrackID = initialTrackID.flatMap { id in
+                model.tracks.contains(where: { $0.id == id }) ? id : nil
+            } ?? model.tracks.first?.id
         }
         .onChange(of: model.tracks.map(\.id)) { _, trackIDs in
             if let selectedTrackID, trackIDs.contains(selectedTrackID) { return }
