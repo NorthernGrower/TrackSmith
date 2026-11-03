@@ -51,6 +51,7 @@ export class InstrumentEngine {
   track(node) {
     this.active.add(node);
     node.onended = () => this.active.delete(node);
+    return node;
   }
 
   stopAll() {
@@ -95,28 +96,33 @@ export class InstrumentEngine {
     this.track(osc);
   }
 
-  playDrum(pad, destination, { volume = 0.8, tuning = 1, decay = 1, tone = 0.65 } = {}) {
-    const start = this.ctx.currentTime + 0.005;
+  playDrum(pad, destination, { volume = 0.8, tuning = 1, decay = 1, tone = 0.65, when } = {}) {
+    const start = Number.isFinite(when) ? Math.max(this.ctx.currentTime, when) : this.ctx.currentTime + 0.005;
+    const nodes = [];
     const level = clamp(volume, 0, 1);
     const tune = clamp(tuning, 0.5, 1.5);
     const decayScale = clamp(decay, 0.4, 2);
     const brightness = 0.55 + clamp(tone, 0, 1) * 0.9;
-    const toneVoice = (settings) => this.tone(start, destination, {
-      ...settings,
-      from: settings.from * tune,
-      to: settings.to * tune,
-      decay: clamp(settings.decay * decayScale, 0.02, 2),
-      gain: settings.gain * level,
-      filter: settings.filter
-        ? { ...settings.filter, frequency: settings.filter.frequency * brightness }
-        : undefined
-    });
-    const noiseVoice = (at, settings) => this.noise(at, destination, {
-      ...settings,
-      gain: settings.gain * level,
-      decay: clamp(settings.decay * decayScale, 0.02, 2),
-      frequency: clamp(settings.frequency * brightness, 80, this.ctx.sampleRate * 0.45)
-    });
+    const toneVoice = (settings) => {
+      nodes.push(this.tone(start, destination, {
+        ...settings,
+        from: settings.from * tune,
+        to: settings.to * tune,
+        decay: clamp(settings.decay * decayScale, 0.02, 2),
+        gain: settings.gain * level,
+        filter: settings.filter
+          ? { ...settings.filter, frequency: settings.filter.frequency * brightness }
+          : undefined
+      }));
+    };
+    const noiseVoice = (at, settings) => {
+      nodes.push(this.noise(at, destination, {
+        ...settings,
+        gain: settings.gain * level,
+        decay: clamp(settings.decay * decayScale, 0.02, 2),
+        frequency: clamp(settings.frequency * brightness, 80, this.ctx.sampleRate * 0.45)
+      }));
+    };
 
     switch (pad) {
       case 'kick':
@@ -166,6 +172,7 @@ export class InstrumentEngine {
       default:
         break;
     }
+    return nodes;
   }
 
   tone(start, destination, { type, from, to, decay, gain, filter: filterSettings }) {
@@ -193,7 +200,7 @@ export class InstrumentEngine {
     env.connect(destination);
     osc.start(start);
     osc.stop(start + decay + 0.02);
-    this.track(osc);
+    return this.track(osc);
   }
 
   noise(start, destination, { gain, decay, filterType = 'highpass', frequency = 6000, q = 1 }) {
@@ -213,7 +220,7 @@ export class InstrumentEngine {
     env.connect(destination);
     source.start(start);
     source.stop(start + decay + 0.02);
-    this.track(source);
+    return this.track(source);
   }
 
   playTB303(frequency, {

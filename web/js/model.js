@@ -5,6 +5,13 @@ export const NOTE_HIGH = 71;
 export const MIN_LOOP = 0.2;
 export const TRACK_COLORS = ['#fa9f2d', '#2aa89a', '#5c8fed', '#cc6bc7'];
 
+const DRUM_VOICE_IDS = ['kick', 'snare', 'lowTom', 'midTom', 'highTom', 'rimshot', 'clap', 'cowbell', 'closedHat', 'openHat', 'cymbal'];
+const DRUM_STEP_COUNT = 16;
+
+function emptyDrumPattern() {
+  return Object.fromEntries(DRUM_VOICE_IDS.map((voice) => [voice, Array(DRUM_STEP_COUNT).fill(false)]));
+}
+
 export function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -123,6 +130,7 @@ export function createSession(name = 'Untitled Session') {
     },
     loop: { start: 0, end: 0, enabled: false },
     metronome: { enabled: false, level: 0.7, countIn: false },
+    drumPattern: emptyDrumPattern(),
     sections: [],
     groups: [],
     tracks: [],
@@ -347,6 +355,13 @@ export function normalizeSession(session) {
   normal.metronome.level = clamp(Number(normal.metronome.level ?? 0.7), 0, 1);
   normal.metronome.enabled = Boolean(normal.metronome.enabled);
   normal.metronome.countIn = Boolean(normal.metronome.countIn);
+  const storedDrumPattern = normal.drumPattern && typeof normal.drumPattern === 'object' && !Array.isArray(normal.drumPattern)
+    ? normal.drumPattern
+    : {};
+  normal.drumPattern = Object.fromEntries(DRUM_VOICE_IDS.map((voice) => {
+    const steps = storedDrumPattern[voice];
+    return [voice, Array.from({ length: DRUM_STEP_COUNT }, (_, index) => Boolean(Array.isArray(steps) && steps[index]))];
+  }));
   normal.sections = Array.isArray(normal.sections) ? normal.sections : [];
   normal.sections.forEach((section) => {
     section.id = section.id || uid();
@@ -416,7 +431,9 @@ export function loadStore() {
       if (parsed && Array.isArray(parsed.sessions) && parsed.sessions.length) {
         const sessions = parsed.sessions.map(normalizeSession);
         const activeId = sessions.some((s) => s.id === parsed.activeId) ? parsed.activeId : sessions[0].id;
-        return { sessions, activeId };
+        const needsDemo = parsed.houseDemoSeeded !== true
+          && !sessions.some((session) => session.templateId === 'house-demo');
+        return { sessions, activeId, needsDemo, houseDemoSeeded: parsed.houseDemoSeeded === true };
       }
     }
   } catch (error) {
@@ -424,12 +441,16 @@ export function loadStore() {
   }
 
   const session = createSession();
-  return { sessions: [session], activeId: session.id };
+  return { sessions: [session], activeId: session.id, needsDemo: true, houseDemoSeeded: false };
 }
 
 export function saveStore(store) {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify({ sessions: store.sessions, activeId: store.activeId }));
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      sessions: store.sessions,
+      activeId: store.activeId,
+      houseDemoSeeded: store.houseDemoSeeded !== false
+    }));
   } catch (error) {
     console.warn('Could not save sessions', error);
   }

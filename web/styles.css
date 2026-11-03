@@ -1139,3 +1139,96 @@ button { cursor: pointer; }
   background: rgba(245, 158, 42, 0.12);
 }
 .mini.instrument-open:active { background: var(--accent); color: #151515; }
+
+
+
+/* Session-synced 16-step drum pattern grid */
+.drum-sequencer-section {
+  margin-top: 15px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(225, 178, 116, 0.22);
+}
+.drum-sequencer-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.drum-sequencer-title h4 {
+  margin: 0;
+  color: #e8c28e;
+  font: 700 9px "SF Mono", ui-monospace, Menlo, monospace;
+  letter-spacing: .08em;
+}
+.drum-sequencer-title span {
+  color: #a98f70;
+  font: 700 7px "SF Mono", ui-monospace, Menlo, monospace;
+  letter-spacing: .06em;
+}
+.drum-sequencer-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 2px 1px 5px;
+  -webkit-overflow-scrolling: touch;
+}
+.drum-sequencer {
+  min-width: 470px;
+  padding: 8px;
+  border: 1px solid rgba(211, 164, 105, 0.22);
+  border-radius: 9px;
+  background: rgba(20, 12, 8, 0.42);
+}
+.drum-step-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+.drum-step-row + .drum-step-row { margin-top: 5px; }
+.drum-voice-label {
+  overflow: hidden;
+  color: #e5c99e;
+  font: 700 7px "SF Mono", ui-monospace, Menlo, monospace;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.drum-step-cells {
+  display: grid;
+  grid-template-columns: repeat(16, minmax(0, 1fr));
+  gap: 3px;
+}
+.drum-step-number {
+  color: #9b866e;
+  font: 600 7px "SF Mono", ui-monospace, Menlo, monospace;
+  text-align: center;
+}
+.drum-step-number.downbeat { color: #f0d2a7; }
+.drum-step {
+  min-width: 0;
+  height: 23px;
+  padding: 0;
+  border: 1px solid rgba(226, 190, 145, 0.17);
+  border-radius: 4px;
+  background: rgba(238, 225, 206, 0.07);
+  touch-action: manipulation;
+}
+.drum-step.downbeat { border-color: rgba(226, 190, 145, 0.34); }
+.drum-step.active {
+  border-color: #f1b455;
+  background: linear-gradient(145deg, #f8bf64, #d98828);
+  box-shadow: inset 0 1px rgba(255, 245, 223, 0.35), 0 0 7px rgba(245, 158, 42, 0.2);
+}
+.drum-step.playhead {
+  outline: 2px solid #fff1d5;
+  outline-offset: 1px;
+  position: relative;
+  z-index: 1;
+}
+.drum-step:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.drum-sequencer-hint {
+  margin: 7px 2px 0;
+  color: #a98f70;
+  font: 8px "SF Mono", ui-monospace, Menlo, monospace;
+}

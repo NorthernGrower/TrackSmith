@@ -705,6 +705,7 @@ function frame() {
     }
 
     updatePlayhead();
+    updateDrumSequencerPlayhead();
     updateMeters();
     if (state.countInActive) {
       renderTransport();
@@ -1082,7 +1083,7 @@ function bounceMix() {
 
 async function importFiles(fileList) {
   const files = Array.from(fileList || []).filter((file) => (
-    file.type.startsWith('audio') || /\.(wav|mp3|m4a|aif|aiff|caf|ogg)$/i.test(file.name)
+    (file.type || '').startsWith('audio') || /\.(wav|mp3|m4a|aif|aiff|caf|ogg)$/i.test(file.name)
   ));
   if (!files.length) {
     toast('Choose an audio file to import');
@@ -2610,6 +2611,55 @@ function instrumentNoteButtons(from, to, attribute) {
   return notes.join('');
 }
 
+function drumSequencerMarkup() {
+  const stepCount = 16;
+  const stepNumbers = Array.from({ length: stepCount }, (_, step) => (
+    `<span class="drum-step-number ${step % 4 === 0 ? 'downbeat' : ''}">${String(step + 1).padStart(2, '0')}</span>`
+  )).join('');
+  const rows = DRUM_PADS.map((pad) => {
+    const activeSteps = state.session.drumPattern[pad.id] || [];
+    const cells = Array.from({ length: stepCount }, (_, step) => {
+      const isActive = Boolean(activeSteps[step]);
+      return `<button type="button" class="drum-step ${isActive ? 'active' : ''} ${step % 4 === 0 ? 'downbeat' : ''}" data-drum-step-voice="${pad.id}" data-drum-step-index="${step}" aria-pressed="${isActive}" aria-label="${pad.name}, step ${step + 1}, ${isActive ? 'on' : 'off'}"></button>`;
+    }).join('');
+    return `<div class="drum-step-row">
+      <span class="drum-voice-label">${pad.name}</span>
+      <div class="drum-step-cells">${cells}</div>
+    </div>`;
+  }).join('');
+
+  return `<div class="drum-sequencer-section">
+    <div class="drum-sequencer-title"><h4>16-STEP SEQUENCER</h4><span>SESSION SYNC</span></div>
+    <div class="drum-sequencer-scroll" aria-label="Drum pattern steps">
+      <div class="drum-sequencer" data-drum-sequencer data-playhead-step="">
+        <div class="drum-step-row drum-step-header">
+          <span class="drum-voice-label">VOICE</span>
+          <div class="drum-step-cells">${stepNumbers}</div>
+        </div>
+        ${rows}
+      </div>
+    </div>
+    <p class="drum-sequencer-hint">Tap steps to toggle hits · repeats every bar during transport playback</p>
+  </div>`;
+}
+
+function updateDrumSequencerPlayhead() {
+  const sequencer = el.modalRoot.querySelector('[data-drum-sequencer]');
+  if (!sequencer) return;
+
+  const stepDuration = 60 / (state.session?.tempo || 120) / 4;
+  const step = engine.isPlaying && stepDuration > 0
+    ? Math.floor((state.playhead + 1e-6) / stepDuration) % 16
+    : null;
+  const nextStep = step === null ? '' : String(step);
+  if (sequencer.dataset.playheadStep === nextStep) return;
+
+  sequencer.dataset.playheadStep = nextStep;
+  sequencer.querySelectorAll('[data-drum-step-index]').forEach((button) => {
+    button.classList.toggle('playhead', Number(button.dataset.drumStepIndex) === step);
+  });
+}
+
 function instrumentTabContent() {
   if (state.instrumentTab === 'drums') {
     return `<div class="panel">
@@ -2623,6 +2673,7 @@ function instrumentTabContent() {
       <div class="pads">
         ${DRUM_PADS.map((pad) => `<button class="pad" data-drum="${pad.id}">${pad.name}</button>`).join('')}
       </div>
+      ${drumSequencerMarkup()}
     </div>`;
   }
 
@@ -2652,7 +2703,7 @@ function instrumentTabContent() {
     return `<div class="panel">
       <h3>SAMPLER</h3>
       <div class="label-row" style="margin-bottom:8px"><span>Loaded</span><span>${escapeHtml(loaded)}</span></div>
-      <input type="file" id="samplerFile" accept="audio/*" hidden>
+      <input type="file" id="samplerFile" accept="audio/*,.mp3,.wav" hidden>
       <div class="control-row" style="padding:0 0 12px">
         <button class="pill" id="samplerChooseBtn">CHOOSE FILE</button>
         <button class="pill ${state.samplerBuffer ? 'on' : ''}" id="samplerTriggerBtn" ${state.samplerBuffer ? '' : 'disabled'}>TRIGGER</button>
@@ -2839,6 +2890,22 @@ function bindInstrumentControls() {
 
   el.modalRoot.querySelectorAll('[data-tb-note]').forEach((button) => {
     button.addEventListener('click', () => playTB303(Number(button.dataset.tbNote)));
+  });
+
+  el.modalRoot.querySelectorAll('[data-drum-step-voice]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const voice = button.dataset.drumStepVoice;
+      const step = Number(button.dataset.drumStepIndex);
+      if (!state.session.drumPattern[voice] || !Number.isInteger(step) || step < 0 || step >= 16) return;
+
+      const steps = state.session.drumPattern[voice];
+      steps[step] = !steps[step];
+      button.classList.toggle('active', steps[step]);
+      button.setAttribute('aria-pressed', String(steps[step]));
+      const pad = DRUM_PADS.find((item) => item.id === voice);
+      if (pad) button.setAttribute('aria-label', `${pad.name}, step ${step + 1}, ${steps[step] ? 'on' : 'off'}`);
+      persist();
+    });
   });
 
   el.modalRoot.querySelectorAll('[data-drum]').forEach((button) => {
@@ -3561,6 +3628,145 @@ function changeTempo(delta) {
   render();
 }
 
+async function createHouseDemoSession() {
+  const sampleFiles = ['starter-kick-1.wav', 'starter-snare.wav', 'starter-clap.wav', 'starter-hat.wav'];
+  const sounds = new Map();
+  for (const file of sampleFiles) {
+    try {
+      const response = await fetch(`sounds/${file}`);
+      if (!response.ok) throw new Error(`Could not load ${file}`);
+      const audioData = await response.arrayBuffer();
+      const buffer = await engine.decode(audioData.slice(0));
+      const blob = new Blob([audioData], { type: 'audio/wav' });
+      const fileId = await model.saveFile(blob, file);
+      state.buffers.set(fileId, buffer);
+      engine.buffers.set(fileId, buffer);
+      state.peaks.set(fileId, computePeaks(buffer));
+      sounds.set(file, { fileId, duration: buffer.duration });
+    } catch (error) {
+      console.warn('Could not load a house-demo sound', error);
+    }
+  }
+
+  const session = model.createSession('Night Drive — House Demo');
+  const tempo = 124;
+  const beat = 60 / tempo;
+  const barLength = beat * 4;
+  const barCount = 8;
+  session.tempo = tempo;
+  session.templateId = 'house-demo';
+  session.masterVolume = 0.88;
+  session.masterEffects = {
+    bypassed: false,
+    reverbMix: 0.12,
+    reverbDecay: 1.6,
+    delayBeats: 0.5,
+    delayFeedback: 0.24,
+    delayMix: 0.1
+  };
+
+  const kickTrack = model.createTrack({ name: 'Kick', index: 0 });
+  const percussionTrack = model.createTrack({ name: 'Snare & Clap', index: 1 });
+  const hatTrack = model.createTrack({ name: 'Hi-Hats', index: 2 });
+  const bassTrack = model.createTrack({ name: 'Bass', index: 3 });
+  const chordTrack = model.createTrack({ name: 'Chords', index: 4 });
+  const leadTrack = model.createTrack({ name: 'Lead', index: 5 });
+  kickTrack.volume = 0.92;
+  percussionTrack.volume = 0.76;
+  hatTrack.volume = 0.62;
+  hatTrack.pan = 0.12;
+  bassTrack.volume = 0.78;
+  bassTrack.eq.low.gain = 2;
+  bassTrack.eq.high.gain = -1;
+  bassTrack.comp.bypassed = false;
+  bassTrack.comp.threshold = -20;
+  bassTrack.comp.ratio = 3;
+  chordTrack.volume = 0.58;
+  chordTrack.pan = -0.12;
+  leadTrack.volume = 0.52;
+  leadTrack.pan = 0.16;
+
+  const appendHit = (track, file, label, start, maxDuration) => {
+    const sound = sounds.get(file);
+    if (!sound) return;
+    const duration = Math.min(sound.duration, maxDuration);
+    track.clips.push({
+      id: model.uid(),
+      name: label,
+      fileId: sound.fileId,
+      start,
+      duration,
+      sourceStart: 0,
+      sourceDuration: sound.duration
+    });
+  };
+
+  for (let beatIndex = 0; beatIndex < barCount * 4; beatIndex += 1) {
+    const time = beatIndex * beat;
+    appendHit(kickTrack, 'starter-kick-1.wav', 'House Kick', time, beat * 0.9);
+    if (beatIndex % 4 === 1 || beatIndex % 4 === 3) {
+      appendHit(percussionTrack, 'starter-snare.wav', 'Snare', time, beat * 0.9);
+      appendHit(percussionTrack, 'starter-clap.wav', 'Clap', time, beat * 0.7);
+    }
+  }
+  for (let eighthIndex = 0; eighthIndex < barCount * 8; eighthIndex += 1) {
+    appendHit(hatTrack, 'starter-hat.wav', 'Closed Hat', eighthIndex * beat / 2, beat * 0.22);
+  }
+
+  const bassRoots = [48, 53, 55, 50];
+  for (let bar = 0; bar < barCount; bar += 1) {
+    const root = bassRoots[bar % bassRoots.length];
+    for (let step = 0; step < 8; step += 1) {
+      bassTrack.notes.push({
+        id: model.uid(),
+        pitch: root + (step % 4 === 3 ? 12 : 0),
+        start: bar * barLength + step * beat / 2,
+        duration: beat * 0.42,
+        velocity: step === 0 || step === 4 ? 0.92 : 0.72
+      });
+    }
+  }
+
+  const chordRoots = [57, 53, 48, 55];
+  const chordIntervals = [[0, 3, 7], [0, 4, 7], [0, 4, 7], [0, 4, 7]];
+  for (let bar = 0; bar < barCount; bar += 1) {
+    const root = chordRoots[bar % chordRoots.length];
+    for (const step of [1, 3, 5, 7]) {
+      for (const interval of chordIntervals[bar % chordIntervals.length]) {
+        chordTrack.notes.push({
+          id: model.uid(),
+          pitch: root + interval,
+          start: bar * barLength + step * beat / 2,
+          duration: beat * 0.34,
+          velocity: 0.54
+        });
+      }
+    }
+  }
+
+  const melody = [69, 67, 64, 67, 71, 69, 67, 64];
+  for (let bar = 0; bar < barCount; bar += 1) {
+    for (let step = 0; step < 4; step += 1) {
+      leadTrack.notes.push({
+        id: model.uid(),
+        pitch: melody[(bar * 4 + step) % melody.length],
+        start: bar * barLength + step * beat + beat * 0.5,
+        duration: beat * 0.32,
+        velocity: step === 0 ? 0.72 : 0.5
+      });
+    }
+  }
+
+  session.tracks = [kickTrack, percussionTrack, hatTrack, bassTrack, chordTrack, leadTrack];
+  session.sections = [
+    { id: model.uid(), name: 'Intro', time: 0 },
+    { id: model.uid(), name: 'Build', time: barLength * 2 },
+    { id: model.uid(), name: 'Drop', time: barLength * 4 },
+    { id: model.uid(), name: 'Outro', time: barLength * 7 }
+  ];
+  return model.normalizeSession(session);
+}
+
 // ---------- Boot ----------
 
 function render() {
@@ -3569,14 +3775,39 @@ function render() {
   renderTransport();
 }
 
-function boot() {
+async function boot() {
   const stored = state.store.sessions.find((session) => session.id === state.store.activeId) || state.store.sessions[0];
   state.session = model.normalizeSession(stored);
+
+  if (state.store.needsDemo) {
+    try {
+      const demo = await createHouseDemoSession();
+      const replacePlaceholder = state.store.sessions.length === 1
+        && state.store.sessions[0].name === 'Untitled Session'
+        && state.store.sessions[0].tracks.length === 0;
+      state.session = demo;
+      state.store.sessions = replacePlaceholder ? [demo] : [...state.store.sessions, demo];
+      state.store.activeId = demo.id;
+    } catch (error) {
+      console.warn('Could not prepare the house demo session', error);
+    }
+  }
+
+  state.store.needsDemo = false;
+  state.store.houseDemoSeeded = true;
   const index = state.store.sessions.findIndex((session) => session.id === state.session.id);
   if (index >= 0) state.store.sessions[index] = state.session;
   else state.store.sessions.push(state.session);
   state.store.activeId = state.session.id;
+  model.saveStore(state.store);
   engine.setSession(state.session);
+  engine.setDrumHitScheduler((pad, when) => instrumentEngineInstance().playDrum(pad, instrumentDestination(), {
+    volume: state.drumVolume,
+    tuning: state.drumTuning,
+    decay: state.drumDecay,
+    tone: state.drumTone,
+    when
+  }));
   ensureClipToolbar();
   state.presets = loadPresets();
   state.customTemplates = model.loadCustomTemplates();

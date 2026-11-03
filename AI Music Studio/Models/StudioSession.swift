@@ -118,6 +118,15 @@ struct StudioSessionStore: Equatable {
 enum StudioSessionStorage {
     private static let sessionsKey = "studio.sessions"
     private static let activeSessionKey = "studio.activeSessionID"
+    private static let houseDemoSeededKey = "studio.houseDemoSeeded"
+
+    static var hasSeededHouseDemo: Bool {
+        UserDefaults.standard.bool(forKey: houseDemoSeededKey)
+    }
+
+    static func markHouseDemoSeeded() {
+        UserDefaults.standard.set(true, forKey: houseDemoSeededKey)
+    }
 
     static func load() -> StudioSessionStore {
         let defaults = UserDefaults.standard

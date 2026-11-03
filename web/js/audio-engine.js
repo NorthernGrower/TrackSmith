@@ -28,6 +28,8 @@ export class StudioEngine {
     this.timer = null;
     this.sources = new Set();
     this.oscillators = new Set();
+    this.sequencedDrumNodes = new Set();
+    this.drumHitScheduler = null;
   }
 
   ensureContext() {
@@ -67,6 +69,10 @@ export class StudioEngine {
     this.session = session;
     this.groups = session?.groups || [];
     if (this.ctx) this.rebuild();
+  }
+
+  setDrumHitScheduler(scheduler) {
+    this.drumHitScheduler = typeof scheduler === 'function' ? scheduler : null;
   }
 
   updateGroups(groups) {
@@ -291,6 +297,10 @@ export class StudioEngine {
       try { osc.stop(); } catch (error) { /* stopped */ }
     }
     this.oscillators.clear();
+    for (const node of this.sequencedDrumNodes) {
+      try { node.stop(); } catch (error) { /* stopped */ }
+    }
+    this.sequencedDrumNodes.clear();
   }
 
   tick() {
@@ -360,8 +370,40 @@ export class StudioEngine {
       }
     }
 
+    this.scheduleDrumPattern(fromPos, toPos, atCtx);
+
     if (this.session.metronome.enabled) {
       this.scheduleClicks(fromPos, toPos, atCtx);
+    }
+  }
+
+  scheduleDrumPattern(fromPos, toPos, atCtx) {
+    const pattern = this.session?.drumPattern;
+    if (!pattern || !this.drumHitScheduler || !this.ctx || toPos <= fromPos) return;
+
+    const stepDuration = 60 / (this.session.tempo || 120) / 4;
+    const firstStep = Math.max(0, Math.ceil((fromPos - 1e-6) / stepDuration));
+    for (let absoluteStep = firstStep; ; absoluteStep += 1) {
+      const stepTime = absoluteStep * stepDuration;
+      if (stepTime >= toPos - 1e-6) break;
+
+      const step = absoluteStep % 16;
+      for (const [voice, steps] of Object.entries(pattern)) {
+        if (!Array.isArray(steps) || !steps[step]) continue;
+        const when = Math.max(this.ctx.currentTime, atCtx + (stepTime - fromPos));
+        const nodes = this.drumHitScheduler(voice, when);
+        if (Array.isArray(nodes)) {
+          for (const node of nodes) {
+            if (!node || typeof node.stop !== 'function') continue;
+            this.sequencedDrumNodes.add(node);
+            const onended = node.onended;
+            node.onended = (event) => {
+              this.sequencedDrumNodes.delete(node);
+              if (typeof onended === 'function') onended.call(node, event);
+            };
+          }
+        }
+      }
     }
   }
 

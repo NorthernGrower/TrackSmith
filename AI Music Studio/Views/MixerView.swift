@@ -105,7 +105,7 @@ struct MixerView: View {
         .tint(Color.studioAccent)
         .fileImporter(
             isPresented: $showImporter,
-            allowedContentTypes: [.audio, .mp3],
+            allowedContentTypes: [.audio, .mp3, UTType(filenameExtension: "wav") ?? .audio],
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result {
@@ -114,7 +114,7 @@ struct MixerView: View {
         }
         .fileImporter(
             isPresented: $showSplitPicker,
-            allowedContentTypes: [.audio, .mp3],
+            allowedContentTypes: [.audio, .mp3, UTType(filenameExtension: "wav") ?? .audio],
             allowsMultipleSelection: false
         ) { result in
             if case .success(let urls) = result, let songURL = urls.first {

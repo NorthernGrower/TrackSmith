@@ -21,7 +21,8 @@ build from GitHub Actions.
 
 ## What it does
 
-- Import audio stems or add a blank track, with waveform clips on a shared ruler.
+- Import MP3 or WAV audio (plus other browser-supported formats) or add a blank/instrument layer, with waveform clips on a shared ruler.
+- On an empty install, start with the eight-bar “Night Drive” house demo split into Kick, Snare & Clap, Hi-Hats, Bass, Chords and Lead tracks.
 - Track controls: mute, solo, fader, meter, freeze, equalizer, piano roll, and
   volume or pan automation lanes.
 - Transport: play/pause/stop, timecode, tempo, loop range and loop playback,

@@ -105,7 +105,7 @@ struct InstrumentRackView: View {
         }
         .fileImporter(
             isPresented: $showSamplerImporter,
-            allowedContentTypes: [.audio, .mp3],
+            allowedContentTypes: [.audio, .mp3, UTType(filenameExtension: "wav") ?? .audio],
             allowsMultipleSelection: false
         ) { result in
             if case .success(let urls) = result, let url = urls.first {

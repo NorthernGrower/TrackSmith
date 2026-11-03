@@ -105,9 +105,28 @@ final class MixerViewModel: ObservableObject {
         channelPresets = ChannelPresetStorage.load()
         customTemplates = SessionTemplateStorage.load()
         let storedSessions = StudioSessionStorage.load()
-        sessions = storedSessions.sessions
-        activeSessionID = storedSessions.activeSessionID
-        if let session = storedSessions.sessions.first(where: { $0.id == storedSessions.activeSessionID }) {
+        var initialSessions = storedSessions.sessions
+        var initialSessionID = storedSessions.activeSessionID
+        let shouldSeedDemo = !StudioSessionStorage.hasSeededHouseDemo
+            && !initialSessions.contains(where: { $0.templateID == "house-demo" })
+
+        if shouldSeedDemo {
+            let demo = HouseDemoSessionFactory.make()
+            if initialSessions.count == 1,
+               initialSessions[0].name == "Untitled Session",
+               initialSessions[0].tracks.isEmpty {
+                initialSessions = [demo]
+            } else {
+                initialSessions.append(demo)
+            }
+            initialSessionID = demo.id
+            StudioSessionStorage.save(sessions: initialSessions, activeSessionID: initialSessionID)
+        }
+        StudioSessionStorage.markHouseDemoSeeded()
+
+        sessions = initialSessions
+        activeSessionID = initialSessionID
+        if let session = initialSessions.first(where: { $0.id == initialSessionID }) {
             sessionName = session.name
             activeTemplateID = session.templateID
             tracks = session.tracks
