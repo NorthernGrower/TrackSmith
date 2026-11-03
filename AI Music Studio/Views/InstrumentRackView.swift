@@ -13,6 +13,10 @@ struct InstrumentRackView: View {
     @State private var selectedInstrument = InstrumentSelection.synth
     @State private var drumDisplayMode = DrumDisplayMode.pads
     @State private var selectedTrackID: UUID?
+    @State private var drumVolume = 0.8
+    @State private var drumTuning = 1.0
+    @State private var drumDecay = 1.0
+    @State private var drumTone = 0.65
     @State private var waveform = SynthWaveform.saw
     @State private var cutoff = 6_500.0
     @State private var attack = 0.02
@@ -22,6 +26,8 @@ struct InstrumentRackView: View {
     @State private var tb303Resonance = 0.68
     @State private var tb303Envelope = 0.58
     @State private var tb303Decay = 0.42
+    @State private var tb303Tuning = 1.0
+    @State private var tb303Level = 0.8
     @State private var tb303Accent = false
     @State private var showSamplerImporter = false
     @State private var showSampleLibrary = false
@@ -147,7 +153,14 @@ struct InstrumentRackView: View {
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
-        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 11))
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(Color(red: 0.62, green: 0.42, blue: 0.25).opacity(0.55), lineWidth: 1)
+        }
     }
 
     private var synthPanel: some View {
@@ -226,10 +239,13 @@ struct InstrumentRackView: View {
             }
         }
         .padding(14)
-        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 13))
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 13))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 13)
-                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                .stroke(Color(red: 0.62, green: 0.42, blue: 0.25).opacity(0.55), lineWidth: 1)
         }
     }
 
@@ -270,10 +286,14 @@ struct InstrumentRackView: View {
                 }
             }
 
-            sliderControl(title: "Cutoff", valueText: "\(Int(tb303Cutoff)) Hz", value: $tb303Cutoff, range: 100...5_000)
-            sliderControl(title: "Resonance", valueText: String(format: "%.2f", tb303Resonance), value: $tb303Resonance, range: 0...0.96)
-            sliderControl(title: "Env Mod", valueText: String(format: "%.2f", tb303Envelope), value: $tb303Envelope, range: 0...1)
-            sliderControl(title: "Decay", valueText: String(format: "%.2f s", tb303Decay), value: $tb303Decay, range: 0.16...1.2)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 12) {
+                InstrumentKnob(title: "TUNE", valueText: String(format: "%.2f×", tb303Tuning), value: $tb303Tuning, range: 0.5...1.5)
+                InstrumentKnob(title: "CUTOFF", valueText: "\(Int(tb303Cutoff)) Hz", value: $tb303Cutoff, range: 100...5_000)
+                InstrumentKnob(title: "RESONANCE", valueText: "\(Int(tb303Resonance * 100))%", value: $tb303Resonance, range: 0...0.96)
+                InstrumentKnob(title: "ENV MOD", valueText: "\(Int(tb303Envelope * 100))%", value: $tb303Envelope, range: 0...1)
+                InstrumentKnob(title: "DECAY", valueText: String(format: "%.2f s", tb303Decay), value: $tb303Decay, range: 0.16...1.2)
+                InstrumentKnob(title: "LEVEL", valueText: "\(Int(tb303Level * 100))%", value: $tb303Level, range: 0...1)
+            }
 
             Toggle(isOn: $tb303Accent) {
                 HStack {
@@ -304,6 +324,8 @@ struct InstrumentRackView: View {
                                 envelopeAmount: tb303Envelope,
                                 decay: tb303Decay,
                                 accent: tb303Accent,
+                                tuning: tb303Tuning,
+                                level: tb303Level,
                                 destinationTrackID: selectedTrackID
                             )
                         } label: {
@@ -329,10 +351,13 @@ struct InstrumentRackView: View {
             }
         }
         .padding(14)
-        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 13))
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 13))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 13)
-                .stroke(Color.studioAccent.opacity(0.24), lineWidth: 1)
+                .stroke(Color(red: 0.67, green: 0.47, blue: 0.28).opacity(0.75), lineWidth: 1)
         }
     }
 
@@ -342,19 +367,19 @@ struct InstrumentRackView: View {
                 Text("808")
                     .font(.system(size: 24, weight: .black, design: .rounded))
                     .tracking(1.5)
-                    .foregroundStyle(Color(red: 0.16, green: 0.17, blue: 0.17))
+                    .foregroundStyle(Color(red: 0.96, green: 0.86, blue: 0.69))
                 Rectangle()
-                    .fill(Color.black.opacity(0.2))
+                    .fill(Color(red: 0.90, green: 0.70, blue: 0.42).opacity(0.45))
                     .frame(width: 1, height: 30)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("RHYTHM MACHINE")
                         .font(.system(size: 10, weight: .black, design: .monospaced))
                         .tracking(0.8)
-                        .foregroundStyle(Color(red: 0.16, green: 0.17, blue: 0.17))
+                        .foregroundStyle(Color(red: 0.96, green: 0.86, blue: 0.69))
                     Text("11 ANALOG-STYLE VOICES")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .tracking(0.5)
-                        .foregroundStyle(Color.black.opacity(0.58))
+                        .foregroundStyle(Color(red: 0.88, green: 0.77, blue: 0.62).opacity(0.84))
                 }
                 Spacer(minLength: 0)
                 Circle()
@@ -364,7 +389,7 @@ struct InstrumentRackView: View {
             }
 
             Rectangle()
-                .fill(Color.black.opacity(0.18))
+                .fill(Color(red: 0.90, green: 0.70, blue: 0.42).opacity(0.35))
                 .frame(height: 1)
 
             Picker("Drum Mode", selection: $drumDisplayMode) {
@@ -374,6 +399,13 @@ struct InstrumentRackView: View {
             .pickerStyle(.segmented)
             .tint(Color(red: 0.82, green: 0.18, blue: 0.12))
 
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 4), spacing: 10) {
+                InstrumentKnob(title: "LEVEL", valueText: "\(Int(drumVolume * 100))%", value: $drumVolume, range: 0...1)
+                InstrumentKnob(title: "TUNE", valueText: String(format: "%.2f×", drumTuning), value: $drumTuning, range: 0.5...1.5)
+                InstrumentKnob(title: "DECAY", valueText: "\(Int(drumDecay * 100))%", value: $drumDecay, range: 0.4...2)
+                InstrumentKnob(title: "TONE", valueText: "\(Int(drumTone * 100))%", value: $drumTone, range: 0...1)
+            }
+
             if drumDisplayMode == .pads {
                 drumPadGrid
             } else {
@@ -381,10 +413,13 @@ struct InstrumentRackView: View {
             }
         }
         .padding(14)
-        .background(Color(red: 0.73, green: 0.72, blue: 0.67), in: RoundedRectangle(cornerRadius: 13))
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 13))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 13)
-                .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                .stroke(Color(red: 0.67, green: 0.47, blue: 0.28).opacity(0.75), lineWidth: 1)
         }
     }
 
@@ -393,12 +428,19 @@ struct InstrumentRackView: View {
             Text("TAP A PAD TO AUDITION")
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
                 .tracking(0.8)
-                .foregroundStyle(Color.black.opacity(0.56))
+                .foregroundStyle(Color(red: 0.88, green: 0.77, blue: 0.62).opacity(0.86))
 
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 4), spacing: 7) {
                 ForEach(Array(DrumPad.allCases.enumerated()), id: \.element.id) { index, pad in
                     Button {
-                        model.playDrumPad(pad, destinationTrackID: selectedTrackID)
+                        model.playDrumPad(
+                            pad,
+                            destinationTrackID: selectedTrackID,
+                            volume: drumVolume,
+                            tuning: drumTuning,
+                            decay: drumDecay,
+                            tone: drumTone
+                        )
                     } label: {
                         VStack(spacing: 6) {
                             Image(systemName: pad.systemImage)
@@ -408,10 +450,10 @@ struct InstrumentRackView: View {
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.7)
                         }
-                        .foregroundStyle(Color(red: 0.17, green: 0.18, blue: 0.18))
+                        .foregroundStyle(Color(red: 0.96, green: 0.86, blue: 0.69))
                         .frame(maxWidth: .infinity)
                         .frame(height: 65)
-                        .background(Color(red: 0.9, green: 0.89, blue: 0.84), in: RoundedRectangle(cornerRadius: 6))
+                        .background(Color(red: 0.24, green: 0.14, blue: 0.09), in: RoundedRectangle(cornerRadius: 6))
                         .overlay(alignment: .topTrailing) {
                             Circle()
                                 .fill(Color(red: 0.82, green: 0.18, blue: 0.12))
@@ -438,7 +480,13 @@ struct InstrumentRackView: View {
                     if model.isDrumSequencerPlaying {
                         model.stopDrumSequencer()
                     } else {
-                        model.startDrumSequencer(destinationTrackID: selectedTrackID)
+                        model.startDrumSequencer(
+                            destinationTrackID: selectedTrackID,
+                            volume: drumVolume,
+                            tuning: drumTuning,
+                            decay: drumDecay,
+                            tone: drumTone
+                        )
                     }
                 } label: {
                     Label(
@@ -457,7 +505,7 @@ struct InstrumentRackView: View {
                         .tracking(0.5)
                     Text("\(model.tempoBPM) BPM · 4/4")
                         .font(.system(size: 8, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.black.opacity(0.56))
+                        .foregroundStyle(Color(red: 0.88, green: 0.77, blue: 0.62).opacity(0.86))
                 }
 
                 Spacer(minLength: 0)
@@ -478,7 +526,7 @@ struct InstrumentRackView: View {
                         ForEach(0..<DrumPattern.stepCount, id: \.self) { step in
                             Text(String(format: "%02d", step + 1))
                                 .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(step % 4 == 0 ? Color.black.opacity(0.8) : Color.black.opacity(0.45))
+                                .foregroundStyle(step % 4 == 0 ? Color(red: 0.98, green: 0.87, blue: 0.67) : Color(red: 0.90, green: 0.78, blue: 0.62).opacity(0.62))
                                 .frame(width: 21)
                         }
                     }
@@ -489,6 +537,7 @@ struct InstrumentRackView: View {
                                 .font(.system(size: 8, weight: .bold, design: .monospaced))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.75)
+                                .foregroundStyle(Color(red: 0.96, green: 0.86, blue: 0.69))
                                 .frame(width: 72, alignment: .leading)
 
                             ForEach(0..<DrumPattern.stepCount, id: \.self) { step in
@@ -498,11 +547,11 @@ struct InstrumentRackView: View {
                                     model.toggleDrumStep(pad, step: step)
                                 } label: {
                                     RoundedRectangle(cornerRadius: 3)
-                                        .fill(isActive ? Color.studioAccent : Color.black.opacity(step % 4 == 0 ? 0.23 : 0.12))
+                                        .fill(isActive ? Color.studioAccent : Color.white.opacity(step % 4 == 0 ? 0.22 : 0.11))
                                         .frame(width: 21, height: 24)
                                         .overlay {
                                             RoundedRectangle(cornerRadius: 3)
-                                                .stroke(isPlayhead ? Color.white : Color.black.opacity(0.12), lineWidth: isPlayhead ? 1.5 : 0.6)
+                                                .stroke(isPlayhead ? Color.studioAccent : Color.white.opacity(0.16), lineWidth: isPlayhead ? 1.5 : 0.6)
                                         }
                                 }
                                 .buttonStyle(.plain)
@@ -516,7 +565,7 @@ struct InstrumentRackView: View {
 
             Text("Tap steps to toggle hits · 16 steps per bar")
                 .font(.system(size: 8, weight: .medium, design: .monospaced))
-                .foregroundStyle(Color.black.opacity(0.56))
+                .foregroundStyle(Color(red: 0.88, green: 0.77, blue: 0.62).opacity(0.86))
         }
     }
 
@@ -576,10 +625,13 @@ struct InstrumentRackView: View {
             }
         }
         .padding(14)
-        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 13))
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 13))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 13)
-                .stroke(Color.studioAccent.opacity(0.24), lineWidth: 1)
+                .stroke(Color(red: 0.62, green: 0.42, blue: 0.25).opacity(0.55), lineWidth: 1)
         }
     }
 
@@ -660,10 +712,13 @@ struct InstrumentRackView: View {
             }
         }
         .padding(14)
-        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 13))
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 13))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 13)
-                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                .stroke(Color(red: 0.62, green: 0.42, blue: 0.25).opacity(0.55), lineWidth: 1)
         }
     }
 
@@ -713,10 +768,13 @@ struct InstrumentRackView: View {
             .opacity(!model.isRecordingInstrument && countInValue == nil && !canStartRecording ? 0.45 : 1)
         }
         .padding(12)
-        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 11))
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 11)
-                .stroke(model.isRecordingInstrument ? Color.red.opacity(0.45) : Color.white.opacity(0.07), lineWidth: 1)
+                .stroke(model.isRecordingInstrument ? Color.red.opacity(0.55) : Color(red: 0.62, green: 0.42, blue: 0.25).opacity(0.55), lineWidth: 1)
         }
     }
 
@@ -888,4 +946,144 @@ private struct PianoNote: Identifiable {
     let frequency: Double
 
     var id: String { title }
+}
+
+
+
+private struct WoodGrainSurface: View {
+    var body: some View {
+        Canvas { context, size in
+            let bounds = CGRect(origin: .zero, size: size)
+            context.fill(
+                Path(bounds),
+                with: .color(Color(red: 0.22, green: 0.13, blue: 0.09))
+            )
+
+            guard size.width > 0, size.height > 0 else { return }
+
+            let rowCount = Int(size.height / 6) + 2
+            for row in 0..<rowCount {
+                let baseline = CGFloat(row) * 6
+                var grain = Path()
+                grain.move(to: CGPoint(x: 0, y: baseline))
+                let wave = CGFloat(sin(Double(row) * 0.63)) * 1.4
+                grain.addCurve(
+                    to: CGPoint(x: size.width, y: baseline + wave),
+                    control1: CGPoint(x: size.width * 0.28, y: baseline - wave * 0.7),
+                    control2: CGPoint(x: size.width * 0.72, y: baseline + wave * 0.8)
+                )
+                let warmth = 0.34 + Double((row * 7) % 11) / 45
+                context.stroke(
+                    grain,
+                    with: .color(Color(red: 0.72, green: 0.45, blue: 0.25).opacity(warmth)),
+                    lineWidth: row % 5 == 0 ? 1.2 : 0.45
+                )
+            }
+
+            for knot in 0..<2 {
+                let center = CGPoint(
+                    x: size.width * (knot == 0 ? 0.31 : 0.78),
+                    y: size.height * (knot == 0 ? 0.38 : 0.72)
+                )
+                for ring in 0..<4 {
+                    let width = CGFloat(13 + ring * 7)
+                    let height = CGFloat(4 + ring * 2)
+                    let oval = CGRect(
+                        x: center.x - width / 2,
+                        y: center.y - height / 2,
+                        width: width,
+                        height: height
+                    )
+                    var path = Path()
+                    path.addEllipse(in: oval)
+                    context.stroke(
+                        path,
+                        with: .color(Color(red: 0.78, green: 0.51, blue: 0.30).opacity(0.18)),
+                        lineWidth: 0.55
+                    )
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+
+
+private struct InstrumentKnob: View {
+    let title: String
+    let valueText: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+
+    @State private var dragStartValue: Double?
+
+    private var angle: Double {
+        let span = range.upperBound - range.lowerBound
+        let progress = span > 0 ? (value - range.lowerBound) / span : 0.5
+        return -135 + min(1, max(0, progress)) * 270
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.47, green: 0.42, blue: 0.35), Color(red: 0.13, green: 0.13, blue: 0.13)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Circle()
+                    .stroke(Color(red: 0.74, green: 0.56, blue: 0.33).opacity(0.75), lineWidth: 1)
+                Capsule()
+                    .fill(Color(red: 0.98, green: 0.76, blue: 0.43))
+                    .frame(width: 2, height: 12)
+                    .offset(y: -10)
+                    .rotationEffect(.degrees(angle))
+                Circle()
+                    .fill(Color(red: 0.22, green: 0.20, blue: 0.17))
+                    .frame(width: 6, height: 6)
+                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+            }
+            .frame(width: 46, height: 46)
+            .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
+            .contentShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        if dragStartValue == nil { dragStartValue = value }
+                        let span = range.upperBound - range.lowerBound
+                        let delta = -Double(gesture.translation.height) / 120 * span
+                        value = min(range.upperBound, max(range.lowerBound, (dragStartValue ?? value) + delta))
+                    }
+                    .onEnded { _ in dragStartValue = nil }
+            )
+            .accessibilityElement()
+            .accessibilityLabel(title)
+            .accessibilityValue(valueText)
+            .accessibilityAdjustableAction { direction in
+                let step = (range.upperBound - range.lowerBound) / 100
+                switch direction {
+                case .increment: value = min(range.upperBound, value + step)
+                case .decrement: value = max(range.lowerBound, value - step)
+                @unknown default: break
+                }
+            }
+
+            Text(title)
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .tracking(0.25)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .foregroundStyle(Color(red: 0.92, green: 0.82, blue: 0.66))
+            Text(valueText)
+                .font(.system(size: 7, weight: .medium, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .foregroundStyle(Color(red: 0.75, green: 0.64, blue: 0.49))
+        }
+        .frame(maxWidth: .infinity)
+    }
 }

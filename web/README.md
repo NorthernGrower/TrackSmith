@@ -1,9 +1,8 @@
 # AI Music Studio — Web
 
 A zero-build web version of the studio. It shares the app's dark, amber-accented
-look and the same session model: tracks, clips, mixer, volume and pan
-automation, piano roll, looping, metronome and count-in, sessions, bounce and
-track freeze.
+look and its core session workflows: tracks, clips, mixer, automation, piano roll,
+looping, metronome, buses, templates, bounce options, instruments and track freeze.
 
 Everything runs locally in the browser with the Web Audio API. Sessions are kept
 in `localStorage`, audio files live in IndexedDB, and nothing is uploaded. There
@@ -31,16 +30,16 @@ build from GitHub Actions.
   one to jump the playhead there.
 - Channel presets: save a track's EQ, compressor, pan and level on device and
   apply it to any other track.
-- Channel mixer with pan, faders, dB readouts, meters and a master strip.
+- Channel mixer with pan, faders, dB readouts, meters, a master strip and named buses with group level, mute and solo.
+- Save custom session templates with track order, colours, level, pan, EQ and compression; reuse or delete them from Templates.
 - Master effects: tempo-synced delay and reverb on the master output, with a
   bypass switch, applied to playback and the bounce.
-- Piano roll sequencer for the built-in synthesizer, snapped to the beat grid,
-  with a chord mode that drops major, minor or seventh chords in one tap.
-- Instruments rack: a playable synth, the 808-style drum pads, a TB-303 acid bass
-  and a sampler that loads the bundled starter sounds, a session's own audio or a
-  file from the device, all played through the selected track's mixer.
-- Bounce the arrangement to a WAV file, or export every track as its own stem
-  through its mixer settings and the master.
+- Piano roll sequencer for the built-in synthesizer, with chord mode, per-note velocity and multi-note quantize with adjustable strength.
+- Instruments rack: a playable synth, the 808-style drum pads and hardware-style
+  rotary controls, a TB-303 acid bass with tuned rotary controls, and a sampler for
+  bundled starter sounds, session audio or device files. Record performances as
+  clips on the selected track.
+- Bounce the mix or stems as 16/24-bit WAV or supported-browser M4A, choose sample rate and file name, and optionally normalize. Settings are remembered locally.
 
 ## Bundled sounds
 

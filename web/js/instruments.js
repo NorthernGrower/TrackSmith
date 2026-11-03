@@ -95,32 +95,53 @@ export class InstrumentEngine {
     this.track(osc);
   }
 
-  playDrum(pad, destination) {
+  playDrum(pad, destination, { volume = 0.8, tuning = 1, decay = 1, tone = 0.65 } = {}) {
     const start = this.ctx.currentTime + 0.005;
+    const level = clamp(volume, 0, 1);
+    const tune = clamp(tuning, 0.5, 1.5);
+    const decayScale = clamp(decay, 0.4, 2);
+    const brightness = 0.55 + clamp(tone, 0, 1) * 0.9;
+    const toneVoice = (settings) => this.tone(start, destination, {
+      ...settings,
+      from: settings.from * tune,
+      to: settings.to * tune,
+      decay: clamp(settings.decay * decayScale, 0.02, 2),
+      gain: settings.gain * level,
+      filter: settings.filter
+        ? { ...settings.filter, frequency: settings.filter.frequency * brightness }
+        : undefined
+    });
+    const noiseVoice = (at, settings) => this.noise(at, destination, {
+      ...settings,
+      gain: settings.gain * level,
+      decay: clamp(settings.decay * decayScale, 0.02, 2),
+      frequency: clamp(settings.frequency * brightness, 80, this.ctx.sampleRate * 0.45)
+    });
+
     switch (pad) {
       case 'kick':
-        this.tone(start, destination, { type: 'sine', from: 120, to: 45, decay: 0.45, gain: 0.6 });
+        toneVoice({ type: 'sine', from: 120, to: 45, decay: 0.45, gain: 0.6 });
         break;
       case 'snare':
-        this.noise(start, destination, { gain: 0.32, decay: 0.18, filterType: 'bandpass', frequency: 1800, q: 0.9 });
-        this.tone(start, destination, { type: 'triangle', from: 210, to: 160, decay: 0.12, gain: 0.22 });
+        noiseVoice(start, { gain: 0.32, decay: 0.18, filterType: 'bandpass', frequency: 1800, q: 0.9 });
+        toneVoice({ type: 'triangle', from: 210, to: 160, decay: 0.12, gain: 0.22 });
         break;
       case 'lowTom':
-        this.tone(start, destination, { type: 'sine', from: 140, to: 80, decay: 0.34, gain: 0.45 });
+        toneVoice({ type: 'sine', from: 140, to: 80, decay: 0.34, gain: 0.45 });
         break;
       case 'midTom':
-        this.tone(start, destination, { type: 'sine', from: 190, to: 110, decay: 0.3, gain: 0.42 });
+        toneVoice({ type: 'sine', from: 190, to: 110, decay: 0.3, gain: 0.42 });
         break;
       case 'highTom':
-        this.tone(start, destination, { type: 'sine', from: 250, to: 150, decay: 0.26, gain: 0.4 });
+        toneVoice({ type: 'sine', from: 250, to: 150, decay: 0.26, gain: 0.4 });
         break;
       case 'rimshot':
-        this.tone(start, destination, { type: 'square', from: 1750, to: 900, decay: 0.05, gain: 0.18 });
-        this.noise(start, destination, { gain: 0.18, decay: 0.05, filterType: 'highpass', frequency: 3000 });
+        toneVoice({ type: 'square', from: 1750, to: 900, decay: 0.05, gain: 0.18 });
+        noiseVoice(start, { gain: 0.18, decay: 0.05, filterType: 'highpass', frequency: 3000 });
         break;
       case 'clap':
         [0, 0.012, 0.026].forEach((delay, index) => {
-          this.noise(start + delay, destination, {
+          noiseVoice(start + delay, {
             gain: index === 2 ? 0.28 : 0.2,
             decay: index === 2 ? 0.18 : 0.05,
             filterType: 'bandpass',
@@ -130,17 +151,17 @@ export class InstrumentEngine {
         });
         break;
       case 'cowbell':
-        this.tone(start, destination, { type: 'square', from: 587, to: 587, decay: 0.3, gain: 0.14, filter: { type: 'bandpass', frequency: 800, q: 4 } });
-        this.tone(start, destination, { type: 'square', from: 845, to: 845, decay: 0.3, gain: 0.12, filterType: 'bandpass', frequency: 800, q: 3 });
+        toneVoice({ type: 'square', from: 587, to: 587, decay: 0.3, gain: 0.14, filter: { type: 'bandpass', frequency: 800, q: 4 } });
+        toneVoice({ type: 'square', from: 845, to: 845, decay: 0.3, gain: 0.12, filter: { type: 'bandpass', frequency: 800, q: 3 } });
         break;
       case 'closedHat':
-        this.noise(start, destination, { gain: 0.24, decay: 0.06, filterType: 'highpass', frequency: 7000 });
+        noiseVoice(start, { gain: 0.24, decay: 0.06, filterType: 'highpass', frequency: 7000 });
         break;
       case 'openHat':
-        this.noise(start, destination, { gain: 0.24, decay: 0.3, filterType: 'highpass', frequency: 6500 });
+        noiseVoice(start, { gain: 0.24, decay: 0.3, filterType: 'highpass', frequency: 6500 });
         break;
       case 'cymbal':
-        this.noise(start, destination, { gain: 0.24, decay: 1.1, filterType: 'highpass', frequency: 5000 });
+        noiseVoice(start, { gain: 0.24, decay: 1.1, filterType: 'highpass', frequency: 5000 });
         break;
       default:
         break;
@@ -201,7 +222,9 @@ export class InstrumentEngine {
     resonance = 0.68,
     envelopeAmount = 0.58,
     decay = 0.42,
-    accent = false
+    accent = false,
+    tuning = 1,
+    level = 0.8
   } = {}, destination) {
     const ctx = this.ctx;
     const start = ctx.currentTime + 0.005;
@@ -209,7 +232,7 @@ export class InstrumentEngine {
 
     const osc = ctx.createOscillator();
     osc.type = waveform === 'square' ? 'square' : 'sawtooth';
-    osc.frequency.value = frequency;
+    osc.frequency.value = frequency * clamp(tuning, 0.5, 1.5);
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
@@ -220,9 +243,9 @@ export class InstrumentEngine {
     filter.frequency.exponentialRampToValueAtTime(base, start + Math.max(0.05, decay));
 
     const env = ctx.createGain();
-    const level = accent ? 0.34 : 0.24;
+    const peakLevel = (accent ? 0.34 : 0.24) * clamp(level, 0, 1);
     env.gain.setValueAtTime(0.0001, start);
-    env.gain.exponentialRampToValueAtTime(level, start + 0.005);
+    env.gain.exponentialRampToValueAtTime(peakLevel, start + 0.005);
     env.gain.exponentialRampToValueAtTime(0.0001, start + decay + 0.06);
 
     osc.connect(filter);

@@ -168,6 +168,8 @@ enum InstrumentSoundGenerator {
         envelopeAmount: Double,
         decay: Double,
         accent: Bool,
+        tuning: Double = 1,
+        level: Double = 1,
         format: AVAudioFormat
     ) -> AVAudioPCMBuffer? {
         let sampleRate = format.sampleRate
@@ -183,6 +185,8 @@ enum InstrumentSoundGenerator {
         let baseCutoff = min(max(90, cutoff), sampleRate * 0.38)
         let sweep = min(max(0, envelopeAmount), 1) * 7_200
         let accentGain = accent ? 1.45 : 1.0
+        let safeTuning = min(1.5, max(0.5, tuning))
+        let safeLevel = min(1, max(0, level))
 
         for channel in 0..<channelCount {
             var integratorOne = 0.0
@@ -190,7 +194,7 @@ enum InstrumentSoundGenerator {
 
             for frame in 0..<frameCount {
                 let time = Double(frame) / sampleRate
-                let phase = (time * frequency).truncatingRemainder(dividingBy: 1)
+                let phase = (time * frequency * safeTuning).truncatingRemainder(dividingBy: 1)
                 let oscillator: Double
                 switch waveform {
                 case .saw:
@@ -214,15 +218,26 @@ enum InstrumentSoundGenerator {
 
                 let ampEnvelope = exp(-time / max(0.08, noteDecay * 0.85))
                 let driven = tanh(v2 * (accent ? 3.8 : 2.5))
-                channels[channel][frame] = Float(driven * ampEnvelope * accentGain * 0.27)
+                channels[channel][frame] = Float(driven * ampEnvelope * accentGain * 0.27 * safeLevel)
             }
         }
 
         return buffer
     }
 
-    static func drumHit(_ pad: DrumPad, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+    static func drumHit(
+        _ pad: DrumPad,
+        volume: Double = 1,
+        tuning: Double = 1,
+        decay: Double = 1,
+        tone: Double = 0.6,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
         let sampleRate = format.sampleRate
+        let safeVolume = min(1, max(0, volume))
+        let safeTuning = min(1.5, max(0.5, tuning))
+        let safeDecay = min(2, max(0.4, decay))
+        let safeTone = min(1, max(0, tone))
         let duration: Double
         switch pad {
         case .kick: duration = 0.72
@@ -236,30 +251,33 @@ enum InstrumentSoundGenerator {
         case .cymbal: duration = 1.25
         }
 
-        let frameCount = max(1, Int(sampleRate * duration))
+        let frameCount = max(1, Int(sampleRate * duration * safeDecay))
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
               let channels = buffer.floatChannelData else { return nil }
         buffer.frameLength = AVAudioFrameCount(frameCount)
 
         let channelCount = Int(format.channelCount)
         let metallicPartials = [2_050.0, 2_740.0, 3_180.0, 3_710.0, 4_250.0, 4_900.0]
+        let brightness = 0.55 + safeTone * 0.9
         var previousNoise = 0.0
         for frame in 0..<frameCount {
             let time = Double(frame) / sampleRate
+            let envelopeTime = time / safeDecay
+            let phaseTime = time * safeTuning
             let noise = Double.random(in: -1...1)
-            let highNoise = noise - previousNoise
+            let highNoise = (noise - previousNoise) * brightness
             let sample: Double
 
             switch pad {
             case .kick:
-                let phase = 50 * time + (118 / 18) * (1 - exp(-18 * time))
-                let body = sin(2 * Double.pi * phase) * exp(-time * 5.8)
-                let sub = sin(2 * Double.pi * 48 * time) * exp(-time * 4.5)
-                let click = noise * exp(-time * 150) * 0.09
+                let phase = 50 * phaseTime + (118 / 18) * (1 - exp(-18 * phaseTime))
+                let body = sin(2 * Double.pi * phase) * exp(-envelopeTime * 5.8)
+                let sub = sin(2 * Double.pi * 48 * phaseTime) * exp(-envelopeTime * 4.5)
+                let click = noise * exp(-envelopeTime * 150) * 0.09 * brightness
                 sample = body * 0.72 + sub * 0.25 + click
             case .snare:
-                let body = sin(2 * Double.pi * 185 * time) * exp(-time * 14)
-                let rattle = highNoise * exp(-time * 10)
+                let body = sin(2 * Double.pi * 185 * phaseTime) * exp(-envelopeTime * 14)
+                let rattle = highNoise * exp(-envelopeTime * 10)
                 sample = body * 0.42 + rattle * 0.7
             case .lowTom, .midTom, .highTom:
                 let base: Double
@@ -269,36 +287,36 @@ enum InstrumentSoundGenerator {
                 case .midTom: base = 105; sweep = 145
                 default: base = 155; sweep = 185
                 }
-                let phase = base * time + (sweep / 10) * (1 - exp(-10 * time))
-                sample = sin(2 * Double.pi * phase) * exp(-time * 6.5)
+                let phase = base * phaseTime + (sweep / 10) * (1 - exp(-10 * phaseTime))
+                sample = sin(2 * Double.pi * phase) * exp(-envelopeTime * 6.5)
             case .rimshot:
-                let tone = sin(2 * Double.pi * 1_640 * time) + 0.55 * sin(2 * Double.pi * 2_180 * time)
-                sample = tone * exp(-time * 31) + noise * exp(-time * 105) * 0.12
+                let hitTone = sin(2 * Double.pi * 1_640 * phaseTime) + 0.55 * sin(2 * Double.pi * 2_180 * phaseTime)
+                sample = hitTone * exp(-envelopeTime * 31) + noise * exp(-envelopeTime * 105) * 0.12 * brightness
             case .clap:
                 let burstTimes = [0.0, 0.026, 0.053, 0.082]
                 let burst = burstTimes.reduce(0.0) { value, start in
-                    value + (time >= start ? exp(-(time - start) * 95) : 0)
+                    value + (time >= start ? exp(-((time - start) / safeDecay) * 95) : 0)
                 }
-                sample = noise * burst * exp(-time * 4.8)
+                sample = noise * burst * exp(-envelopeTime * 4.8) * brightness
             case .cowbell:
-                let metal = sin(2 * Double.pi * 562 * time) + 0.8 * sin(2 * Double.pi * 845 * time)
-                sample = metal * exp(-time * 5.5)
+                let metal = sin(2 * Double.pi * 562 * phaseTime) + 0.8 * sin(2 * Double.pi * 845 * phaseTime)
+                sample = metal * exp(-envelopeTime * 5.5)
             case .closedHat, .openHat, .cymbal:
-                let decay: Double
+                let hatDecay: Double
                 let noiseMix: Double
                 switch pad {
-                case .closedHat: decay = 24; noiseMix = 0.48
-                case .openHat: decay = 5.2; noiseMix = 0.42
-                default: decay = 2.6; noiseMix = 0.35
+                case .closedHat: hatDecay = 24; noiseMix = 0.48
+                case .openHat: hatDecay = 5.2; noiseMix = 0.42
+                default: hatDecay = 2.6; noiseMix = 0.35
                 }
                 let metallic = metallicPartials.reduce(0.0) { sum, partial in
-                    sum + sin(2 * Double.pi * partial * time)
+                    sum + sin(2 * Double.pi * partial * brightness * phaseTime)
                 } / Double(metallicPartials.count)
-                sample = (metallic * (1 - noiseMix) + highNoise * noiseMix) * exp(-time * decay)
+                sample = (metallic * (1 - noiseMix) + highNoise * noiseMix) * exp(-envelopeTime * hatDecay)
             }
 
             previousNoise = noise
-            let value = Float(tanh(sample * 1.7) * 0.34)
+            let value = Float(tanh(sample * 1.7) * 0.34 * safeVolume)
             for channel in 0..<channelCount {
                 channels[channel][frame] = value
             }

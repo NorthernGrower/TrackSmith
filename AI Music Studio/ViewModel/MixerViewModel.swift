@@ -873,9 +873,23 @@ final class MixerViewModel: ObservableObject {
         engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID)
     }
 
-    func playDrumPad(_ pad: DrumPad, destinationTrackID: UUID?) {
+    func playDrumPad(
+        _ pad: DrumPad,
+        destinationTrackID: UUID?,
+        volume: Double = 1,
+        tuning: Double = 1,
+        decay: Double = 1,
+        tone: Double = 0.6
+    ) {
         guard let format = engine.instrumentFormat(for: destinationTrackID),
-              let buffer = InstrumentSoundGenerator.drumHit(pad, format: format) else { return }
+              let buffer = InstrumentSoundGenerator.drumHit(
+                pad,
+                volume: volume,
+                tuning: tuning,
+                decay: decay,
+                tone: tone,
+                format: format
+              ) else { return }
         engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID)
     }
 
@@ -885,7 +899,13 @@ final class MixerViewModel: ObservableObject {
         persistActiveSession()
     }
 
-    func startDrumSequencer(destinationTrackID: UUID?) {
+    func startDrumSequencer(
+        destinationTrackID: UUID?,
+        volume: Double = 1,
+        tuning: Double = 1,
+        decay: Double = 1,
+        tone: Double = 0.6
+    ) {
         guard !isDrumSequencerPlaying else { return }
         if !isPlaying { beginPlayback() }
 
@@ -908,7 +928,14 @@ final class MixerViewModel: ObservableObject {
                     let step = absoluteStep % DrumPattern.stepCount
                     self.currentDrumStep = step
                     for pad in DrumPad.allCases where self.drumPattern.contains(pad, step: step) {
-                        self.playDrumPad(pad, destinationTrackID: destinationTrackID)
+                        self.playDrumPad(
+                            pad,
+                            destinationTrackID: destinationTrackID,
+                            volume: volume,
+                            tuning: tuning,
+                            decay: decay,
+                            tone: tone
+                        )
                     }
                 }
 
@@ -934,6 +961,8 @@ final class MixerViewModel: ObservableObject {
         envelopeAmount: Double,
         decay: Double,
         accent: Bool,
+        tuning: Double = 1,
+        level: Double = 1,
         destinationTrackID: UUID?
     ) {
         guard let format = engine.instrumentFormat(for: destinationTrackID),
@@ -945,6 +974,8 @@ final class MixerViewModel: ObservableObject {
                 envelopeAmount: envelopeAmount,
                 decay: decay,
                 accent: accent,
+                tuning: tuning,
+                level: level,
                 format: format
               ) else { return }
         engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID, monophonic: true)

@@ -17,6 +17,7 @@ export class StudioEngine {
     this.trackNodes = new Map();
     this.buffers = new Map();
     this.session = null;
+    this.groups = [];
 
     this.isPlaying = false;
     this.position = 0;
@@ -64,7 +65,14 @@ export class StudioEngine {
 
   setSession(session) {
     this.session = session;
+    this.groups = session?.groups || [];
     if (this.ctx) this.rebuild();
+  }
+
+  updateGroups(groups) {
+    this.groups = Array.isArray(groups) ? groups : [];
+    if (this.session) this.session.groups = this.groups;
+    this.updateMix(this.isPlaying ? this.getPosition() : this.position);
   }
 
   applyMasterEffects() {
@@ -186,13 +194,20 @@ export class StudioEngine {
 
   updateMix(position) {
     if (!this.ctx || !this.session) return;
-    const anySolo = this.session.tracks.some((track) => track.soloed);
+    const groups = this.groups || [];
+    const mutedTrackIDs = new Set(groups.filter((group) => group.muted).flatMap((group) => group.trackIDs));
+    const soloedTrackIDs = new Set(groups.filter((group) => group.soloed).flatMap((group) => group.trackIDs));
+    const anySolo = this.session.tracks.some((track) => track.soloed || soloedTrackIDs.has(track.id));
 
     for (const track of this.session.tracks) {
       const nodes = this.trackNodes.get(track.id);
       if (!nodes) continue;
-      const audible = !track.muted && (!anySolo || track.soloed);
-      nodes.input.gain.value = audible ? track.volume * model.automationGain(track, position) : 0;
+      const group = groups.find((item) => item.trackIDs.includes(track.id));
+      const audible = !(track.muted || mutedTrackIDs.has(track.id))
+        && (!anySolo || track.soloed || soloedTrackIDs.has(track.id));
+      nodes.input.gain.value = audible
+        ? track.volume * (group ? group.volume : 1) * model.automationGain(track, position)
+        : 0;
       if (nodes.pan) {
         const automatedPan = model.automationValue(track.panAutomation, position, 'pan');
         const pan = automatedPan === null ? (track.pan ?? 0) : automatedPan;
@@ -365,8 +380,9 @@ export class StudioEngine {
 
     const env = ctx.createGain();
     env.gain.setValueAtTime(0.0001, start);
-    env.gain.exponentialRampToValueAtTime(0.18, start + Math.min(SYNTH_ATTACK, duration * 0.5));
-    env.gain.setValueAtTime(0.18, Math.max(start + SYNTH_ATTACK + 0.001, end - SYNTH_RELEASE));
+    const peak = 0.18 * model.clamp(Number(note.velocity ?? 0.8), 0.05, 1);
+    env.gain.exponentialRampToValueAtTime(peak, start + Math.min(SYNTH_ATTACK, duration * 0.5));
+    env.gain.setValueAtTime(peak, Math.max(start + SYNTH_ATTACK + 0.001, end - SYNTH_RELEASE));
     env.gain.exponentialRampToValueAtTime(0.0001, end);
 
     osc.connect(filter);
@@ -449,20 +465,22 @@ export class StudioEngine {
 
   // ---------- Offline rendering ----------
 
-  async renderMix({ masterVolume = 1, singleTrackId = null } = {}) {
+  async renderMix({ masterVolume = 1, singleTrackId = null, sampleRate = 44100, normalize = false } = {}) {
     if (!this.session) throw new Error('There is no session to render.');
     const duration = this.duration();
     if (duration <= 0) throw new Error('There is nothing to render yet.');
 
-    return this.renderOffline({
+    const buffer = await this.renderOffline({
       duration,
       tracks: singleTrackId
         ? this.session.tracks.filter((track) => track.id === singleTrackId)
         : this.session.tracks,
       masterVolume,
+      sampleRate,
       includeMixer: true,
       frozenSource: singleTrackId ? this.session.tracks.find((t) => t.id === singleTrackId)?.frozen?.fileId : null
     });
+    return normalize ? normalizeBuffer(buffer) : buffer;
   }
 
   async renderTrackFreeze(track) {
@@ -477,20 +495,21 @@ export class StudioEngine {
     });
   }
 
-  async renderStem(track) {
+  async renderStem(track, { sampleRate = 44100, normalize = false } = {}) {
     const duration = model.trackDuration(track);
     if (duration <= 0) throw new Error('This track has nothing to render.');
-    return this.renderOffline({
+    const buffer = await this.renderOffline({
       duration,
       tracks: [track],
       masterVolume: this.session?.masterVolume ?? 1,
+      sampleRate,
       includeMixer: true,
       applyMuteSolo: false
     });
+    return normalize ? normalizeBuffer(buffer) : buffer;
   }
 
-  async renderOffline({ duration, tracks, masterVolume = 1, includeMixer = true, forceSource = false, frozenSource = null, applyMuteSolo = true }) {
-    const sampleRate = 44100;
+  async renderOffline({ duration, tracks, masterVolume = 1, sampleRate = 44100, includeMixer = true, forceSource = false, frozenSource = null, applyMuteSolo = true }) {
     const offline = new OfflineAudioContext(2, Math.ceil(duration * sampleRate) + 1024, sampleRate);
 
     const masterChain = buildMasterChain(offline, offline.destination, {
@@ -501,22 +520,34 @@ export class StudioEngine {
     });
     const master = masterChain.input;
 
-    const anySolo = this.session ? this.session.tracks.some((t) => t.soloed) : false;
+    const groups = this.session?.groups || [];
+    const soloedTrackIDs = new Set(groups.filter((group) => group.soloed).flatMap((group) => group.trackIDs));
+    const anySolo = this.session ? this.session.tracks.some((track) => track.soloed || soloedTrackIDs.has(track.id)) : false;
 
     for (const track of tracks) {
-      const input = this.buildOfflineTrack(offline, track, master, { includeMixer, anySolo, duration, applyMuteSolo });
+      const input = this.buildOfflineTrack(offline, track, master, {
+        includeMixer,
+        anySolo,
+        duration,
+        applyMuteSolo,
+        groups: this.session?.groups || []
+      });
       this.scheduleOfflineTrack(offline, track, input, duration, forceSource);
     }
 
     return offline.startRendering();
   }
 
-  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration, applyMuteSolo = true }) {
+  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration, applyMuteSolo = true, groups = [] }) {
     const input = ctx.createGain();
+    const group = groups.find((item) => item.trackIDs.includes(track.id));
+    const mutedByGroup = group?.muted ?? false;
+    const soloedByGroup = group?.soloed ?? false;
 
     if (includeMixer) {
-      const audible = !applyMuteSolo || (!track.muted && (!anySolo || track.soloed));
-      const volume = audible ? track.volume : 0;
+      const audible = !applyMuteSolo
+        || (!(track.muted || mutedByGroup) && (!anySolo || track.soloed || soloedByGroup));
+      const volume = audible ? track.volume * (group ? group.volume : 1) : 0;
       input.gain.setValueAtTime(volume * model.automationGain(track, 0), 0);
       const step = 0.05;
       for (let time = step; time <= duration; time += step) {
@@ -684,11 +715,11 @@ function applyMasterChain(chain, { effects, tempo }) {
   chain.delay.delayTime.value = Math.min(2, Math.max(0.01, beats * 60 / tempoSafe));
 }
 
-export function encodeWav(buffer) {
+export function encodeWav(buffer, bitDepth = 16) {
   const channels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
   const frames = buffer.length;
-  const bytesPerSample = 2;
+  const bytesPerSample = bitDepth / 8;
   const blockAlign = channels * bytesPerSample;
   const dataSize = frames * blockAlign;
   const arrayBuffer = new ArrayBuffer(44 + dataSize);
@@ -710,7 +741,7 @@ export function encodeWav(buffer) {
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, sampleRate * blockAlign, true);
   view.setUint16(32, blockAlign, true);
-  view.setUint16(34, 16, true);
+  view.setUint16(34, bitDepth, true);
   writeString(36, 'data');
   view.setUint32(40, dataSize, true);
 
@@ -723,10 +754,38 @@ export function encodeWav(buffer) {
   for (let frame = 0; frame < frames; frame += 1) {
     for (let channel = 0; channel < channels; channel += 1) {
       const sample = Math.max(-1, Math.min(1, channelData[channel][frame]));
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-      offset += 2;
+      if (bitDepth === 24) {
+        const value = sample < 0 ? Math.round(sample * 0x800000) : Math.round(sample * 0x7fffff);
+        view.setUint8(offset, value & 0xff);
+        view.setUint8(offset + 1, (value >> 8) & 0xff);
+        view.setUint8(offset + 2, (value >> 16) & 0xff);
+        offset += 3;
+      } else {
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
     }
   }
 
   return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+
+
+function normalizeBuffer(buffer) {
+  let peak = 0;
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const samples = buffer.getChannelData(channel);
+    for (let index = 0; index < samples.length; index += 1) {
+      peak = Math.max(peak, Math.abs(samples[index]));
+    }
+  }
+  if (peak > 0) {
+    const gain = Math.pow(10, -1 / 20) / peak;
+    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+      const samples = buffer.getChannelData(channel);
+      for (let index = 0; index < samples.length; index += 1) samples[index] *= gain;
+    }
+  }
+  return buffer;
 }

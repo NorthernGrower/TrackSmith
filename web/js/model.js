@@ -124,6 +124,7 @@ export function createSession(name = 'Untitled Session') {
     loop: { start: 0, end: 0, enabled: false },
     metronome: { enabled: false, level: 0.7, countIn: false },
     sections: [],
+    groups: [],
     tracks: [],
     editedAt: Date.now()
   };
@@ -179,21 +180,62 @@ export function createSessionFromTemplate(template, name) {
   session.templateId = template.id;
   session.tracks = template.tracks.map((slot, index) => {
     const track = createTrack({ name: slot.name, index });
+    track.colorIndex = Number.isFinite(slot.colorIndex) ? slot.colorIndex : index;
     track.volume = clamp(Number(slot.volume ?? 1), 0, 1);
     track.pan = clamp(Number(slot.pan ?? 0), -1, 1);
-    track.eq.low.gain = Number(slot.low ?? 0);
-    track.eq.mid.gain = Number(slot.mid ?? 0);
-    track.eq.high.gain = Number(slot.high ?? 0);
+    if (slot.eq) {
+      track.eq = JSON.parse(JSON.stringify(slot.eq));
+    } else {
+      track.eq.low.gain = Number(slot.low ?? 0);
+      track.eq.mid.gain = Number(slot.mid ?? 0);
+      track.eq.high.gain = Number(slot.high ?? 0);
+    }
     if (slot.comp) {
-      track.comp.bypassed = false;
-      track.comp.threshold = Number(slot.comp.threshold ?? -18);
-      track.comp.ratio = Number(slot.comp.ratio ?? 3);
-      if (slot.comp.attack !== undefined) track.comp.attack = Number(slot.comp.attack);
-      if (slot.comp.release !== undefined) track.comp.release = Number(slot.comp.release);
+      track.comp = { ...track.comp, ...JSON.parse(JSON.stringify(slot.comp)) };
+      if (slot.low !== undefined || slot.mid !== undefined || slot.high !== undefined) track.comp.bypassed = false;
     }
     return track;
   });
   return session;
+}
+
+const CUSTOM_TEMPLATES_KEY = 'ai-studio.web.custom-templates.v1';
+
+export function loadCustomTemplates() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CUSTOM_TEMPLATES_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.warn('Could not read custom templates', error);
+    return [];
+  }
+}
+
+export function saveCustomTemplates(templates) {
+  try {
+    localStorage.setItem(CUSTOM_TEMPLATES_KEY, JSON.stringify(templates));
+  } catch (error) {
+    console.warn('Could not save custom templates', error);
+  }
+}
+
+export function createCustomTemplate(session, name) {
+  return {
+    id: uid(),
+    name: name || `${session.name} Template`,
+    summary: `Captured from ${session.name}: ${session.tracks.length} tracks with their mixer settings.`,
+    tempo: session.tempo,
+    suggested: false,
+    custom: true,
+    tracks: session.tracks.map((track) => ({
+      name: track.name,
+      colorIndex: track.colorIndex,
+      volume: track.volume,
+      pan: track.pan,
+      eq: JSON.parse(JSON.stringify(track.eq)),
+      comp: JSON.parse(JSON.stringify(track.comp))
+    }))
+  };
 }
 
 export function playbackClips(track) {
@@ -312,6 +354,7 @@ export function normalizeSession(session) {
     section.time = Math.max(0, Number(section.time) || 0);
   });
   normal.sections.sort((a, b) => a.time - b.time);
+  normal.groups = Array.isArray(normal.groups) ? normal.groups : [];
   normal.tracks = Array.isArray(normal.tracks) ? normal.tracks : [];
   normal.editedAt = normal.editedAt || Date.now();
 
@@ -337,7 +380,26 @@ export function normalizeSession(session) {
     track.frozen = track.frozen || { fileId: null, duration: 0 };
     track.frozen.fileId = track.frozen.fileId || null;
     track.frozen.duration = Math.max(0, Number(track.frozen.duration) || 0);
+    track.notes.forEach((note) => {
+      note.velocity = clamp(Number(note.velocity ?? 0.8), 0.05, 1);
+    });
   });
+
+  const validTrackIDs = new Set(normal.tracks.map((track) => track.id));
+  const claimedTrackIDs = new Set();
+  normal.groups = normal.groups.map((group, index) => {
+    group.id = group.id || uid();
+    group.name = group.name || `Group ${index + 1}`;
+    group.colorIndex = Number.isFinite(group.colorIndex) ? group.colorIndex : index;
+    group.volume = clamp(Number(group.volume ?? 1), 0, 1);
+    group.muted = Boolean(group.muted);
+    group.soloed = Boolean(group.soloed);
+    group.trackIDs = Array.isArray(group.trackIDs)
+      ? group.trackIDs.filter((id) => validTrackIDs.has(id) && !claimedTrackIDs.has(id))
+      : [];
+    group.trackIDs.forEach((id) => claimedTrackIDs.add(id));
+    return group;
+  }).filter((group) => group.trackIDs.length > 0);
 
   return normal;
 }

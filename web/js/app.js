@@ -26,6 +26,12 @@ const state = {
   selectedNote: null,
   rollDivision: 2,
   rollChord: 'single',
+  rollQuantizeStrength: 1,
+  selectedNotes: [],
+  groupSelectionMode: false,
+  selectedGroupTrackIDs: [],
+  customTemplates: [],
+  bounceSettings: null,
   undo: [],
   redo: [],
   buffers: new Map(),
@@ -48,10 +54,29 @@ const state = {
   tb303Resonance: 0.68,
   tb303Envelope: 0.58,
   tb303Decay: 0.42,
+  tb303Tuning: 1,
+  tb303Level: 0.8,
   tb303Accent: false,
+  drumVolume: 0.8,
+  drumTuning: 1,
+  drumDecay: 1,
+  drumTone: 0.65,
   samplerBuffer: null,
   samplerName: null,
   samplerSoundId: null,
+  instrumentBus: null,
+  instrumentBusContext: null,
+  instrumentBusTarget: null,
+  instrumentRecorder: null,
+  instrumentRecordDestination: null,
+  instrumentRecordChunks: [],
+  instrumentRecordTrackId: null,
+  instrumentRecordStartTime: 0,
+  instrumentRecordStartWall: 0,
+  instrumentRecordTakeName: null,
+  instrumentRecordTimer: null,
+  instrumentRecording: false,
+  instrumentRecordDuration: 0,
   modal: null
 };
 
@@ -144,6 +169,11 @@ function trackById(id) {
   return state.session?.tracks.find((track) => track.id === id) || null;
 }
 
+function trackColorFor(track, index) {
+  const group = state.session?.groups?.find((item) => item.trackIDs.includes(track.id));
+  return model.trackColor(group ? group.colorIndex : (track.colorIndex ?? index));
+}
+
 function currentPosition() {
   return engine.isPlaying ? engine.getPosition() : engine.position;
 }
@@ -224,6 +254,9 @@ function adoptSession(session) {
   state.selectedClip = null;
   state.selectedAutomationPoint = null;
   state.selectedNote = null;
+  state.selectedNotes = [];
+  state.groupSelectionMode = false;
+  state.selectedGroupTrackIDs = [];
   state.automationTrack = null;
   engine.setSession(state.session);
   engine.position = 0;
@@ -264,6 +297,16 @@ function computePeaks(buffer, buckets = 480) {
     peaks[bucket] = peak;
   }
   return peaks;
+}
+
+function hasAudibleContent(buffer) {
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const samples = buffer.getChannelData(channel);
+    for (let index = 0; index < samples.length; index += 64) {
+      if (Math.abs(samples[index]) > 0.0001) return true;
+    }
+  }
+  return false;
 }
 
 async function ensureBuffer(fileId) {
@@ -374,7 +417,8 @@ function renderHeads() {
   parts.push(`<div class="heads-spacer"><span class="meter-label">4/4</span><span>TRACKS</span><span style="margin-left:auto">${session.tracks.length}</span></div>`);
 
   session.tracks.forEach((track, index) => {
-    const color = model.trackColor(index);
+    const color = trackColorFor(track, index);
+    const group = session.groups?.find((item) => item.trackIDs.includes(track.id));
     const frozen = Boolean(track.frozen?.fileId);
     parts.push(`
       <div class="track-head" style="--track-color:${color}">
@@ -387,6 +431,7 @@ function renderHeads() {
           <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'pan' ? '' : 'off'}" data-act="automation-pan" data-track="${track.id}" title="Pan automation">⇄</button>
         </div>
         <div class="track-head-row">
+          ${group ? `<span class="group-badge" style="--group-color:${color}" title="${escapeHtml(group.name)}">${escapeHtml(group.name)}</span>` : ''}
           <div style="display:flex;flex-direction:column;gap:4px">
             <button class="mini ${track.muted ? 'on' : ''}" data-act="mute" data-track="${track.id}" title="Mute">M</button>
             <button class="mini ${track.soloed ? 'on' : ''}" data-act="solo" data-track="${track.id}" title="Solo">S</button>
@@ -818,47 +863,216 @@ async function toggleFreeze(trackId) {
   state.freezing = false;
 }
 
-async function bounceStems() {
-  if (state.bouncing) return;
+function m4aMimeType() {
+  if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== 'function') return null;
+  return ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find((type) => MediaRecorder.isTypeSupported(type)) || null;
+}
+
+async function encodeM4A(buffer, context = null) {
+  const mimeType = m4aMimeType();
+  if (!mimeType) throw new Error('This browser cannot export M4A. Choose WAV instead.');
+
+  const ownsContext = !context;
+  if (!context) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    context = new AudioContextClass({ sampleRate: buffer.sampleRate });
+  }
+  const destination = context.createMediaStreamDestination();
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(destination);
+
+  return new Promise((resolve, reject) => {
+    let recorder;
+    const chunks = [];
+    const cleanup = () => {
+      destination.stream.getTracks().forEach((track) => track.stop());
+      if (ownsContext) context.close().catch(() => {});
+    };
+    try {
+      recorder = new MediaRecorder(destination.stream, { mimeType });
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) chunks.push(event.data);
+      };
+      recorder.onerror = (event) => {
+        cleanup();
+        reject(event.error || new Error('M4A encoding failed.'));
+      };
+      recorder.onstop = () => {
+        cleanup();
+        resolve(new Blob(chunks, { type: 'audio/mp4' }));
+      };
+      source.onended = () => setTimeout(() => {
+        if (recorder.state === 'recording') recorder.stop();
+      }, 120);
+      context.resume().then(() => {
+        recorder.start();
+        source.start();
+      }).catch((error) => {
+        cleanup();
+        reject(error);
+      });
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
+function bounceSettingsSize(settings, mode) {
   const tracks = state.session.tracks.filter((track) => model.trackDuration(track) > 0);
-  if (!tracks.length) {
+  const duration = mode === 'stems'
+    ? tracks.reduce((sum, track) => sum + model.trackDuration(track), 0)
+    : sessionDuration();
+  const bytes = settings.format === 'm4a'
+    ? duration * 32_000
+    : duration * settings.sampleRate * 2 * (settings.bitDepth / 8);
+  const size = bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`;
+  return mode === 'stems' ? `ESTIMATED ${tracks.length} FILES · ${size}` : `ESTIMATED SIZE · ${size}`;
+}
+
+function openBounceSettings(mode) {
+  if (state.bouncing) return;
+  if (mode === 'stems' && !state.session.tracks.some((track) => model.trackDuration(track) > 0)) {
     toast('There are no tracks with audio to export');
     return;
   }
 
-  state.bouncing = true;
-  renderTransport();
-  toast('Rendering stems…');
+  const settings = { ...(state.bounceSettings || {}), fileName: state.bounceSettings?.fileName || state.session.name };
+  if (!settings.format) settings.format = 'wav';
+  if (settings.format === 'm4a' && !m4aMimeType()) settings.format = 'wav';
+  if (!settings.sampleRate) settings.sampleRate = 44100;
+  if (!settings.bitDepth) settings.bitDepth = 24;
+  settings.normalize = Boolean(settings.normalize);
 
-  try {
-    for (const track of tracks) {
-      const buffer = await engine.renderStem(track);
-      download(encodeWav(buffer), `${safeName(state.session.name)} - ${safeName(track.name)}.wav`);
-      await new Promise((resolve) => setTimeout(resolve, 350));
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0"><h2>Bounce Settings</h2><div class="sub">${mode === 'stems' ? 'RENDER EACH TRACK' : 'RENDER THE MIX'}</div></div>
+      <button class="modal-close" data-close>Cancel</button>
+    </header>
+    <div class="modal-body">
+      <div class="panel">
+        <h3>FORMAT</h3>
+        <div class="field">
+          <select id="bounceFormat">
+            <option value="wav" ${settings.format === 'wav' ? 'selected' : ''}>WAV</option>
+            <option value="m4a" ${settings.format === 'm4a' ? 'selected' : ''} ${m4aMimeType() ? '' : 'disabled'}>M4A${m4aMimeType() ? '' : ' · not supported in this browser'}</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="label-row"><span>Sample rate</span></div>
+          <select id="bounceSampleRate">
+            <option value="44100" ${settings.sampleRate === 44100 ? 'selected' : ''}>44.1 kHz</option>
+            <option value="48000" ${settings.sampleRate === 48000 ? 'selected' : ''}>48 kHz</option>
+          </select>
+        </div>
+        <div class="field" id="bounceBitDepthField">
+          <div class="label-row"><span>Bit depth</span></div>
+          <select id="bounceBitDepth" ${settings.format === 'm4a' ? 'disabled' : ''}>
+            <option value="16" ${settings.bitDepth === 16 ? 'selected' : ''}>16-bit</option>
+            <option value="24" ${settings.bitDepth === 24 ? 'selected' : ''}>24-bit</option>
+          </select>
+        </div>
+      </div>
+      <div class="panel">
+        <label class="bounce-check"><input type="checkbox" id="bounceNormalize" ${settings.normalize ? 'checked' : ''}><span><strong>Normalize to -1 dB</strong><small>Raise the peak level after rendering.</small></span></label>
+      </div>
+      <div class="panel">
+        <h3>FILE NAME</h3>
+        <input type="text" id="bounceFileName" value="${escapeHtml(settings.fileName)}" autocomplete="off">
+      </div>
+      ${m4aMimeType() ? '' : '<p class="range-label">M4A export requires browser audio/mp4 recording support. WAV is available here.</p>'}
+    </div>
+    <footer class="modal-footer bounce-footer">
+      <span class="range-label" id="bounceEstimate">${bounceSettingsSize(settings, mode)}</span>
+      <button class="tool primary" id="renderBounceBtn">${mode === 'stems' ? 'Render Stems' : 'Render Mix'}</button>
+    </footer>`, { tall: true });
+
+  const format = document.getElementById('bounceFormat');
+  const rate = document.getElementById('bounceSampleRate');
+  const depth = document.getElementById('bounceBitDepth');
+  const normalize = document.getElementById('bounceNormalize');
+  const name = document.getElementById('bounceFileName');
+  const estimate = document.getElementById('bounceEstimate');
+  const refresh = () => {
+    const current = {
+      format: format.value,
+      sampleRate: Number(rate.value),
+      bitDepth: Number(depth.value),
+      normalize: normalize.checked,
+      fileName: name.value
+    };
+    depth.disabled = current.format === 'm4a';
+    estimate.textContent = bounceSettingsSize(current, mode);
+  };
+  [format, rate, depth, normalize, name].forEach((input) => input.addEventListener('input', refresh));
+  format.addEventListener('change', refresh);
+
+  document.getElementById('renderBounceBtn').addEventListener('click', () => {
+    const final = {
+      format: format.value,
+      sampleRate: Number(rate.value),
+      bitDepth: Number(depth.value),
+      normalize: normalize.checked,
+      fileName: safeName(name.value) || safeName(state.session.name) || 'Mix'
+    };
+    state.bounceSettings = final;
+    try { localStorage.setItem('ai-studio.web.bounce-settings.v1', JSON.stringify(final)); } catch (error) { /* use settings for this render */ }
+    let exportContext = null;
+    if (final.format === 'm4a') {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      exportContext = new AudioContextClass({ sampleRate: final.sampleRate });
+      exportContext.resume().catch(() => {});
     }
-    toast(`${tracks.length} stems exported`);
-  } catch (error) {
-    toast(error.message || 'Stems could not be exported');
-  }
-
-  state.bouncing = false;
-  renderTransport();
+    closeModal();
+    renderBounce(mode, final, exportContext);
+  });
 }
 
-async function bounceMix() {
+async function renderBounce(mode, settings, exportContext = null) {
   if (state.bouncing) return;
   state.bouncing = true;
   renderTransport();
-  toast('Bouncing mix…');
+  toast(mode === 'stems' ? 'Rendering stems…' : 'Bouncing mix…');
+  const extension = settings.format === 'm4a' ? 'm4a' : 'wav';
+  const makeBlob = async (buffer) => settings.format === 'm4a'
+    ? encodeM4A(buffer, exportContext)
+    : encodeWav(buffer, settings.bitDepth);
+
   try {
-    const buffer = await engine.renderMix({ masterVolume: state.session.masterVolume });
-    download(encodeWav(buffer), `${safeName(state.session.name)}.wav`);
-    toast('Bounce complete');
+    if (mode === 'stems') {
+      const tracks = state.session.tracks.filter((track) => model.trackDuration(track) > 0);
+      for (const track of tracks) {
+        const buffer = await engine.renderStem(track, { sampleRate: settings.sampleRate, normalize: settings.normalize });
+        const blob = await makeBlob(buffer);
+        download(blob, `${safeName(settings.fileName)} - ${safeName(track.name)}.${extension}`);
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+      toast(`${tracks.length} stems exported`);
+    } else {
+      const buffer = await engine.renderMix({
+        masterVolume: state.session.masterVolume,
+        sampleRate: settings.sampleRate,
+        normalize: settings.normalize
+      });
+      download(await makeBlob(buffer), `${safeName(settings.fileName)}.${extension}`);
+      toast('Bounce complete');
+    }
   } catch (error) {
     toast(error.message || 'Bounce failed');
+  } finally {
+    if (exportContext && exportContext.state !== 'closed') exportContext.close().catch(() => {});
+    state.bouncing = false;
+    renderTransport();
   }
-  state.bouncing = false;
-  renderTransport();
+}
+
+function bounceStems() {
+  openBounceSettings('stems');
+}
+
+function bounceMix() {
+  openBounceSettings('mix');
 }
 
 // ---------- Import ----------
@@ -1140,6 +1354,7 @@ function openRoll(trackId) {
   state.modal = 'roll';
   state.rollTrackId = trackId;
   state.selectedNote = null;
+  state.selectedNotes = [];
   renderRollModal();
 }
 
@@ -1181,13 +1396,13 @@ function renderRollModal() {
         <div class="sub">${escapeHtml(track.name.toUpperCase())} · ${state.session.tempo} BPM</div>
       </div>
       <button class="icon-btn" id="rollPlayBtn">${engine.isPlaying ? '❚❚' : '▶'}</button>
-      <button class="icon-btn" id="rollDeleteBtn" ${state.selectedNote ? '' : 'disabled'}>🗑</button>
+      <button class="icon-btn" id="rollDeleteBtn" ${state.selectedNotes.length ? '' : 'disabled'}>🗑</button>
       <button class="modal-close" data-close>Done</button>
     </header>
     <div class="modal-body">
       <div class="roll">
         <div class="roll-toolbar">
-          <span class="range-label">Tap the grid to add a note · drag to move · drag its right edge to resize</span>
+          <span class="range-label">Tap to add · drag to move · shift-tap to select multiple</span>
           <div style="margin-left:auto;display:flex;gap:4px">
             <button class="pill ${state.rollDivision === 1 ? 'on' : ''}" data-roll-div="1">1/4</button>
             <button class="pill ${state.rollDivision === 2 ? 'on' : ''}" data-roll-div="2">1/8</button>
@@ -1200,7 +1415,13 @@ function renderRollModal() {
             ${[['single', 'SINGLE'], ['major', 'MAJOR'], ['minor', 'MINOR'], ['seventh', '7TH']].map(([id, label]) => `<button class="pill ${state.rollChord === id ? 'on' : ''}" data-roll-chord="${id}">${label}</button>`).join('')}
           </div>
         </div>
-        <div class="roll-grid-wrap">          <div class="roll-keys">${keys.join('')}</div>
+        <div class="roll-toolbar quantize-toolbar">
+          <button class="pill" id="rollQuantizeBtn" ${state.selectedNotes.length ? '' : 'disabled'}>QUANTIZE SELECTED</button>
+          <label class="range-label" for="rollQuantizeStrength">STRENGTH</label>
+          <input type="range" id="rollQuantizeStrength" min="0" max="1" step="0.05" value="${state.rollQuantizeStrength}">
+          <span class="range-label" id="rollQuantizeValue">${Math.round(state.rollQuantizeStrength * 100)}%</span>
+        </div>
+        <div class="roll-grid-wrap"><div class="roll-keys">${keys.join('')}</div>
           <div class="roll-scroll" id="rollScroll">
             <div class="roll-grid" id="rollGrid" style="width:${contentWidth}px;height:${gridHeight}px">
               <canvas class="automation-canvas" id="rollCanvas"></canvas>
@@ -1213,10 +1434,7 @@ function renderRollModal() {
 
   const grid = document.getElementById('rollGrid');
   drawRollGrid(grid, contentWidth, gridHeight, beatPx);
-
-  track.notes.forEach((note) => {
-    grid.appendChild(buildRollNote(track, note, beatPx));
-  });
+  track.notes.forEach((note) => grid.appendChild(buildRollNote(track, note, beatPx)));
 
   document.getElementById('rollPlayBtn').addEventListener('click', () => {
     togglePlay();
@@ -1225,13 +1443,24 @@ function renderRollModal() {
   });
 
   document.getElementById('rollDeleteBtn').addEventListener('click', () => {
-    if (!state.selectedNote) return;
+    const selected = new Set(state.selectedNotes);
+    if (!selected.size) return;
     snapshot();
-    track.notes = track.notes.filter((note) => note.id !== state.selectedNote);
+    track.notes = track.notes.filter((note) => !selected.has(note.id));
     state.selectedNote = null;
+    state.selectedNotes = [];
     persist();
     engine.rebuild();
     renderRollModal();
+  });
+
+  document.getElementById('rollQuantizeBtn').addEventListener('click', () => {
+    quantizeSelectedNotes(track);
+  });
+  const strength = document.getElementById('rollQuantizeStrength');
+  strength.addEventListener('input', () => {
+    state.rollQuantizeStrength = Number(strength.value);
+    document.getElementById('rollQuantizeValue').textContent = `${Math.round(state.rollQuantizeStrength * 100)}%`;
   });
 
   document.querySelectorAll('[data-roll-div]').forEach((button) => {
@@ -1240,7 +1469,6 @@ function renderRollModal() {
       renderRollModal();
     });
   });
-
   document.querySelectorAll('[data-roll-chord]').forEach((button) => {
     button.addEventListener('click', () => {
       state.rollChord = button.dataset.rollChord;
@@ -1263,13 +1491,14 @@ function renderRollModal() {
       rollChordIntervals(state.rollChord).forEach((interval) => {
         const chordPitch = pitch + interval;
         if (chordPitch < model.NOTE_LOW || chordPitch > model.NOTE_HIGH) return;
-        const note = { id: model.uid(), pitch: chordPitch, start: length, duration: rollSnap() };
+        const note = { id: model.uid(), pitch: chordPitch, start: length, duration: rollSnap(), velocity: 0.8 };
         track.notes.push(note);
         addedIds.push(note.id);
       });
       if (!addedIds.length) return;
       track.notes.sort((a, b) => a.start - b.start);
       state.selectedNote = addedIds[0];
+      state.selectedNotes = addedIds;
       persist();
       engine.rebuild();
       renderRollModal();
@@ -1278,30 +1507,52 @@ function renderRollModal() {
 
     const note = track.notes.find((item) => item.id === noteEl.dataset.note);
     if (!note) return;
+    const modifierSelect = event.shiftKey || event.metaKey || event.ctrlKey;
+    if (modifierSelect) {
+      state.selectedNotes = state.selectedNotes.includes(note.id)
+        ? state.selectedNotes.filter((id) => id !== note.id)
+        : [...state.selectedNotes, note.id];
+      state.selectedNote = state.selectedNotes[0] || null;
+      renderRollModal();
+      return;
+    }
+    if (!state.selectedNotes.includes(note.id)) state.selectedNotes = [note.id];
     state.selectedNote = note.id;
     grid.querySelectorAll('.roll-note').forEach((element) => {
-      element.classList.toggle('selected', element.dataset.note === note.id);
+      element.classList.toggle('selected', state.selectedNotes.includes(element.dataset.note));
     });
 
+    const isVelocity = event.target.classList.contains('velocity-handle');
     const isResize = event.target.classList.contains('resize');
     const startX = event.clientX;
     const startY = event.clientY;
-    const origin = { ...note };
+    const selected = new Set(state.selectedNotes);
+    const movingNotes = isResize || isVelocity
+      ? [{ note, origin: { ...note }, element: noteEl }]
+      : track.notes.filter((item) => selected.has(item.id)).map((item) => ({
+        note: item,
+        origin: { ...item },
+        element: grid.querySelector(`[data-note="${item.id}"]`)
+      }));
     snapshot();
 
     startDrag((moveEvent) => {
       const dx = moveEvent.clientX - startX;
       const dy = moveEvent.clientY - startY;
-      if (isResize) {
-        note.duration = Math.max(rollSnap(), origin.duration + dx / (beatPx / beatDuration()));
+      if (isVelocity) {
+        note.velocity = model.clamp(originVelocity(movingNotes[0].origin.velocity) - dy / 60, 0.05, 1);
+      } else if (isResize) {
+        note.duration = Math.max(rollSnap(), movingNotes[0].origin.duration + dx / (beatPx / beatDuration()));
         note.duration = Math.round(note.duration / rollSnap()) * rollSnap();
       } else {
-        const time = origin.start + dx / (beatPx / beatDuration());
-        note.start = Math.max(0, Math.round(time / rollSnap()) * rollSnap());
-        const pitchDelta = -Math.round(dy / NOTE_HEIGHT);
-        note.pitch = model.clamp(origin.pitch + pitchDelta, model.NOTE_LOW, model.NOTE_HIGH);
+        for (const item of movingNotes) {
+          const time = item.origin.start + dx / (beatPx / beatDuration());
+          item.note.start = Math.max(0, Math.round(time / rollSnap()) * rollSnap());
+          const pitchDelta = -Math.round(dy / NOTE_HEIGHT);
+          item.note.pitch = model.clamp(item.origin.pitch + pitchDelta, model.NOTE_LOW, model.NOTE_HIGH);
+        }
       }
-      positionRollNote(noteEl, note, beatPx);
+      movingNotes.forEach((item) => positionRollNote(item.element, item.note, beatPx));
     }, () => {
       track.notes.sort((a, b) => a.start - b.start);
       persist();
@@ -1309,6 +1560,28 @@ function renderRollModal() {
       renderRollModal();
     });
   });
+}
+
+function originVelocity(value) {
+  return model.clamp(Number(value ?? 0.8), 0.05, 1);
+}
+
+function quantizeSelectedNotes(track) {
+  const selected = new Set(state.selectedNotes);
+  if (!selected.size) return;
+  const snap = rollSnap();
+  const strength = model.clamp(state.rollQuantizeStrength, 0, 1);
+  snapshot();
+  track.notes.forEach((note) => {
+    if (!selected.has(note.id)) return;
+    const target = Math.round(note.start / snap) * snap;
+    note.start = Math.max(0, note.start + (target - note.start) * strength);
+  });
+  track.notes.sort((a, b) => a.start - b.start);
+  persist();
+  engine.rebuild();
+  renderRollModal();
+  toast('Selected notes quantized');
 }
 
 function drawRollGrid(grid, width, height, beatPx) {
@@ -1355,24 +1628,26 @@ function drawRollGrid(grid, width, height, beatPx) {
 
 function buildRollNote(track, note, beatPx) {
   const element = document.createElement('div');
-  element.className = `roll-note ${state.selectedNote === note.id ? 'selected' : ''}`;
+  element.className = `roll-note ${state.selectedNotes.includes(note.id) ? 'selected' : ''}`;
   element.dataset.note = note.id;
-  element.innerHTML = `${model.noteName(note.pitch)}<span class="resize"></span>`;
+  element.innerHTML = `${model.noteName(note.pitch)}<span class="velocity-bar"><span></span></span><span class="velocity-handle" title="Drag to change velocity"></span><span class="resize"></span>`;
   positionRollNote(element, note, beatPx);
   return element;
 }
 
 function positionRollNote(element, note, beatPx) {
   const pps = beatPx / beatDuration();
+  const velocity = originVelocity(note.velocity);
   element.style.left = `${Math.max(0, note.start) * pps}px`;
   element.style.top = `${(model.NOTE_HIGH - note.pitch) * NOTE_HEIGHT + 1.5}px`;
   element.style.width = `${Math.max(14, note.duration * pps)}px`;
+  element.style.setProperty('--note-velocity', `${velocity * 100}%`);
 }
 
 // ---------- Modal shells ----------
 
 function openModal(html, { tall = false } = {}) {
-  el.modalRoot.innerHTML = `<div class="modal-backdrop"></div><section class="modal ${tall ? 'tall' : ''}">${html}</section>`;
+  el.modalRoot.innerHTML = `<div class="modal-backdrop"></div><section class="modal ${tall ? 'tall' : ''} ${state.modal === 'instruments' ? 'instrument-rack-modal' : ''}">${html}</section>`;
   el.modalRoot.querySelector('.modal-backdrop').addEventListener('click', closeModal);
   el.modalRoot.querySelectorAll('[data-close]').forEach((button) => {
     button.addEventListener('click', closeModal);
@@ -1381,6 +1656,7 @@ function openModal(html, { tall = false } = {}) {
 }
 
 function closeModal() {
+  if (state.instrumentRecording) stopInstrumentRecording(false);
   state.modal = null;
   el.modalRoot.innerHTML = '';
   el.modalRoot.style.pointerEvents = 'none';
@@ -1395,9 +1671,11 @@ function openMixer() {
   state.modal = 'mixer';
 
   const strips = session.tracks.map((track, index) => {
-    const color = model.trackColor(index);
-    return `<div class="strip" style="--track-color:${color}">
+    const color = trackColorFor(track, index);
+    const selected = state.selectedGroupTrackIDs.includes(track.id);
+    return `<div class="strip ${state.groupSelectionMode && selected ? 'group-selected' : ''}" style="--track-color:${color}">
       <div class="strip-name">${escapeHtml(track.name.toUpperCase())}</div>
+      ${state.groupSelectionMode ? `<button class="pill ${selected ? 'on' : ''}" data-group-select="${track.id}">${selected ? 'SELECTED' : 'ADD TO BUS'}</button>` : ''}
       <input type="range" class="pan-slider" min="-1" max="1" step="0.05" value="${track.pan}" data-mix-pan="${track.id}" style="width:64px" aria-label="Pan for ${escapeHtml(track.name)}">
       <div class="pan-label" data-pan-label="${track.id}">${model.panLabel(track.pan)}</div>
       <div class="fader-block">
@@ -1412,15 +1690,38 @@ function openMixer() {
     </div>`;
   }).join('');
 
+  const buses = (session.groups || []).map((group) => {
+    const color = model.trackColor(group.colorIndex);
+    const members = session.tracks.filter((track) => group.trackIDs.includes(track.id)).map((track) => track.name).join(' · ');
+    return `<div class="group-bus" style="--group-color:${color}">
+      <div class="group-bus-meta"><strong>${escapeHtml(group.name)}</strong><span>${escapeHtml(members)}</span></div>
+      <input type="range" class="group-volume" min="0" max="1" step="0.01" value="${group.volume}" data-group-volume="${group.id}" aria-label="${escapeHtml(group.name)} bus level">
+      <span class="db" data-group-db="${group.id}">${model.dbLabel(group.volume)}</span>
+      <div class="mini-row">
+        <button class="mini ${group.muted ? 'on' : ''}" data-group-mute="${group.id}">M</button>
+        <button class="mini ${group.soloed ? 'on' : ''}" data-group-solo="${group.id}">S</button>
+      </div>
+      <button class="icon-btn" data-group-rename="${group.id}" title="Rename bus">✎</button>
+      <button class="icon-btn" data-group-delete="${group.id}" title="Dissolve bus">×</button>
+    </div>`;
+  }).join('');
+
+  const selectionTools = state.groupSelectionMode
+    ? `<div class="group-select-bar"><span>${state.selectedGroupTrackIDs.length} tracks selected</span><button class="pill" id="cancelGroupSelection">Cancel</button><button class="pill on" id="createGroupBtn" ${state.selectedGroupTrackIDs.length < 2 ? 'disabled' : ''}>Create Bus</button></div>`
+    : '';
+
   openModal(`
     <header class="modal-header">
       <div style="flex:1;min-width:0">
         <h2>Mixer</h2>
         <div class="sub">${escapeHtml(session.name.toUpperCase())} · ${session.tracks.length} ${session.tracks.length === 1 ? 'CHANNEL' : 'CHANNELS'}</div>
       </div>
+      <button class="pill ${state.groupSelectionMode ? 'on' : ''}" id="groupTracksBtn">${state.groupSelectionMode ? 'GROUPING' : 'GROUP TRACKS'}</button>
       <button class="modal-close" data-close>Done</button>
     </header>
     <div class="modal-body">
+      ${selectionTools}
+      ${buses ? `<div class="group-bus-list"><h3>BUSES</h3>${buses}</div>` : ''}
       <div class="mixer-board">
         ${strips}
         <div class="strip master">
@@ -1440,6 +1741,76 @@ function openMixer() {
       <button class="tool" id="mixerStopBtn">Stop</button>
       <span class="range-label" style="margin-left:auto" id="mixerTime">${model.formatTime(currentPosition())}</span>
     </footer>`, { tall: true });
+
+  const groupToggle = document.getElementById('groupTracksBtn');
+  groupToggle.addEventListener('click', () => {
+    state.groupSelectionMode = !state.groupSelectionMode;
+    state.selectedGroupTrackIDs = [];
+    openMixer();
+  });
+  const cancelSelection = document.getElementById('cancelGroupSelection');
+  cancelSelection?.addEventListener('click', () => {
+    state.groupSelectionMode = false;
+    state.selectedGroupTrackIDs = [];
+    openMixer();
+  });
+  document.getElementById('createGroupBtn')?.addEventListener('click', createSelectedTrackGroup);
+  el.modalRoot.querySelectorAll('[data-group-select]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = button.dataset.groupSelect;
+      state.selectedGroupTrackIDs = state.selectedGroupTrackIDs.includes(id)
+        ? state.selectedGroupTrackIDs.filter((item) => item !== id)
+        : [...state.selectedGroupTrackIDs, id];
+      openMixer();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-group-volume]').forEach((input) => {
+    input.addEventListener('pointerdown', () => snapshot());
+    input.addEventListener('input', () => {
+      const group = session.groups.find((item) => item.id === input.dataset.groupVolume);
+      if (!group) return;
+      group.volume = model.clamp(Number(input.value), 0, 1);
+      engine.updateGroups(session.groups);
+      const label = el.modalRoot.querySelector(`[data-group-db="${group.id}"]`);
+      if (label) label.textContent = model.dbLabel(group.volume);
+      persist();
+    });
+  });
+  el.modalRoot.querySelectorAll('[data-group-mute], [data-group-solo]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const group = session.groups.find((item) => item.id === (button.dataset.groupMute || button.dataset.groupSolo));
+      if (!group) return;
+      if (button.hasAttribute('data-group-mute')) group.muted = !group.muted;
+      else group.soloed = !group.soloed;
+      engine.updateGroups(session.groups);
+      persist();
+      openMixer();
+    });
+  });
+  el.modalRoot.querySelectorAll('[data-group-rename]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const group = session.groups.find((item) => item.id === button.dataset.groupRename);
+      if (!group) return;
+      const name = window.prompt('Bus name', group.name);
+      if (name === null || !name.trim()) return;
+      group.name = name.trim();
+      persist();
+      render();
+      openMixer();
+    });
+  });
+  el.modalRoot.querySelectorAll('[data-group-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const group = session.groups.find((item) => item.id === button.dataset.groupDelete);
+      if (!group || !window.confirm(`Dissolve bus "${group.name}"? Its tracks will remain in the session.`)) return;
+      session.groups = session.groups.filter((item) => item.id !== group.id);
+      engine.updateGroups(session.groups);
+      persist();
+      render();
+      openMixer();
+    });
+  });
 
   el.modalRoot.querySelectorAll('[data-mix-volume]').forEach((input) => {
     input.addEventListener('pointerdown', () => snapshot());
@@ -1504,6 +1875,38 @@ function openMixer() {
     if (button) button.textContent = 'Play';
   });
 }
+
+function createSelectedTrackGroup() {
+  const ids = [...state.selectedGroupTrackIDs];
+  if (ids.length < 2) return;
+  const entered = window.prompt('Bus name', `Group ${(state.session.groups || []).length + 1}`);
+  if (entered === null) return;
+  const name = entered.trim() || `Group ${(state.session.groups || []).length + 1}`;
+  snapshot();
+  const groups = state.session.groups || (state.session.groups = []);
+  groups.forEach((group) => {
+    group.trackIDs = group.trackIDs.filter((id) => !ids.includes(id));
+  });
+  state.session.groups = groups.filter((group) => group.trackIDs.length > 0);
+  const usedColors = new Set(state.session.groups.map((group) => group.colorIndex));
+  const colorIndex = [0, 1, 2, 3].find((index) => !usedColors.has(index)) ?? state.session.groups.length % 4;
+  state.session.groups.push({
+    id: model.uid(),
+    name,
+    colorIndex,
+    trackIDs: ids,
+    volume: 1,
+    muted: false,
+    soloed: false
+  });
+  state.groupSelectionMode = false;
+  state.selectedGroupTrackIDs = [];
+  engine.updateGroups(state.session.groups);
+  persist();
+  render();
+  openMixer();
+}
+
 
 // ---------- Equalizer + compressor ----------
 
@@ -1951,8 +2354,193 @@ function instrumentEngineInstance() {
 }
 
 function instrumentDestination() {
+  const context = engine.ensureContext();
+  if (!state.instrumentBus || state.instrumentBusContext !== context) {
+    state.instrumentBus = context.createGain();
+    state.instrumentBusContext = context;
+    state.instrumentBusTarget = null;
+  }
+
   const nodes = state.instrumentTrackId ? engine.trackNodes.get(state.instrumentTrackId) : null;
-  return nodes ? nodes.input : engine.masterGain;
+  const target = nodes ? nodes.input : engine.masterGain;
+  if (state.instrumentBusTarget !== target) {
+    state.instrumentBus.disconnect();
+    state.instrumentBus.connect(target);
+    if (state.instrumentRecordDestination) state.instrumentBus.connect(state.instrumentRecordDestination);
+    state.instrumentBusTarget = target;
+  }
+  return state.instrumentBus;
+}
+
+function instrumentRecordingMimeType() {
+  const Recorder = window.MediaRecorder;
+  if (!Recorder) return null;
+  if (typeof Recorder.isTypeSupported !== 'function') return '';
+  return ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm']
+    .find((type) => Recorder.isTypeSupported(type)) || '';
+}
+
+function startInstrumentRecording() {
+  const track = trackById(state.instrumentTrackId);
+  if (!track) {
+    toast('Choose a session track as the recording destination');
+    return;
+  }
+  if (state.instrumentTab === 'sampler' && !state.samplerBuffer) {
+    toast('Load a sample before recording');
+    return;
+  }
+
+  const Recorder = window.MediaRecorder;
+  if (!Recorder) {
+    toast('Instrument recording is not supported in this browser');
+    return;
+  }
+
+  const mimeType = instrumentRecordingMimeType();
+  const context = engine.ensureContext();
+  const bus = instrumentDestination();
+  const capture = context.createMediaStreamDestination();
+  bus.connect(capture);
+
+  let recorder;
+  try {
+    recorder = mimeType ? new Recorder(capture.stream, { mimeType }) : new Recorder(capture.stream);
+  } catch (error) {
+    bus.disconnect(capture);
+    capture.stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    toast('Instrument recording could not start in this browser');
+    return;
+  }
+
+  const sessionID = state.session.id;
+  const trackID = track.id;
+  const startPosition = engine.isPlaying ? engine.getPosition() : engine.position;
+  const position = engine.duration() > 0 && startPosition >= engine.duration() ? 0 : startPosition;
+  const instrumentNames = { synth: 'Synth', drums: 'Drums', tb303: 'TB-303', sampler: state.samplerName || 'Sampler' };
+  const takeName = `${instrumentNames[state.instrumentTab] || 'Instrument'} Take`;
+  const chunks = [];
+
+  recorder.ondataavailable = (event) => {
+    if (event.data?.size) chunks.push(event.data);
+  };
+  recorder.onerror = (event) => {
+    bus.disconnect(capture);
+    capture.stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    clearInterval(state.instrumentRecordTimer);
+    state.instrumentRecordTimer = null;
+    state.instrumentRecording = false;
+    state.instrumentRecorder = null;
+    state.instrumentRecordDestination = null;
+    toast(event.error?.message || 'Instrument recording failed');
+    if (state.modal === 'instruments') openInstruments();
+  };
+  recorder.onstop = async () => {
+    bus.disconnect(capture);
+    capture.stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    state.instrumentRecorder = null;
+    state.instrumentRecordDestination = null;
+    state.instrumentRecording = false;
+    clearInterval(state.instrumentRecordTimer);
+    state.instrumentRecordTimer = null;
+    if (state.modal === 'instruments') openInstruments();
+
+    const type = recorder.mimeType || mimeType || 'audio/webm';
+    const blob = new Blob(chunks, { type });
+    if (!blob.size) {
+      toast('No instrument audio was captured');
+      return;
+    }
+
+    try {
+      const buffer = await engine.decode(await blob.arrayBuffer());
+      const peaks = computePeaks(buffer);
+      if (!hasAudibleContent(buffer)) {
+        toast('Play an instrument before stopping the take');
+        return;
+      }
+      const session = state.store.sessions.find((item) => item.id === sessionID);
+      const destinationTrack = session?.tracks.find((item) => item.id === trackID);
+      if (!session || !destinationTrack) {
+        toast('The recording destination is no longer available');
+        return;
+      }
+
+      if (state.session.id === sessionID) snapshot();
+      const extension = type.includes('mp4') ? 'm4a' : 'webm';
+      const fileName = `${safeName(takeName)}-${Date.now()}.${extension}`;
+      const fileId = await model.saveFile(blob, fileName);
+      const clipName = `${takeName} ${destinationTrack.clips.length + 1}`;
+      destinationTrack.clips.push({
+        id: model.uid(),
+        name: clipName,
+        fileId,
+        start: position,
+        duration: buffer.duration,
+        sourceStart: 0,
+        sourceDuration: buffer.duration
+      });
+      destinationTrack.clips.sort((left, right) => left.start - right.start);
+      session.editedAt = Date.now();
+      state.buffers.set(fileId, buffer);
+      engine.buffers.set(fileId, buffer);
+      state.peaks.set(fileId, peaks);
+      model.saveStore(state.store);
+      if (state.session.id === sessionID) {
+        persist();
+        engine.rebuild();
+        render();
+      }
+      toast(`Recorded ${clipName} at ${model.formatTime(position)}`);
+    } catch (error) {
+      toast(error.message || 'The instrument take could not be added to the session');
+    }
+  };
+
+  const startedAt = Date.now();
+  state.instrumentRecorder = recorder;
+  state.instrumentRecordDestination = capture;
+  state.instrumentRecordChunks = chunks;
+  state.instrumentRecordTrackId = trackID;
+  state.instrumentRecordStartTime = position;
+  state.instrumentRecordStartWall = startedAt;
+  state.instrumentRecordTakeName = takeName;
+  state.instrumentRecordDuration = 0;
+
+  try {
+    recorder.start();
+  } catch (error) {
+    bus.disconnect(capture);
+    capture.stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    state.instrumentRecorder = null;
+    state.instrumentRecordDestination = null;
+    toast('Instrument recording could not start');
+    return;
+  }
+
+  state.instrumentRecording = true;
+  if (!engine.isPlaying) engine.play(position);
+  state.instrumentRecordTimer = setInterval(() => {
+    state.instrumentRecordDuration = Math.max(0, (Date.now() - startedAt) / 1000);
+    const time = document.getElementById('instrumentRecordTime');
+    if (time) time.textContent = model.formatTime(state.instrumentRecordDuration);
+  }, 100);
+  openInstruments();
+  toast(`Recording to ${track.name}`);
+}
+
+function stopInstrumentRecording(refresh = true) {
+  if (!state.instrumentRecording || !state.instrumentRecorder) return;
+  state.instrumentRecording = false;
+  state.instrumentRecordDuration = Math.max(0, (Date.now() - state.instrumentRecordStartWall) / 1000);
+  clearInterval(state.instrumentRecordTimer);
+  state.instrumentRecordTimer = null;
+  try {
+    if (state.instrumentRecorder.state === 'recording') state.instrumentRecorder.stop();
+  } catch (error) {
+    toast('Instrument recording could not be stopped cleanly');
+  }
+  if (refresh && state.modal === 'instruments') openInstruments();
 }
 
 function instrumentValueLabel(key) {
@@ -1964,6 +2552,12 @@ function instrumentValueLabel(key) {
     case 'tb303Resonance': return `${Math.round(state.tb303Resonance * 100)}%`;
     case 'tb303Envelope': return `${Math.round(state.tb303Envelope * 100)}%`;
     case 'tb303Decay': return `${Math.round(state.tb303Decay * 1000)} ms`;
+    case 'tb303Tuning': return `${Number(state.tb303Tuning).toFixed(2)}×`;
+    case 'tb303Level': return `${Math.round(state.tb303Level * 100)}%`;
+    case 'drumVolume': return `${Math.round(state.drumVolume * 100)}%`;
+    case 'drumTuning': return `${Number(state.drumTuning).toFixed(2)}×`;
+    case 'drumDecay': return `${Math.round(state.drumDecay * 100)}%`;
+    case 'drumTone': return `${Math.round(state.drumTone * 100)}%`;
     default: return '';
   }
 }
@@ -1972,6 +2566,17 @@ function instrumentSliderField(title, key, min, max, step) {
   return `<div class="field">
     <div class="label-row"><span>${title}</span><span data-instrument-value="${key}">${instrumentValueLabel(key)}</span></div>
     <input type="range" min="${min}" max="${max}" step="${step}" value="${state[key]}" data-instrument-slider="${key}">
+  </div>`;
+}
+
+function instrumentKnobField(title, key, min, max, step) {
+  const progress = model.clamp((state[key] - min) / (max - min), 0, 1);
+  const angle = -135 + progress * 270;
+  return `<div class="hardware-knob" data-hardware-knob="${key}">
+    <div class="knob-face" data-knob-face="${key}" style="--knob-angle:${angle}deg"><span class="knob-marker"></span><span class="knob-hub"></span></div>
+    <span class="knob-label">${title}</span>
+    <span class="knob-value" data-instrument-value="${key}">${instrumentValueLabel(key)}</span>
+    <input class="knob-accessibility-input" type="range" min="${min}" max="${max}" step="${step}" value="${state[key]}" data-instrument-slider="${key}" aria-label="${title}">
   </div>`;
 }
 
@@ -1987,7 +2592,13 @@ function instrumentNoteButtons(from, to, attribute) {
 function instrumentTabContent() {
   if (state.instrumentTab === 'drums') {
     return `<div class="panel">
-      <h3>808 DRUM MACHINE</h3>
+      <h3>808 RHYTHM COMPOSER</h3>
+      <div class="hardware-knob-bank drum-knob-bank">
+        ${instrumentKnobField('LEVEL', 'drumVolume', 0, 1, 0.01)}
+        ${instrumentKnobField('TUNE', 'drumTuning', 0.5, 1.5, 0.01)}
+        ${instrumentKnobField('DECAY', 'drumDecay', 0.4, 2, 0.01)}
+        ${instrumentKnobField('TONE', 'drumTone', 0, 1, 0.01)}
+      </div>
       <div class="pads">
         ${DRUM_PADS.map((pad) => `<button class="pad" data-drum="${pad.id}">${pad.name}</button>`).join('')}
       </div>
@@ -2001,10 +2612,14 @@ function instrumentTabContent() {
         ${['sawtooth', 'square'].map((wave) => `<button class="pill ${state.tb303Waveform === wave ? 'on' : ''}" data-tb-wave="${wave}">${wave === 'sawtooth' ? 'SAW' : 'SQUARE'}</button>`).join('')}
         <button class="pill ${state.tb303Accent ? 'on' : ''}" data-tb-accent>ACCENT</button>
       </div>
-      ${instrumentSliderField('Cutoff', 'tb303Cutoff', 100, 6000, 10)}
-      ${instrumentSliderField('Resonance', 'tb303Resonance', 0, 1, 0.01)}
-      ${instrumentSliderField('Envelope', 'tb303Envelope', 0, 1, 0.01)}
-      ${instrumentSliderField('Decay', 'tb303Decay', 0.16, 1.2, 0.01)}
+      <div class="hardware-knob-bank tb303-knob-bank">
+        ${instrumentKnobField('TUNE', 'tb303Tuning', 0.5, 1.5, 0.01)}
+        ${instrumentKnobField('CUTOFF', 'tb303Cutoff', 100, 6000, 10)}
+        ${instrumentKnobField('RESONANCE', 'tb303Resonance', 0, 1, 0.01)}
+        ${instrumentKnobField('ENV MOD', 'tb303Envelope', 0, 1, 0.01)}
+        ${instrumentKnobField('DECAY', 'tb303Decay', 0.16, 1.2, 0.01)}
+        ${instrumentKnobField('LEVEL', 'tb303Level', 0, 1, 0.01)}
+      </div>
       <div class="keys" style="margin-top:10px">
         ${instrumentNoteButtons(36, 48, 'tb-note')}
       </div>
@@ -2064,6 +2679,10 @@ function openInstruments() {
     state.instrumentTrackId = state.session.tracks[0].id;
   }
 
+  if (!state.session.tracks.some((track) => track.id === state.instrumentTrackId)) {
+    state.instrumentTrackId = state.session.tracks[0]?.id ?? null;
+  }
+
   const destinationOptions = [
     `<option value="" ${state.instrumentTrackId ? '' : 'selected'}>Master Output</option>`,
     ...state.session.tracks.map((track) => (
@@ -2074,6 +2693,11 @@ function openInstruments() {
   const tabs = [['synth', 'SYNTH'], ['drums', 'DRUMS'], ['tb303', '303'], ['sampler', 'SAMPLER']]
     .map(([id, label]) => `<button class="pill ${state.instrumentTab === id ? 'on' : ''}" data-instrument-tab="${id}">${label}</button>`)
     .join('');
+  const recordTrack = trackById(state.instrumentTrackId);
+  const canRecord = Boolean(recordTrack) && (state.instrumentTab !== 'sampler' || Boolean(state.samplerBuffer));
+  const recordStatus = state.instrumentRecording
+    ? `CAPTURING TO ${recordTrack?.name || 'TRACK'}`
+    : recordTrack ? `ARMED FOR ${recordTrack.name.toUpperCase()}` : 'CHOOSE A TRACK TO RECORD';
 
   openModal(`
     <header class="modal-header">
@@ -2086,10 +2710,20 @@ function openInstruments() {
     <div class="modal-body">
       <div class="field">
         <div class="label-row"><span>Destination</span></div>
-        <select id="instrumentDestination" style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
+        <select id="instrumentDestination" ${state.instrumentRecording ? 'disabled' : ''} style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
           ${destinationOptions}
         </select>
       </div>
+      <div class="instrument-record-bar ${state.instrumentRecording ? 'recording' : ''}">
+        <span class="record-light"></span>
+        <div class="instrument-record-meta">
+          <strong>${state.instrumentRecording ? 'RECORDING PERFORMANCE' : 'RECORD TO SONG'}</strong>
+          <span>${escapeHtml(recordStatus)}</span>
+        </div>
+        <span class="instrument-record-time" id="instrumentRecordTime">${model.formatTime(state.instrumentRecordDuration)}</span>
+        <button class="instrument-record-button ${state.instrumentRecording ? 'recording' : ''}" data-instrument-record ${state.instrumentRecording || canRecord ? '' : 'disabled'}>${state.instrumentRecording ? 'STOP' : 'REC'}</button>
+      </div>
+      <p class="instrument-record-hint">Play any instrument; your take is placed at the current playhead.</p>
       <div class="control-row" style="padding:0 0 10px">${tabs}</div>
       ${instrumentTabContent()}
     </div>`, { tall: true });
@@ -2102,6 +2736,14 @@ function bindInstrumentControls() {
   if (destination) {
     destination.addEventListener('change', () => {
       state.instrumentTrackId = destination.value || null;
+    });
+  }
+
+  const recordButton = el.modalRoot.querySelector('[data-instrument-record]');
+  if (recordButton) {
+    recordButton.addEventListener('click', () => {
+      if (state.instrumentRecording) stopInstrumentRecording();
+      else startInstrumentRecording();
     });
   }
 
@@ -2132,6 +2774,30 @@ function bindInstrumentControls() {
       state[key] = Number(input.value);
       const label = el.modalRoot.querySelector(`[data-instrument-value="${key}"]`);
       if (label) label.textContent = instrumentValueLabel(key);
+      const face = el.modalRoot.querySelector(`[data-knob-face="${key}"]`);
+      if (face) {
+        const minimum = Number(input.min);
+        const maximum = Number(input.max);
+        const progress = model.clamp((Number(input.value) - minimum) / (maximum - minimum), 0, 1);
+        face.style.setProperty('--knob-angle', `${-135 + progress * 270}deg`);
+      }
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-hardware-knob]').forEach((knob) => {
+    knob.addEventListener('pointerdown', (event) => {
+      const input = knob.querySelector('[data-instrument-slider]');
+      if (!input || event.target === input) return;
+      event.preventDefault();
+      const startY = event.clientY;
+      const origin = Number(input.value);
+      const minimum = Number(input.min);
+      const maximum = Number(input.max);
+      startDrag((moveEvent) => {
+        const change = (startY - moveEvent.clientY) / 125 * (maximum - minimum);
+        input.value = String(model.clamp(origin + change, minimum, maximum));
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
     });
   });
 
@@ -2153,7 +2819,12 @@ function bindInstrumentControls() {
 
   el.modalRoot.querySelectorAll('[data-drum]').forEach((button) => {
     button.addEventListener('click', () => {
-      instrumentEngineInstance().playDrum(button.dataset.drum, instrumentDestination());
+      instrumentEngineInstance().playDrum(button.dataset.drum, instrumentDestination(), {
+        volume: state.drumVolume,
+        tuning: state.drumTuning,
+        decay: state.drumDecay,
+        tone: state.drumTone
+      });
     });
   });
 
@@ -2221,7 +2892,9 @@ function playTB303(pitch) {
     resonance: state.tb303Resonance,
     envelopeAmount: state.tb303Envelope,
     decay: state.tb303Decay,
-    accent: state.tb303Accent
+    accent: state.tb303Accent,
+    tuning: state.tb303Tuning,
+    level: state.tb303Level
   }, instrumentDestination());
 }
 
@@ -2244,27 +2917,29 @@ async function loadStarterSound(file) {
 
 function openTemplates() {
   state.modal = 'templates';
-
-  const cards = model.SESSION_TEMPLATES.map((template) => {
+  const templates = [...state.customTemplates, ...model.SESSION_TEMPLATES];
+  const cards = templates.map((template) => {
     const lanes = template.tracks.map((slot, index) => `
-      <div class="tpl-lane" style="--lane:${model.trackColor(index)}">
+      <div class="tpl-lane" style="--lane:${model.trackColor(slot.colorIndex ?? index)}">
         <span class="tpl-lane-name">${escapeHtml(slot.name)}</span>
         <span class="tpl-lane-meta">${model.dbLabel(slot.volume)} ${model.panLabel(slot.pan ?? 0)}</span>
       </div>`).join('');
     const count = template.tracks.length;
-
-    return `<button class="tpl-card" data-template="${template.id}">
+    return `<article class="tpl-card">
       <div class="tpl-head">
         <div class="tpl-name">
           <strong>${escapeHtml(template.name)}</strong>
-          ${template.suggested ? '<span class="tpl-tag">SUGGESTED</span>' : ''}
+          ${template.custom ? '<span class="tpl-tag">CUSTOM</span>' : (template.suggested ? '<span class="tpl-tag">SUGGESTED</span>' : '')}
         </div>
         <span class="tpl-meta">${count} ${count === 1 ? 'TRACK' : 'TRACKS'} · ${template.tempo} BPM</span>
       </div>
       <p class="tpl-desc">${escapeHtml(template.summary)}</p>
       <div class="tpl-lanes">${lanes}</div>
-      <span class="tpl-cta">Create Session →</span>
-    </button>`;
+      <div class="tpl-actions">
+        <button class="tpl-create" data-template="${template.id}">Create Session →</button>
+        ${template.custom ? `<button class="tpl-delete" data-template-delete="${template.id}" aria-label="Delete ${escapeHtml(template.name)}">Delete</button>` : ''}
+      </div>
+    </article>`;
   }).join('');
 
   openModal(`
@@ -2282,7 +2957,7 @@ function openTemplates() {
 
   el.modalRoot.querySelectorAll('[data-template]').forEach((button) => {
     button.addEventListener('click', () => {
-      const template = model.SESSION_TEMPLATES.find((item) => item.id === button.dataset.template);
+      const template = templates.find((item) => item.id === button.dataset.template);
       if (!template) return;
       const session = model.createSessionFromTemplate(template, uniqueSessionName(template.name));
       state.store.sessions.push(session);
@@ -2291,6 +2966,15 @@ function openTemplates() {
       closeModal();
       adoptSession(session);
       toast(`${template.name} session created`);
+    });
+  });
+  el.modalRoot.querySelectorAll('[data-template-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const template = state.customTemplates.find((item) => item.id === button.dataset.templateDelete);
+      if (!template || !window.confirm(`Delete template "${template.name}"?`)) return;
+      state.customTemplates = state.customTemplates.filter((item) => item.id !== template.id);
+      model.saveCustomTemplates(state.customTemplates);
+      openTemplates();
     });
   });
 }
@@ -2321,6 +3005,7 @@ function openSessions() {
     </header>
     <div class="modal-body"><div class="list">${rows}</div></div>
     <footer class="modal-footer">
+      <button class="tool" id="saveSessionTemplateBtn" ${state.session.tracks.length ? '' : 'disabled'}>Save as Template</button>
       <button class="tool primary" id="newSessionBtn">+ New Session</button>
     </footer>`);
 
@@ -2332,6 +3017,16 @@ function openSessions() {
     closeModal();
     adoptSession(session);
     toast('New session created');
+  });
+
+  document.getElementById('saveSessionTemplateBtn').addEventListener('click', () => {
+    const entered = window.prompt('Template name', `${state.session.name} Template`);
+    if (entered === null) return;
+    const template = model.createCustomTemplate(state.session, entered.trim() || `${state.session.name} Template`);
+    state.customTemplates.unshift(template);
+    model.saveCustomTemplates(state.customTemplates);
+    openSessions();
+    toast(`Template "${template.name}" saved`);
   });
 
   el.modalRoot.querySelectorAll('[data-session-open]').forEach((button) => {
@@ -2369,11 +3064,21 @@ function openSessions() {
       const copy = JSON.parse(JSON.stringify(session));
       copy.id = model.uid();
       copy.name = uniqueSessionName(`${session.name} Copy`);
-      copy.tracks = copy.tracks.map((track) => ({
-        ...track,
+      const trackIDs = new Map();
+      copy.tracks = copy.tracks.map((track) => {
+        const newID = model.uid();
+        trackIDs.set(track.id, newID);
+        return {
+          ...track,
+          id: newID,
+          clips: track.clips.map((clip) => ({ ...clip, id: model.uid() })),
+          notes: track.notes.map((note) => ({ ...note, id: model.uid() }))
+        };
+      });
+      copy.groups = (copy.groups || []).map((group) => ({
+        ...group,
         id: model.uid(),
-        clips: track.clips.map((clip) => ({ ...clip, id: model.uid() })),
-        notes: track.notes.map((note) => ({ ...note, id: model.uid() }))
+        trackIDs: group.trackIDs.map((id) => trackIDs.get(id)).filter(Boolean)
       }));
       state.store.sessions.push(copy);
       model.saveStore(state.store);
@@ -2847,6 +3552,12 @@ function boot() {
   engine.setSession(state.session);
   ensureClipToolbar();
   state.presets = loadPresets();
+  state.customTemplates = model.loadCustomTemplates();
+  try {
+    state.bounceSettings = JSON.parse(localStorage.getItem('ai-studio.web.bounce-settings.v1') || 'null');
+  } catch (error) {
+    state.bounceSettings = null;
+  }
   bindEvents();
   render();
   requestAnimationFrame(frame);
