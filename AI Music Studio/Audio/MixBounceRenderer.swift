@@ -112,13 +112,12 @@ enum MixBounceRenderer {
             }
 
             for note in track.sequencedNotes {
-                guard let buffer = InstrumentSoundGenerator.synthNote(
+                let noteDuration = note.duration
+                    + (track.voice == .synth ? SynthNoteVoice.release : track.voice.releaseTail)
+                guard let buffer = InstrumentSoundGenerator.voicedNote(
                     frequency: SynthNote.frequency(for: note.pitch),
-                    waveform: SynthNoteVoice.waveform,
-                    cutoff: SynthNoteVoice.cutoff,
-                    attack: SynthNoteVoice.attack,
-                    release: SynthNoteVoice.release,
-                    duration: note.duration + SynthNoteVoice.release,
+                    voice: track.voice,
+                    duration: noteDuration,
                     velocity: note.velocity,
                     format: outputFormat
                 ) else { continue }

@@ -324,4 +324,239 @@ enum InstrumentSoundGenerator {
 
         return buffer
     }
+
+    // MARK: - Voiced instruments
+
+    /// Plays a note with the voice a track was arranged for.
+    static func voicedNote(
+        frequency: Double,
+        voice: TrackVoiceKind,
+        duration: Double,
+        velocity: Float = 1,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        switch voice {
+        case .synth:
+            return synthNote(
+                frequency: frequency,
+                waveform: SynthNoteVoice.waveform,
+                cutoff: SynthNoteVoice.cutoff,
+                attack: SynthNoteVoice.attack,
+                release: SynthNoteVoice.release,
+                duration: duration,
+                velocity: velocity,
+                format: format
+            )
+        case .marleneVocal:
+            return vocalNote(
+                frequency: frequency,
+                duration: duration,
+                velocity: velocity,
+                format: format
+            )
+        case .acousticGuitar, .electricGuitar, .distortedGuitar, .bassGuitar:
+            return pluckedNote(
+                frequency: frequency,
+                voice: voice,
+                duration: duration,
+                velocity: velocity,
+                format: format
+            )
+        }
+    }
+
+    /// A sung vowel note: a glottal saw shaped by three formants with a slow vibrato.
+    static func vocalNote(
+        frequency: Double,
+        duration: Double,
+        velocity: Float = 1,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        let noteDuration = min(6, max(0.2, duration))
+        let frameCount = max(1, Int(sampleRate * noteDuration))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
+              let channels = buffer.floatChannelData else { return nil }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        let channelCount = Int(format.channelCount)
+        // Formant centres and bandwidths for a female "ah" vowel.
+        let formants: [(frequency: Double, bandwidth: Double, gain: Double)] = [
+            (880, 90, 1.0),
+            (1_260, 110, 0.6),
+            (2_860, 170, 0.28),
+        ]
+        let attack = min(0.06, noteDuration * 0.3)
+        let release = min(0.26, noteDuration * 0.4)
+        let releaseStart = max(attack, noteDuration - release)
+        let safeVelocity = Double(min(1, max(0, velocity)))
+
+        for channel in 0..<channelCount {
+            var resonators = formants.map {
+                FormantResonator(frequency: $0.frequency, bandwidth: $0.bandwidth, sampleRate: sampleRate)
+            }
+            var phase = 0.0
+            var breath = 0.0
+
+            for frame in 0..<frameCount {
+                let time = Double(frame) / sampleRate
+                let vibrato = 1
+                    + 0.011 * sin(2 * Double.pi * 5.1 * time)
+                    + 0.004 * sin(2 * Double.pi * 0.7 * time)
+                phase += frequency * vibrato / sampleRate
+                phase -= phase.rounded(.down)
+
+                let glottal = 2 * phase - 1
+                let shaped = glottal * 0.75 + sin(2 * Double.pi * phase * 2) * 0.12
+                var sample = 0.0
+                for index in resonators.indices {
+                    sample += resonators[index].process(shaped) * formants[index].gain
+                }
+
+                let noise = Double.random(in: -1...1)
+                breath += 0.05 * (noise - breath)
+                sample += breath * 0.07
+
+                let envelope: Double
+                if time < attack {
+                    envelope = time / attack
+                } else if time > releaseStart {
+                    envelope = max(0, (noteDuration - time) / max(0.001, noteDuration - releaseStart))
+                } else {
+                    envelope = 1
+                }
+
+                channels[channel][frame] = Float(sample * envelope * 0.20 * safeVelocity)
+            }
+        }
+
+        return buffer
+    }
+
+    /// A plucked string rendered with a Karplus-Strong delay line.
+    static func pluckedNote(
+        frequency: Double,
+        voice: TrackVoiceKind,
+        duration: Double,
+        velocity: Float = 1,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        let safeFrequency = min(sampleRate * 0.4, max(30, frequency))
+
+        let decay: Double
+        let brightness: Double
+        let drive: Double
+        let level: Double
+        switch voice {
+        case .acousticGuitar:
+            decay = 1.6
+            brightness = 3_400
+            drive = 1.5
+            level = 0.32
+        case .electricGuitar:
+            decay = 2.1
+            brightness = 2_500
+            drive = 2.0
+            level = 0.29
+        case .distortedGuitar:
+            decay = 2.7
+            brightness = 2_000
+            drive = 5.2
+            level = 0.25
+        case .bassGuitar:
+            decay = 1.9
+            brightness = 900
+            drive = 1.8
+            level = 0.36
+        default:
+            decay = 1.5
+            brightness = 2_600
+            drive = 1.6
+            level = 0.3
+        }
+
+        let noteDuration = min(2.4, max(0.15, duration))
+        let frameCount = max(1, Int(sampleRate * noteDuration))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
+              let channels = buffer.floatChannelData else { return nil }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        let delayLength = max(2, Int(sampleRate / safeFrequency))
+        var delay = [Double](repeating: 0, count: delayLength)
+        let excitationCutoff = min(brightness, sampleRate * 0.4)
+        let excitationCoefficient = 1 - exp(-2 * Double.pi * excitationCutoff / sampleRate)
+        var filteredNoise = 0.0
+        var excitationMean = 0.0
+        for index in delay.indices {
+            let noise = Double.random(in: -1...1)
+            filteredNoise += excitationCoefficient * (noise - filteredNoise)
+            delay[index] = filteredNoise
+            excitationMean += filteredNoise
+        }
+        excitationMean /= Double(delayLength)
+        for index in delay.indices {
+            delay[index] -= excitationMean
+        }
+
+        let damping = pow(10, -3.0 / (decay * sampleRate))
+        let toneCoefficient = 1 - exp(-2 * Double.pi * min(brightness, 6_000) / sampleRate)
+        let releaseStart = noteDuration * 0.7
+        let safeVelocity = Double(min(1, max(0, velocity)))
+
+        var index = 0
+        var lowpassed = 0.0
+        var output = [Double](repeating: 0, count: frameCount)
+        for frame in 0..<frameCount {
+            let current = delay[index]
+            lowpassed += toneCoefficient * (current - lowpassed)
+
+            let next = (delay[index] + delay[(index + 1) % delayLength]) * 0.5 * damping
+            delay[index] = next
+            index = (index + 1) % delayLength
+
+            let time = Double(frame) / sampleRate
+            let envelope = time > releaseStart
+                ? max(0, (noteDuration - time) / max(0.001, noteDuration - releaseStart))
+                : 1
+
+            output[frame] = tanh(lowpassed * drive * 2.4) * envelope
+        }
+
+        for channel in 0..<Int(format.channelCount) {
+            for frame in 0..<frameCount {
+                channels[channel][frame] = Float(output[frame] * level * safeVelocity)
+            }
+        }
+
+        return buffer
+    }
+}
+
+/// Two-pole band-pass resonator used to shape the vocal formants.
+private struct FormantResonator {
+    private let b0: Double
+    private let b2: Double
+    private let a1: Double
+    private let a2: Double
+    private var z1 = 0.0
+    private var z2 = 0.0
+
+    init(frequency: Double, bandwidth: Double, sampleRate: Double) {
+        let safeFrequency = min(max(60, frequency), sampleRate * 0.45)
+        let w0 = 2 * Double.pi * safeFrequency / sampleRate
+        let alpha = sin(w0) * bandwidth / (2 * safeFrequency)
+        let a0 = 1 + alpha
+        b0 = alpha / a0
+        b2 = -alpha / a0
+        a1 = (-2 * cos(w0)) / a0
+        a2 = (1 - alpha) / a0
+    }
+
+    mutating func process(_ input: Double) -> Double {
+        let output = b0 * input + z1
+        z1 = -a1 * output + z2
+        z2 = b2 * input - a2 * output
+        return output
+    }
 }

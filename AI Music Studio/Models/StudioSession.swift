@@ -15,6 +15,8 @@ struct StudioSession: Identifiable, Codable, Equatable {
     var groups: [TrackGroup]
     var tempoBPM: Int
     var drumPattern: DrumPattern
+    /// Kit that shapes the synthesized drum voices of this session.
+    var drumKit: DrumKit
     /// Start of the timeline section that repeats during playback.
     var loopStart: TimeInterval
     /// End of the timeline section that repeats during playback.
@@ -38,6 +40,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         groups: [TrackGroup] = [],
         tempoBPM: Int = 120,
         drumPattern: DrumPattern = DrumPattern(),
+        drumKit: DrumKit = .studio808,
         loopStart: TimeInterval = 0,
         loopEnd: TimeInterval = 0,
         isLoopEnabled: Bool = false,
@@ -56,6 +59,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         self.groups = groups
         self.tempoBPM = tempoBPM
         self.drumPattern = drumPattern
+        self.drumKit = drumKit
         self.loopStart = loopStart
         self.loopEnd = loopEnd
         self.isLoopEnabled = isLoopEnabled
@@ -76,6 +80,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         case groups
         case tempoBPM
         case drumPattern
+        case drumKit
         case loopStart
         case loopEnd
         case isLoopEnabled
@@ -97,6 +102,7 @@ struct StudioSession: Identifiable, Codable, Equatable {
         groups = try values.decodeIfPresent([TrackGroup].self, forKey: .groups) ?? []
         tempoBPM = try values.decodeIfPresent(Int.self, forKey: .tempoBPM) ?? 120
         drumPattern = try values.decodeIfPresent(DrumPattern.self, forKey: .drumPattern) ?? DrumPattern()
+        drumKit = try values.decodeIfPresent(DrumKit.self, forKey: .drumKit) ?? .studio808
         loopStart = try values.decodeIfPresent(TimeInterval.self, forKey: .loopStart) ?? 0
         loopEnd = try values.decodeIfPresent(TimeInterval.self, forKey: .loopEnd) ?? 0
         isLoopEnabled = try values.decodeIfPresent(Bool.self, forKey: .isLoopEnabled) ?? false

@@ -620,9 +620,9 @@ final class MixerEngine {
             }
 
             if let track = mixTracks.first(where: { $0.id == id }), !track.sequencedNotes.isEmpty {
-                scheduleSynthNotes(
+                scheduleNotes(
                     track.sequencedNotes,
-                    trackID: id,
+                    track: track,
                     start: start,
                     end: end,
                     timeOffset: timeOffset
@@ -632,23 +632,23 @@ final class MixerEngine {
     }
 
     /// Schedules the track's piano-roll notes that start inside a timeline window.
-    private func scheduleSynthNotes(
+    private func scheduleNotes(
         _ notes: [SynthNote],
-        trackID: UUID,
+        track: Track,
         start: TimeInterval,
         end: TimeInterval,
         timeOffset: TimeInterval
     ) {
-        guard let players = notePlayers[trackID], !players.isEmpty,
-              let format = instrumentFormats[trackID] else { return }
+        guard let players = notePlayers[track.id], !players.isEmpty,
+              let format = instrumentFormats[track.id] else { return }
 
-        var busy = notePlayerBusy[trackID] ?? Array(repeating: 0, count: players.count)
+        var busy = notePlayerBusy[track.id] ?? Array(repeating: 0, count: players.count)
         if busy.count != players.count {
             busy = Array(repeating: 0, count: players.count)
         }
 
         for note in notes where note.startTime >= start && note.startTime < end {
-            guard let buffer = noteBuffer(for: note, trackID: trackID, format: format) else { continue }
+            guard let buffer = noteBuffer(for: note, track: track, format: format) else { continue }
 
             let index = busy.firstIndex(where: { $0 <= note.startTime })
                 ?? busy.indices.min(by: { busy[$0] < busy[$1] }) ?? 0
@@ -659,21 +659,20 @@ final class MixerEngine {
             players[index].scheduleBuffer(buffer, at: AVAudioTime(hostTime: hostTime), options: [])
         }
 
-        notePlayerBusy[trackID] = busy
+        notePlayerBusy[track.id] = busy
     }
 
-    /// Builds (and caches) the synth audio for one piano-roll note.
-    private func noteBuffer(for note: SynthNote, trackID: UUID, format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        let key = "\(trackID.uuidString)-\(note.pitch)-\(Int(note.duration * 1000))-\(Int(note.velocity * 100))"
+    /// Builds (and caches) the audio for one piano-roll note.
+    private func noteBuffer(for note: SynthNote, track: Track, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let voice = track.voice
+        let key = "\(track.id.uuidString)-\(voice.rawValue)-\(note.pitch)-\(Int(note.duration * 1000))-\(Int(note.velocity * 100))"
         if let cached = noteBufferCache[key] { return cached }
 
-        guard let buffer = InstrumentSoundGenerator.synthNote(
+        let duration = note.duration + (voice == .synth ? SynthNoteVoice.release : voice.releaseTail)
+        guard let buffer = InstrumentSoundGenerator.voicedNote(
             frequency: SynthNote.frequency(for: note.pitch),
-            waveform: SynthNoteVoice.waveform,
-            cutoff: SynthNoteVoice.cutoff,
-            attack: SynthNoteVoice.attack,
-            release: SynthNoteVoice.release,
-            duration: note.duration + SynthNoteVoice.release,
+            voice: voice,
+            duration: duration,
             velocity: note.velocity,
             format: format
         ) else { return nil }

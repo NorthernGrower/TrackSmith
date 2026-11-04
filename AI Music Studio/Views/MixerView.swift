@@ -149,6 +149,10 @@ struct MixerView: View {
                 TemplatesView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .songwriter:
+                SongwriterView(model: model)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
             case .mixer:
                 ChannelMixerView(model: model)
                     .presentationDetents([.large])
@@ -290,6 +294,11 @@ struct MixerView: View {
                 .accessibilityLabel("Master effects")
 
                 Menu {
+                    Button {
+                        activeSheet = .songwriter
+                    } label: {
+                        Label("AI Songwriter", systemImage: "sparkles")
+                    }
                     Button {
                         activeSheet = .templates
                     } label: {
@@ -452,6 +461,16 @@ struct MixerView: View {
             }
             .buttonStyle(.plain)
             .padding(.top, 2)
+
+            Button {
+                activeSheet = .songwriter
+            } label: {
+                Label("Write a Song with AI", systemImage: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.studioAccent)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -572,6 +591,7 @@ private enum StudioSheet: String, Identifiable {
     case channelPresets
     case pianoRoll
     case bounce
+    case songwriter
 
     var id: String { rawValue }
 }

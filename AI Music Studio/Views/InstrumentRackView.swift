@@ -402,6 +402,8 @@ struct InstrumentRackView: View {
             .pickerStyle(.segmented)
             .tint(Color(red: 0.82, green: 0.18, blue: 0.12))
 
+            drumKitPicker
+
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 4), spacing: 10) {
                 InstrumentKnob(title: "LEVEL", valueText: "\(Int(drumVolume * 100))%", value: $drumVolume, range: 0...1)
                 InstrumentKnob(title: "TUNE", valueText: String(format: "%.2f×", drumTuning), value: $drumTuning, range: 0.5...1.5)
@@ -423,6 +425,50 @@ struct InstrumentRackView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 13)
                 .stroke(Color(red: 0.67, green: 0.47, blue: 0.28).opacity(0.75), lineWidth: 1)
+        }
+    }
+
+    private var drumKitPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("KIT")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .tracking(0.8)
+                .foregroundStyle(Color(red: 0.88, green: 0.77, blue: 0.62).opacity(0.86))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(DrumKit.allCases) { kit in
+                        let isSelected = model.drumKit == kit
+                        Button {
+                            model.setDrumKit(kit)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: kit.systemImage)
+                                    .font(.system(size: 9, weight: .semibold))
+                                Text(kit.title.uppercased())
+                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 9)
+                            .frame(height: 28)
+                            .foregroundStyle(
+                                isSelected
+                                    ? Color(red: 0.24, green: 0.14, blue: 0.09)
+                                    : Color(red: 0.96, green: 0.86, blue: 0.69)
+                            )
+                            .background(
+                                isSelected
+                                    ? Color(red: 0.96, green: 0.72, blue: 0.34)
+                                    : Color(red: 0.20, green: 0.12, blue: 0.08),
+                                in: RoundedRectangle(cornerRadius: 6)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(kit.title) drum kit")
+                    }
+                }
+                .padding(.vertical, 2)
+            }
         }
     }
 

@@ -65,6 +65,8 @@ struct Track: Identifiable, Codable, Equatable {
     var volumeAutomationPoints: [VolumeAutomationPoint]
     var panAutomationPoints: [PanAutomationPoint]
     var notes: [SynthNote]
+    /// Instrument the track's piano-roll notes are played with.
+    var voice: TrackVoiceKind
     /// Rendered audio of this track while it is frozen.
     var frozenFileName: String?
     var frozenDuration: TimeInterval
@@ -84,6 +86,7 @@ struct Track: Identifiable, Codable, Equatable {
         volumeAutomationPoints: [VolumeAutomationPoint] = [],
         panAutomationPoints: [PanAutomationPoint] = [],
         notes: [SynthNote] = [],
+        voice: TrackVoiceKind = .synth,
         frozenFileName: String? = nil,
         frozenDuration: TimeInterval = 0
     ) {
@@ -109,6 +112,7 @@ struct Track: Identifiable, Codable, Equatable {
         self.volumeAutomationPoints = volumeAutomationPoints
         self.panAutomationPoints = panAutomationPoints
         self.notes = notes
+        self.voice = voice
         self.frozenFileName = frozenFileName
         self.frozenDuration = frozenDuration
         clipLayoutInitialized = true
@@ -128,6 +132,7 @@ struct Track: Identifiable, Codable, Equatable {
         case volumeAutomationPoints
         case panAutomationPoints
         case notes
+        case voice
         case frozenFileName
         case frozenDuration
         case clipLayoutInitialized
@@ -165,6 +170,7 @@ struct Track: Identifiable, Codable, Equatable {
         volumeAutomationPoints = try values.decodeIfPresent([VolumeAutomationPoint].self, forKey: .volumeAutomationPoints) ?? []
         panAutomationPoints = try values.decodeIfPresent([PanAutomationPoint].self, forKey: .panAutomationPoints) ?? []
         notes = try values.decodeIfPresent([SynthNote].self, forKey: .notes) ?? []
+        voice = try values.decodeIfPresent(TrackVoiceKind.self, forKey: .voice) ?? .synth
         frozenFileName = try values.decodeIfPresent(String.self, forKey: .frozenFileName)
         frozenDuration = try values.decodeIfPresent(TimeInterval.self, forKey: .frozenDuration) ?? 0
         clipLayoutInitialized = true

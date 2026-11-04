@@ -46,6 +46,7 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var isCountingIn = false
     @Published private(set) var countInBeatsRemaining = 0
     @Published private(set) var drumPattern = DrumPattern()
+    @Published private(set) var drumKit = DrumKit.studio808
     @Published private(set) var isDrumSequencerPlaying = false
     @Published private(set) var currentDrumStep: Int?
     @Published private(set) var canUndo = false
@@ -133,6 +134,7 @@ final class MixerViewModel: ObservableObject {
             groups = session.groups
             tempoBPM = min(200, max(60, session.tempoBPM))
             drumPattern = session.drumPattern
+            drumKit = session.drumKit
             loopStart = max(0, session.loopStart)
             loopEnd = max(loopStart, session.loopEnd)
             isLoopEnabled = session.isLoopEnabled
@@ -616,6 +618,28 @@ final class MixerViewModel: ObservableObject {
         activateSession(session)
     }
 
+    /// Opens a fully written session from the AI songwriter, keeping its tracks,
+    /// arrangement, tempo and drum kit.
+    func createSession(fromGenerated generated: StudioSession) {
+        prepareToLeaveCurrentSession()
+        persistActiveSession(markEdited: false)
+        var session = generated
+        session.name = uniqueSessionName(generated.name)
+        session.lastEdited = Date()
+        sessions.append(session)
+        activateSession(session)
+    }
+
+    /// Captures the current session's arrangement notes with a new voice.
+    func setVoice(_ trackID: UUID, voice: TrackVoiceKind) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }), tracks[index].voice != voice else {
+            return
+        }
+        tracks[index].voice = voice
+        engine.load(tracks: tracks)
+        commitSession()
+    }
+
     /// Captures the open session's tracks and mixer settings as a custom template.
     @discardableResult
     func saveCurrentSessionAsTemplate(name: String) -> SessionTemplate? {
@@ -724,6 +748,7 @@ final class MixerViewModel: ObservableObject {
         sessions[index].groups = groups
         sessions[index].tempoBPM = tempoBPM
         sessions[index].drumPattern = drumPattern
+        sessions[index].drumKit = drumKit
         sessions[index].loopStart = loopStart
         sessions[index].loopEnd = loopEnd
         sessions[index].isLoopEnabled = isLoopEnabled
@@ -758,6 +783,7 @@ final class MixerViewModel: ObservableObject {
         groups = session.groups
         tempoBPM = min(200, max(60, session.tempoBPM))
         drumPattern = session.drumPattern
+        drumKit = session.drumKit
         loopStart = max(0, session.loopStart)
         loopEnd = max(loopStart, session.loopEnd)
         isLoopEnabled = session.isLoopEnabled
@@ -928,13 +954,14 @@ final class MixerViewModel: ObservableObject {
         decay: Double = 1,
         tone: Double = 0.6
     ) {
+        let kit = drumKit
         guard let format = engine.instrumentFormat(for: destinationTrackID),
               let buffer = InstrumentSoundGenerator.drumHit(
                 pad,
-                volume: volume,
-                tuning: tuning,
-                decay: decay,
-                tone: tone,
+                volume: volume * kit.level,
+                tuning: tuning * kit.tuning,
+                decay: decay * kit.decay,
+                tone: tone * 0.35 + kit.tone * 0.65,
                 format: format
               ) else { return }
         engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID)
@@ -943,6 +970,13 @@ final class MixerViewModel: ObservableObject {
     func toggleDrumStep(_ pad: DrumPad, step: Int) {
         guard (0..<DrumPattern.stepCount).contains(step) else { return }
         drumPattern.toggle(pad, step: step)
+        persistActiveSession()
+    }
+
+    /// Switches the kit that voices the session's drum pattern.
+    func setDrumKit(_ kit: DrumKit) {
+        guard kit != drumKit else { return }
+        drumKit = kit
         persistActiveSession()
     }
 
