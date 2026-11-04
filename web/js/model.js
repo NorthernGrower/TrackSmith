@@ -460,16 +460,20 @@ export function saveStore(store) {
 
 const DB_NAME = 'ai-studio.web.audio';
 const DB_STORE = 'files';
+const DB_EXPORT_STORE = 'exports';
 let dbPromise = null;
 
 function openDb() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 1);
+      const request = indexedDB.open(DB_NAME, 2);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(DB_STORE)) {
           db.createObjectStore(DB_STORE);
+        }
+        if (!db.objectStoreNames.contains(DB_EXPORT_STORE)) {
+          db.createObjectStore(DB_EXPORT_STORE);
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -479,14 +483,18 @@ function openDb() {
   return dbPromise;
 }
 
-async function withStore(mode, action) {
+async function withStore(mode, action, storeName = DB_STORE) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(DB_STORE, mode);
-    const store = transaction.objectStore(DB_STORE);
+    const transaction = db.transaction(storeName, mode);
+    const store = transaction.objectStore(storeName);
     const request = action(store);
-    request.onsuccess = () => resolve(request.result);
+    let result;
+    request.onsuccess = () => { result = request.result; };
     request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error || request.error);
+    transaction.onabort = () => reject(transaction.error || new Error('IndexedDB transaction was aborted'));
   });
 }
 
@@ -501,4 +509,19 @@ export function loadFile(id) {
 
 export function removeFile(id) {
   return withStore('readwrite', (store) => store.delete(id));
+}
+
+export function saveExport(exportItem) {
+  const id = uid();
+  const entry = { ...exportItem, id };
+  return withStore('readwrite', (store) => store.put(entry, id), DB_EXPORT_STORE).then(() => id);
+}
+
+export function listExports() {
+  return withStore('readonly', (store) => store.getAll(), DB_EXPORT_STORE)
+    .then((entries) => entries.sort((left, right) => right.createdAt - left.createdAt));
+}
+
+export function removeExport(id) {
+  return withStore('readwrite', (store) => store.delete(id), DB_EXPORT_STORE);
 }

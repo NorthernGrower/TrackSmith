@@ -77,6 +77,15 @@ const state = {
   instrumentRecordTimer: null,
   instrumentRecording: false,
   instrumentRecordDuration: 0,
+  microphoneStream: null,
+  microphoneRecorder: null,
+  microphoneRecordTimer: null,
+  microphoneRecording: false,
+  microphoneFinalizing: false,
+  microphoneRequesting: false,
+  microphoneRequestID: 0,
+  microphoneRecordDuration: 0,
+  microphoneRecordStartWall: 0,
   modal: null
 };
 
@@ -1039,9 +1048,30 @@ async function renderBounce(mode, settings, exportContext = null) {
   renderTransport();
   toast(mode === 'stems' ? 'Rendering stems…' : 'Bouncing mix…');
   const extension = settings.format === 'm4a' ? 'm4a' : 'wav';
+  const sessionID = state.session.id;
+  const sessionName = state.session.name;
+  let librarySaveFailed = false;
   const makeBlob = async (buffer) => settings.format === 'm4a'
     ? encodeM4A(buffer, exportContext)
     : encodeWav(buffer, settings.bitDepth);
+  const saveAndDownload = async (blob, name, kind, duration) => {
+    try {
+      await model.saveExport({
+        name,
+        kind,
+        format: extension.toUpperCase(),
+        duration,
+        sessionID,
+        sessionName,
+        createdAt: Date.now(),
+        blob
+      });
+    } catch (error) {
+      console.warn('Could not save bounce to the export library', error);
+      librarySaveFailed = true;
+    }
+    download(blob, name);
+  };
 
   try {
     if (mode === 'stems') {
@@ -1049,18 +1079,20 @@ async function renderBounce(mode, settings, exportContext = null) {
       for (const track of tracks) {
         const buffer = await engine.renderStem(track, { sampleRate: settings.sampleRate, normalize: settings.normalize });
         const blob = await makeBlob(buffer);
-        download(blob, `${safeName(settings.fileName)} - ${safeName(track.name)}.${extension}`);
+        const name = `${safeName(settings.fileName)} - ${safeName(track.name)}.${extension}`;
+        await saveAndDownload(blob, name, 'stem', buffer.duration);
         await new Promise((resolve) => setTimeout(resolve, 350));
       }
-      toast(`${tracks.length} stems exported`);
+      toast(librarySaveFailed ? `${tracks.length} stems exported; library save failed` : `${tracks.length} stems exported`);
     } else {
       const buffer = await engine.renderMix({
         masterVolume: state.session.masterVolume,
         sampleRate: settings.sampleRate,
         normalize: settings.normalize
       });
-      download(await makeBlob(buffer), `${safeName(settings.fileName)}.${extension}`);
-      toast('Bounce complete');
+      const blob = await makeBlob(buffer);
+      await saveAndDownload(blob, `${safeName(settings.fileName)}.${extension}`, 'mix', buffer.duration);
+      toast(librarySaveFailed ? 'Bounce downloaded; library save failed' : 'Bounce complete');
     }
   } catch (error) {
     toast(error.message || 'Bounce failed');
@@ -1679,6 +1711,14 @@ function openModal(html, { tall = false } = {}) {
 
 function closeModal() {
   if (state.instrumentRecording) stopInstrumentRecording(false);
+  if (state.microphoneRequesting) {
+    state.microphoneRequesting = false;
+    state.microphoneRequestID += 1;
+  }
+  if (state.microphoneRecording) stopMicrophoneRecording(false);
+  state.sessionsRequestID = (state.sessionsRequestID || 0) + 1;
+  (state.exportPreviewURLs || []).forEach((url) => URL.revokeObjectURL(url));
+  state.exportPreviewURLs = [];
   state.modal = null;
   el.modalRoot.innerHTML = '';
   el.modalRoot.style.pointerEvents = 'none';
@@ -2565,6 +2605,213 @@ function stopInstrumentRecording(refresh = true) {
   if (refresh && state.modal === 'instruments') openInstruments();
 }
 
+async function startMicrophoneRecording() {
+  if (state.microphoneRecording || state.microphoneFinalizing || state.microphoneRequesting || state.microphoneRecorder) return;
+
+  const track = trackById(state.instrumentTrackId);
+  if (!track) {
+    toast('Choose a session track as the microphone destination');
+    return;
+  }
+  if (state.instrumentRecording) {
+    toast('Stop the instrument take before recording the microphone');
+    return;
+  }
+
+  const mediaDevices = navigator.mediaDevices;
+  const Recorder = window.MediaRecorder;
+  if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function' || !Recorder) {
+    toast('Microphone recording requires a supported browser over HTTPS');
+    return;
+  }
+
+  const sessionID = state.session.id;
+  const trackID = track.id;
+  const requestID = state.microphoneRequestID + 1;
+  state.microphoneRequestID = requestID;
+  state.microphoneRequesting = true;
+  if (state.modal === 'instruments') openInstruments();
+
+  let stream;
+  try {
+    stream = await mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (error) {
+    if (requestID !== state.microphoneRequestID) return;
+    state.microphoneRequesting = false;
+    if (state.modal === 'instruments') openInstruments();
+    const denied = error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError' || error?.name === 'SecurityError';
+    toast(denied ? 'Microphone access was denied. Allow it in your browser settings to record.' : 'Could not access a microphone');
+    return;
+  }
+
+  if (requestID !== state.microphoneRequestID) {
+    stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    return;
+  }
+  state.microphoneRequesting = false;
+
+  const session = state.store.sessions.find((item) => item.id === sessionID);
+  const destinationTrack = session?.tracks.find((item) => item.id === trackID);
+  if (!session || !destinationTrack || state.session.id !== sessionID) {
+    stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    if (state.modal === 'instruments') openInstruments();
+    toast('The microphone destination is no longer available');
+    return;
+  }
+  if (!stream.getAudioTracks().length) {
+    stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    if (state.modal === 'instruments') openInstruments();
+    toast('No microphone input is available');
+    return;
+  }
+
+  const mimeType = instrumentRecordingMimeType();
+  let recorder;
+  try {
+    recorder = mimeType ? new Recorder(stream, { mimeType }) : new Recorder(stream);
+  } catch (error) {
+    stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    if (state.modal === 'instruments') openInstruments();
+    toast('Microphone recording could not start in this browser');
+    return;
+  }
+
+  const startPosition = engine.isPlaying ? engine.getPosition() : engine.position;
+  const position = engine.duration() > 0 && startPosition >= engine.duration() ? 0 : Math.max(0, startPosition);
+  const chunks = [];
+  let recordingFailed = false;
+  const releaseStream = () => {
+    stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    if (state.microphoneStream === stream) state.microphoneStream = null;
+  };
+
+  recorder.ondataavailable = (event) => {
+    if (event.data?.size) chunks.push(event.data);
+  };
+  const finishMicrophoneFinalization = () => {
+    if (state.microphoneRecorder !== recorder) return;
+    state.microphoneRecorder = null;
+    state.microphoneFinalizing = false;
+    if (state.modal === 'instruments') openInstruments();
+  };
+  recorder.onerror = (event) => {
+    recordingFailed = true;
+    releaseStream();
+    clearInterval(state.microphoneRecordTimer);
+    state.microphoneRecordTimer = null;
+    if (state.microphoneRecorder === recorder) {
+      state.microphoneRecording = false;
+      state.microphoneFinalizing = true;
+    }
+    if (state.modal === 'instruments') openInstruments();
+    toast(event.error?.message || 'Microphone recording failed');
+  };
+  recorder.onstop = async () => {
+    releaseStream();
+    if (state.microphoneRecorder === recorder) {
+      state.microphoneRecording = false;
+      state.microphoneFinalizing = true;
+      state.microphoneRecordDuration = Math.max(0, (Date.now() - state.microphoneRecordStartWall) / 1000);
+      clearInterval(state.microphoneRecordTimer);
+      state.microphoneRecordTimer = null;
+      if (state.modal === 'instruments') openInstruments();
+    }
+    if (recordingFailed) {
+      finishMicrophoneFinalization();
+      return;
+    }
+
+    const type = recorder.mimeType || mimeType || 'audio/webm';
+    const blob = new Blob(chunks, { type });
+    if (!blob.size) {
+      finishMicrophoneFinalization();
+      toast('No microphone audio was captured');
+      return;
+    }
+
+    try {
+      const buffer = await engine.decode(await blob.arrayBuffer());
+      const currentSession = state.store.sessions.find((item) => item.id === sessionID);
+      const currentTrack = currentSession?.tracks.find((item) => item.id === trackID);
+      if (!currentSession || !currentTrack) {
+        toast('The microphone destination is no longer available');
+        return;
+      }
+
+      const extension = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+      const fileName = `Microphone-Take-${Date.now()}.${extension}`;
+      const fileId = await model.saveFile(blob, fileName);
+      const clipName = `Microphone Take ${currentTrack.clips.length + 1}`;
+      if (state.session.id === sessionID) snapshot();
+      currentTrack.clips.push({
+        id: model.uid(),
+        name: clipName,
+        fileId,
+        start: position,
+        duration: buffer.duration,
+        sourceStart: 0,
+        sourceDuration: buffer.duration
+      });
+      currentTrack.clips.sort((left, right) => left.start - right.start);
+      currentSession.editedAt = Date.now();
+      state.buffers.set(fileId, buffer);
+      engine.buffers.set(fileId, buffer);
+      state.peaks.set(fileId, computePeaks(buffer));
+      model.saveStore(state.store);
+      if (state.session.id === sessionID) {
+        persist();
+        engine.rebuild();
+        render();
+      }
+      toast(`Recorded ${clipName} at ${model.formatTime(position)}`);
+    } catch (error) {
+      toast(error.message || 'The microphone take could not be added to the session');
+    } finally {
+      finishMicrophoneFinalization();
+    }
+  };
+
+  const startedAt = Date.now();
+  state.microphoneRecorder = recorder;
+  state.microphoneStream = stream;
+  state.microphoneRecordDuration = 0;
+  state.microphoneRecordStartWall = startedAt;
+  try {
+    recorder.start();
+  } catch (error) {
+    releaseStream();
+    state.microphoneRecorder = null;
+    if (state.modal === 'instruments') openInstruments();
+    toast('Microphone recording could not start');
+    return;
+  }
+
+  state.microphoneRecording = true;
+  if (!engine.isPlaying) engine.play(position);
+  state.microphoneRecordTimer = setInterval(() => {
+    state.microphoneRecordDuration = Math.max(0, (Date.now() - startedAt) / 1000);
+    const time = document.getElementById('microphoneRecordTime');
+    if (time) time.textContent = model.formatTime(state.microphoneRecordDuration);
+  }, 100);
+  if (state.modal === 'instruments') openInstruments();
+  toast(`Recording microphone to ${destinationTrack.name}`);
+}
+
+function stopMicrophoneRecording(refresh = true) {
+  if (!state.microphoneRecording || !state.microphoneRecorder) return;
+  state.microphoneRecording = false;
+  state.microphoneFinalizing = true;
+  state.microphoneRecordDuration = Math.max(0, (Date.now() - state.microphoneRecordStartWall) / 1000);
+  clearInterval(state.microphoneRecordTimer);
+  state.microphoneRecordTimer = null;
+  try {
+    if (state.microphoneRecorder.state === 'recording') state.microphoneRecorder.stop();
+  } catch (error) {
+    toast('Microphone recording could not be stopped cleanly');
+  }
+  if (refresh && state.modal === 'instruments') openInstruments();
+}
+
 function instrumentValueLabel(key) {
   switch (key) {
     case 'synthCutoff': return `${Math.round(state.synthCutoff)} Hz`;
@@ -2769,10 +3016,24 @@ function openInstruments(destinationTrackID = null) {
     .map(([id, label]) => `<button class="pill ${state.instrumentTab === id ? 'on' : ''}" data-instrument-tab="${id}">${label}</button>`)
     .join('');
   const recordTrack = trackById(state.instrumentTrackId);
-  const canRecord = Boolean(recordTrack) && (state.instrumentTab !== 'sampler' || Boolean(state.samplerBuffer));
+  const canRecord = Boolean(recordTrack)
+    && (state.instrumentTab !== 'sampler' || Boolean(state.samplerBuffer))
+    && !state.microphoneRecording
+    && !state.microphoneFinalizing
+    && !state.microphoneRequesting;
+  const canRecordMicrophone = Boolean(recordTrack) && !state.instrumentRecording && !state.microphoneFinalizing;
+  const microphoneButtonDisabled = !state.microphoneRecording
+    && (state.microphoneRequesting || state.microphoneFinalizing || !canRecordMicrophone);
   const recordStatus = state.instrumentRecording
     ? `CAPTURING TO ${recordTrack?.name || 'TRACK'}`
     : recordTrack ? `ARMED FOR ${recordTrack.name.toUpperCase()}` : 'CHOOSE A TRACK TO RECORD';
+  const microphoneStatus = state.microphoneRecording
+    ? `CAPTURING TO ${recordTrack?.name || 'TRACK'}`
+    : state.microphoneRequesting
+      ? 'WAITING FOR MICROPHONE ACCESS'
+      : state.microphoneFinalizing
+        ? 'ADDING TAKE TO THE SESSION'
+        : recordTrack ? `READY FOR ${recordTrack.name.toUpperCase()}` : 'CHOOSE A TRACK TO RECORD';
 
   openModal(`
     <header class="modal-header">
@@ -2785,7 +3046,7 @@ function openInstruments(destinationTrackID = null) {
     <div class="modal-body">
       <div class="field">
         <div class="label-row"><span>Destination</span></div>
-        <select id="instrumentDestination" ${state.instrumentRecording ? 'disabled' : ''} style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
+        <select id="instrumentDestination" ${state.instrumentRecording || state.microphoneRecording || state.microphoneFinalizing || state.microphoneRequesting ? 'disabled' : ''} style="height:34px;border-radius:8px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 8px;font-family:'SF Mono',ui-monospace,monospace;font-size:11px">
           ${destinationOptions}
         </select>
       </div>
@@ -2799,6 +3060,16 @@ function openInstruments(destinationTrackID = null) {
         <button class="instrument-record-button ${state.instrumentRecording ? 'recording' : ''}" data-instrument-record ${state.instrumentRecording || canRecord ? '' : 'disabled'}>${state.instrumentRecording ? 'STOP' : 'REC'}</button>
       </div>
       <p class="instrument-record-hint">Play any instrument; your take is placed at the current playhead.</p>
+      <div class="instrument-record-bar microphone-record-bar ${state.microphoneRecording ? 'recording' : ''}">
+        <span class="record-light"></span>
+        <div class="instrument-record-meta">
+          <strong>${state.microphoneRecording ? 'RECORDING MICROPHONE' : state.microphoneRequesting ? 'REQUESTING MICROPHONE ACCESS' : state.microphoneFinalizing ? 'SAVING MICROPHONE TAKE' : 'RECORD FROM MICROPHONE'}</strong>
+          <span>${escapeHtml(microphoneStatus)}</span>
+        </div>
+        <span class="instrument-record-time" id="microphoneRecordTime">${model.formatTime(state.microphoneRecordDuration)}</span>
+        <button class="instrument-record-button ${state.microphoneRecording ? 'recording' : ''}" data-microphone-record ${microphoneButtonDisabled ? 'disabled' : ''}>${state.microphoneRecording ? 'STOP' : state.microphoneRequesting || state.microphoneFinalizing ? 'WAIT' : 'REC'}</button>
+      </div>
+      <p class="instrument-record-hint microphone-record-hint">Microphone access is requested only after you tap Record. The take starts at the current transport position.</p>
       <div class="control-row" style="padding:0 0 10px">${tabs}</div>
       ${instrumentTabContent()}
     </div>`, { tall: true });
@@ -2819,6 +3090,14 @@ function bindInstrumentControls() {
     recordButton.addEventListener('click', () => {
       if (state.instrumentRecording) stopInstrumentRecording();
       else startInstrumentRecording();
+    });
+  }
+
+  const microphoneButton = el.modalRoot.querySelector('[data-microphone-record]');
+  if (microphoneButton) {
+    microphoneButton.addEventListener('click', () => {
+      if (state.microphoneRecording) stopMicrophoneRecording();
+      else startMicrophoneRecording();
     });
   }
 
@@ -3070,8 +3349,20 @@ function openTemplates() {
   });
 }
 
-function openSessions() {
+async function openSessions() {
   state.modal = 'sessions';
+  const requestID = (state.sessionsRequestID || 0) + 1;
+  state.sessionsRequestID = requestID;
+  (state.exportPreviewURLs || []).forEach((url) => URL.revokeObjectURL(url));
+  state.exportPreviewURLs = [];
+  let exports = [];
+  try {
+    exports = await model.listExports();
+  } catch (error) {
+    console.warn('Could not load the export library', error);
+  }
+  if (state.sessionsRequestID !== requestID || state.modal !== 'sessions') return;
+
   const rows = state.store.sessions.map((session) => {
     const count = session.tracks.length;
     return `<div class="list-row ${session.id === state.session.id ? 'open' : ''}">
@@ -3088,13 +3379,38 @@ function openSessions() {
       </div>
     </div>`;
   }).join('');
+  const exportRows = exports.map((item) => {
+    const previewURL = URL.createObjectURL(item.blob);
+    state.exportPreviewURLs.push(previewURL);
+    const kind = item.kind === 'stem' ? 'STEM' : 'MIX';
+    const name = item.name || `${kind.toLowerCase()} export`;
+    return `<article class="export-row">
+      <div class="export-icon" aria-hidden="true">♫</div>
+      <div class="export-meta">
+        <strong title="${escapeHtml(name)}">${escapeHtml(name)}</strong>
+        <span>${kind} · ${escapeHtml(item.format || 'AUDIO')} · ${model.formatTime(item.duration)}</span>
+        <span class="export-session">${escapeHtml(item.sessionName || 'Untitled Session')}</span>
+      </div>
+      <audio class="export-preview" controls preload="none" src="${escapeHtml(previewURL)}" aria-label="Preview ${escapeHtml(name)}"></audio>
+      <div class="export-actions">
+        <button class="tool" data-export-download="${escapeHtml(item.id)}">Download</button>
+        <button class="icon-btn" data-export-delete="${escapeHtml(item.id)}" title="Delete" aria-label="Delete ${escapeHtml(name)}">×</button>
+      </div>
+    </article>`;
+  }).join('');
 
   openModal(`
     <header class="modal-header">
       <h2>Sessions</h2>
       <button class="modal-close" data-close>Done</button>
     </header>
-    <div class="modal-body"><div class="list">${rows}</div></div>
+    <div class="modal-body">
+      <div class="list">${rows}</div>
+      <section class="exports-section">
+        <div class="exports-heading"><h3>Exports</h3><span>${exports.length} SAVED</span></div>
+        <div class="export-list">${exportRows || '<p class="export-empty">No bounces yet. Render a mix or stems to build your library.</p>'}</div>
+      </section>
+    </div>
     <footer class="modal-footer">
       <button class="tool" id="saveSessionTemplateBtn" ${state.session.tracks.length ? '' : 'disabled'}>Save as Template</button>
       <button class="tool primary" id="newSessionBtn">+ New Session</button>
@@ -3118,6 +3434,27 @@ function openSessions() {
     model.saveCustomTemplates(state.customTemplates);
     openSessions();
     toast(`Template "${template.name}" saved`);
+  });
+
+  el.modalRoot.querySelectorAll('[data-export-download]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const item = exports.find((entry) => entry.id === button.dataset.exportDownload);
+      if (item?.blob) download(item.blob, item.name || 'audio-export');
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-export-delete]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const item = exports.find((entry) => entry.id === button.dataset.exportDelete);
+      if (!item || !window.confirm(`Delete export "${item.name}"?`)) return;
+      try {
+        await model.removeExport(item.id);
+        await openSessions();
+        toast('Export deleted');
+      } catch (error) {
+        toast('Could not delete this export');
+      }
+    });
   });
 
   el.modalRoot.querySelectorAll('[data-session-open]').forEach((button) => {

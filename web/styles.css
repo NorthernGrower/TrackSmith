@@ -1232,3 +1232,32 @@ button { cursor: pointer; }
   color: #a98f70;
   font: 8px "SF Mono", ui-monospace, Menlo, monospace;
 }
+
+
+
+/* Persistent bounce library in the Sessions sheet */
+.exports-section { margin-top: 22px; }
+.exports-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+.exports-heading h3 { margin: 0; color: var(--text); font-size: 12px; font-weight: 650; }
+.exports-heading span { color: var(--secondary); font: 8px "SF Mono", ui-monospace, Menlo, monospace; letter-spacing: .06em; }
+.export-list { display: flex; flex-direction: column; gap: 8px; }
+.export-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.export-icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 9px; background: rgba(245, 158, 42, .12); color: var(--accent); font-size: 18px; }
+.export-meta { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.export-meta strong { overflow: hidden; color: var(--text); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.export-meta span { overflow: hidden; color: var(--secondary); font: 8px "SF Mono", ui-monospace, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.export-meta .export-session { color: rgba(154, 154, 159, .72); }
+.export-preview { grid-column: 1 / -1; width: 100%; height: 34px; }
+.export-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 7px; }
+.export-actions .tool { min-height: 28px; padding: 0 10px; font-size: 9px; }
+.export-actions .icon-btn { width: 30px; height: 28px; color: #e18e86; }
+.export-empty { margin: 0; padding: 15px 12px; border: 1px dashed rgba(255, 255, 255, .14); border-radius: 10px; color: var(--secondary); font-size: 10px; line-height: 1.5; }
