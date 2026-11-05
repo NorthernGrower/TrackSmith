@@ -79,6 +79,8 @@ struct TransportBarView: View {
 
             loopControls
 
+            punchControls
+
             metronomeControls
 
             tempoControls
@@ -175,6 +177,94 @@ struct TransportBarView: View {
         newSectionID = id
         sectionDraft = model.sections.first(where: { $0.id == id })?.name ?? "Section"
         showingSectionName = true
+    }
+
+    // MARK: - Punch recording
+
+    private var punchControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.togglePunch()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "record.circle")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(model.isPunchEnabled ? "PUNCH ON" : "PUNCH")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.6)
+                }
+                .foregroundStyle(model.isPunchEnabled ? Color.black : Color.white.opacity(0.7))
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(
+                    model.isPunchEnabled ? Color.red : Color.studioPanelHighlight,
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(model.isPunchEnabled ? "Turn punch recording off" : "Turn punch recording on")
+            .accessibilityAddTraits(model.isPunchEnabled ? .isSelected : [])
+
+            Button {
+                model.setPunchIn(at: model.currentTime)
+            } label: {
+                Text("IN")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .frame(width: 32, height: 26)
+                    .foregroundStyle(Color.primary)
+                    .background(Color.studioPanelHighlight, in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Set punch in at the playhead")
+
+            Button {
+                model.setPunchOut(at: model.currentTime)
+            } label: {
+                Text("OUT")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .frame(width: 38, height: 26)
+                    .foregroundStyle(Color.primary)
+                    .background(Color.studioPanelHighlight, in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Set punch out at the playhead")
+
+            Text(model.hasPunchRange
+                ? "\(studioTimeString(model.punchIn)) – \(studioTimeString(model.punchOut))"
+                : "Set IN and OUT")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            Menu {
+                Button("No armed track") { model.armTrack(nil) }
+                ForEach(model.tracks) { track in
+                    Button {
+                        model.armTrack(track.id)
+                    } label: {
+                        if model.armedTrackID == track.id {
+                            Label(track.name, systemImage: "checkmark")
+                        } else {
+                            Text(track.name)
+                        }
+                    }
+                }
+            } label: {
+                Text(model.tracks.first(where: { $0.id == model.armedTrackID })?.name.uppercased() ?? "ARM TRACK")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.4)
+                    .lineLimit(1)
+                    .foregroundStyle(model.armedTrackID == nil ? Color.secondary : Color.red)
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(Color.studioPanelHighlight, in: RoundedRectangle(cornerRadius: 7))
+            }
+            .accessibilityLabel("Arm a track for punch recording")
+        }
+        .padding(.horizontal, 15)
+        .padding(.bottom, 8)
     }
 
     private var metronomeControls: some View {

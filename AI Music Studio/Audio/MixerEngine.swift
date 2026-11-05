@@ -84,6 +84,22 @@ final class MixerEngine {
     private let masterBus = AVAudioMixerNode()
     private let masterReverb = AVAudioUnitReverb()
     private let masterDelay = AVAudioUnitDelay()
+    private let masterEQ = AVAudioUnitEQ(numberOfBands: 3)
+    private let masterCompressor = TrackCompressorUnit.make()
+    private let masterLimiter = MasteringChainUnit.makeLimiter()
+    private let masterCeiling = AVAudioMixerNode()
+    private let loudnessMeter = LoudnessMeter()
+    private var masteringSettings = MasteringSettings()
+    private let auxAInput = AVAudioMixerNode()
+    private let auxBInput = AVAudioMixerNode()
+    private let auxAReverb = AVAudioUnitReverb()
+    private let auxBDelay = AVAudioUnitDelay()
+    private let auxAReturn = AVAudioMixerNode()
+    private let auxBReturn = AVAudioMixerNode()
+    private var trackSendA: [UUID: AVAudioMixerNode] = [:]
+    private var trackSendB: [UUID: AVAudioMixerNode] = [:]
+    private var auxBusASettings = AuxBusSettings.busA
+    private var auxBusBSettings = AuxBusSettings.busB
     private var masterEffectsSettings = MasterEffectsSettings()
     private var mixTracks: [Track] = []
     private var mixGroups: [TrackGroup] = []
@@ -132,10 +148,59 @@ final class MixerEngine {
         engine.attach(masterBus)
         engine.attach(masterReverb)
         engine.attach(masterDelay)
+        engine.attach(masterEQ)
+        engine.attach(masterCompressor)
+        engine.attach(masterLimiter)
+        engine.attach(masterCeiling)
         engine.connect(masterBus, to: masterReverb, format: format)
         engine.connect(masterReverb, to: masterDelay, format: format)
-        engine.connect(masterDelay, to: engine.mainMixerNode, format: format)
+        engine.connect(masterDelay, to: masterEQ, format: format)
+        engine.connect(masterEQ, to: masterCompressor, format: format)
+        engine.connect(masterCompressor, to: masterLimiter, format: format)
+        engine.connect(masterLimiter, to: masterCeiling, format: format)
+        engine.connect(masterCeiling, to: engine.mainMixerNode, format: format)
         applyMasterEffects()
+        applyMastering()
+
+        // The loudness meters read the true master output, after the chain.
+        let meter = loudnessMeter
+        masterCeiling.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            meter.ingest(buffer: buffer)
+        }
+
+        engine.attach(auxAInput)
+        engine.attach(auxAReverb)
+        engine.attach(auxAReturn)
+        engine.attach(auxBInput)
+        engine.attach(auxBDelay)
+        engine.attach(auxBReturn)
+        engine.connect(auxAInput, to: auxAReverb, format: format)
+        engine.connect(auxAReverb, to: auxAReturn, format: format)
+        engine.connect(auxAReturn, to: masterBus, format: format)
+        engine.connect(auxBInput, to: auxBDelay, format: format)
+        engine.connect(auxBDelay, to: auxBReturn, format: format)
+        engine.connect(auxBReturn, to: masterBus, format: format)
+        applyAuxBuses()
+    }
+
+    /// Applies both aux bus effects and their return levels.
+    func updateAuxBuses(a: AuxBusSettings, b: AuxBusSettings) {
+        auxBusASettings = a
+        auxBusBSettings = b
+        applyAuxBuses()
+    }
+
+    private func applyAuxBuses() {
+        let a = auxBusASettings
+        auxAReverb.loadFactoryPreset(reverbPreset(for: a.reverbDecay))
+        auxAReverb.wetDryMix = a.isBypassed ? 0 : Float(min(1, max(0, a.reverbMix)) * 100)
+        auxAReturn.outputVolume = a.isBypassed ? 0 : min(1, max(0, a.level))
+
+        let b = auxBusBSettings
+        auxBDelay.delayTime = min(2, max(0.01, b.delayBeats * 60 / Double(max(60, songTempoBPM))))
+        auxBDelay.feedback = b.isBypassed ? 0 : Float(min(0.9, max(0, b.delayFeedback)) * 100)
+        auxBDelay.wetDryMix = b.isBypassed ? 0 : Float(min(1, max(0, b.delayMix)) * 100)
+        auxBReturn.outputVolume = b.isBypassed ? 0 : min(1, max(0, b.level))
     }
 
     /// Applies the master reverb and delay settings.
@@ -155,6 +220,32 @@ final class MixerEngine {
         masterDelay.delayTime = settings.delaySeconds(tempoBPM: songTempoBPM)
         masterDelay.feedback = bypassed ? 0 : Float(min(0.9, max(0, settings.delayFeedback)) * 100)
         masterDelay.wetDryMix = bypassed ? 0 : Float(min(1, max(0, settings.delayMix)) * 100)
+    }
+
+    /// Applies the master EQ, bus compressor and limiter.
+    func updateMasterChain(_ settings: MasteringSettings) {
+        masteringSettings = settings
+        applyMastering()
+    }
+
+    private func applyMastering() {
+        MasteringChainUnit.configure(
+            eq: masterEQ,
+            compressor: masterCompressor,
+            limiter: masterLimiter,
+            ceiling: masterCeiling,
+            settings: masteringSettings
+        )
+    }
+
+    /// The latest loudness numbers of the master output.
+    func loudnessReading() -> LoudnessReading {
+        loudnessMeter.snapshot()
+    }
+
+    /// Clears the integrated loudness and peak hold for a fresh measurement.
+    func resetLoudness() {
+        loudnessMeter.reset()
     }
 
     private func reverbPreset(for decay: Double) -> AVAudioUnitReverbPreset {
@@ -247,6 +338,17 @@ final class MixerEngine {
             engine.connect(equalizer, to: compressor, format: format)
             engine.connect(compressor, to: masterBus, format: format)
 
+            let sendA = AVAudioMixerNode()
+            let sendB = AVAudioMixerNode()
+            engine.attach(sendA)
+            engine.attach(sendB)
+            engine.connect(compressor, to: sendA, format: format)
+            engine.connect(sendA, to: auxAInput, format: format)
+            engine.connect(compressor, to: sendB, format: format)
+            engine.connect(sendB, to: auxBInput, format: format)
+            trackSendA[track.id] = sendA
+            trackSendB[track.id] = sendB
+
             let store = levelStore
             let trackID = track.id
             mixer.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
@@ -315,6 +417,11 @@ final class MixerEngine {
     func updateAutomation(at time: TimeInterval) {
         automationTime = max(0, time)
         applyMix()
+        for track in mixTracks {
+            for loaded in clipPlayers[track.id] ?? [] {
+                loaded.player.volume = loaded.clip.gain(at: automationTime, in: track)
+            }
+        }
     }
 
     /// Applies group faders, mute and solo to the running mix.
@@ -338,6 +445,8 @@ final class MixerEngine {
                 ? track.pan
                 : track.panAutomationValue(at: automationTime)
             trackMixers[track.id]?.pan = min(1, max(-1, automatedPan))
+            trackSendA[track.id]?.outputVolume = audible ? min(1, max(0, track.sendA)) : 0
+            trackSendB[track.id]?.outputVolume = audible ? min(1, max(0, track.sendB)) : 0
         }
     }
 
@@ -510,6 +619,7 @@ final class MixerEngine {
         if metronomeEnabled {
             _ = ensureMetronomeGraph()
         }
+        loudnessMeter.reset()
         guard startAudioEngine() else { return }
 
         let loop = activeLoop

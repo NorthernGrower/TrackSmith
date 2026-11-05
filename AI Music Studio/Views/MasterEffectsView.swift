@@ -99,22 +99,24 @@ struct MasterEffectsView: View {
                 onCommit: { model.commitSession() }
             )
 
-            EffectKnobView(
-                title: "Decay",
-                valueText: String(format: "%.1f s", model.masterEffects.reverbDecay),
-                value: Binding(
-                    get: { model.masterEffects.reverbDecay },
-                    set: { newValue in
-                        var settings = model.masterEffects
-                        settings.reverbDecay = newValue
-                        model.updateMasterEffects(settings)
-                    }
-                ),
-                range: MasterEffectsSettings.reverbDecayRange,
-                step: 0.1,
-                onChange: {},
-                onCommit: { model.commitSession() }
-            )
+            if model.isProMode {
+                EffectKnobView(
+                    title: "Decay",
+                    valueText: String(format: "%.1f s", model.masterEffects.reverbDecay),
+                    value: Binding(
+                        get: { model.masterEffects.reverbDecay },
+                        set: { newValue in
+                            var settings = model.masterEffects
+                            settings.reverbDecay = newValue
+                            model.updateMasterEffects(settings)
+                        }
+                    ),
+                    range: MasterEffectsSettings.reverbDecayRange,
+                    step: 0.1,
+                    onChange: {},
+                    onCommit: { model.commitSession() }
+                )
+            }
         }
     }
 
@@ -137,22 +139,24 @@ struct MasterEffectsView: View {
                 onCommit: { model.commitSession() }
             )
 
-            EffectKnobView(
-                title: "Feedback",
-                valueText: "\(Int(model.masterEffects.delayFeedback * 100))%",
-                value: Binding(
-                    get: { model.masterEffects.delayFeedback },
-                    set: { newValue in
-                        var settings = model.masterEffects
-                        settings.delayFeedback = newValue
-                        model.updateMasterEffects(settings)
-                    }
-                ),
-                range: 0...0.9,
-                step: 0.01,
-                onChange: {},
-                onCommit: { model.commitSession() }
-            )
+            if model.isProMode {
+                EffectKnobView(
+                    title: "Feedback",
+                    valueText: "\(Int(model.masterEffects.delayFeedback * 100))%",
+                    value: Binding(
+                        get: { model.masterEffects.delayFeedback },
+                        set: { newValue in
+                            var settings = model.masterEffects
+                            settings.delayFeedback = newValue
+                            model.updateMasterEffects(settings)
+                        }
+                    ),
+                    range: 0...0.9,
+                    step: 0.01,
+                    onChange: {},
+                    onCommit: { model.commitSession() }
+                )
+            }
 
             EffectKnobView(
                 title: "Mix",

@@ -850,6 +850,9 @@ struct InstrumentRackView: View {
     private var recordButtonTitle: String {
         if model.isRecordingInstrument { return "Stop Recording" }
         if countInValue != nil { return "Cancel Count-In" }
+        if let selectedTrackID, model.isPunchActive(for: selectedTrackID) {
+            return "Punch Record"
+        }
         return selectedInstrument == .microphone ? "Record Mic Take" : "Record Performance"
     }
 

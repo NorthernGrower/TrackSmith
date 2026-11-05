@@ -47,7 +47,7 @@ enum TrackFreezeRenderer {
         configure(equalizer, settings: track.eqSettings)
         TrackCompressorUnit.configure(compressor, settings: track.compressorSettings)
 
-        var queuedClips: [(file: AVAudioFile, player: AVAudioPlayerNode, clip: AudioClip)] = []
+        var queuedClips: [(file: AVAudioFile, player: AVAudioPlayerNode, mixer: AVAudioMixerNode, clip: AudioClip)] = []
         var queuedNotes: [(buffer: AVAudioPCMBuffer, player: AVAudioPlayerNode, start: TimeInterval)] = []
         var span: TimeInterval = 0
 
@@ -63,9 +63,12 @@ enum TrackFreezeRenderer {
             guard playableDuration > 0 else { continue }
 
             let player = AVAudioPlayerNode()
+            let clipMixer = AVAudioMixerNode()
             engine.attach(player)
-            engine.connect(player, to: mixer, format: file.processingFormat)
-            queuedClips.append((file, player, clip))
+            engine.attach(clipMixer)
+            engine.connect(player, to: clipMixer, format: file.processingFormat)
+            engine.connect(clipMixer, to: mixer, format: file.processingFormat)
+            queuedClips.append((file, player, clipMixer, clip))
             span = max(span, clip.startTime + playableDuration)
         }
 
@@ -136,6 +139,10 @@ enum TrackFreezeRenderer {
 
         while framesRendered < totalFrames {
             let framesToRender = AVAudioFrameCount(min(Int64(maximumFrameCount), totalFrames - framesRendered))
+            let renderTime = Double(framesRendered) / sampleRate
+            for queued in queuedClips {
+                queued.mixer.outputVolume = queued.clip.gain(at: renderTime, in: track)
+            }
             let status = try engine.renderOffline(framesToRender, to: buffer)
 
             switch status {

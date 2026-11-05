@@ -16,6 +16,7 @@ const engine = new StudioEngine();
 const state = {
   store: model.loadStore(),
   session: null,
+  mode: 'simple',
   zoom: 70,
   playhead: 0,
   selectedClip: null,
@@ -92,11 +93,14 @@ const state = {
 let instrumentVoice = null;
 
 const el = {
+  modeSimpleBtn: document.getElementById('modeSimpleBtn'),
+  modeProBtn: document.getElementById('modeProBtn'),
   sessionName: document.getElementById('sessionName'),
   sessionSubtitle: document.getElementById('sessionSubtitle'),
   undoBtn: document.getElementById('undoBtn'),
   redoBtn: document.getElementById('redoBtn'),
   mixerBtn: document.getElementById('mixerBtn'),
+  masteringBtn: document.getElementById('masteringBtn'),
   fxBtn: document.getElementById('fxBtn'),
   presetBtn: document.getElementById('presetBtn'),
   sessionsBtn: document.getElementById('sessionsBtn'),
@@ -136,6 +140,12 @@ const el = {
   stopBtn: document.getElementById('stopBtn'),
   loopBtn: document.getElementById('loopBtn'),
   loopRangeLabel: document.getElementById('loopRangeLabel'),
+  punchBtn: document.getElementById('punchBtn'),
+  punchInBtn: document.getElementById('punchInBtn'),
+  punchOutBtn: document.getElementById('punchOutBtn'),
+  punchRangeLabel: document.getElementById('punchRangeLabel'),
+  punchArm: document.getElementById('punchArm'),
+  punchRegion: document.getElementById('punchRegion'),
   metronomeBtn: document.getElementById('metronomeBtn'),
   metronomeLevel: document.getElementById('metronomeLevel'),
   countInBtn: document.getElementById('countInBtn'),
@@ -187,6 +197,100 @@ function trackColorFor(track, index) {
 
 function currentPosition() {
   return engine.isPlaying ? engine.getPosition() : engine.position;
+}
+
+// ---------- Punch recording ----------
+
+function hasPunchRange() {
+  const punch = state.session?.punch;
+  return Boolean(punch && punch.out > punch.in + 0.05);
+}
+
+function isPunchActiveFor(trackId) {
+  const punch = state.session?.punch;
+  return Boolean(punch && punch.enabled && hasPunchRange() && punch.armedTrackId === trackId);
+}
+
+function trimClipsForPunch(track, punchIn, punchOut, crossFade) {
+  const kept = [];
+  for (const clip of track.clips) {
+    const start = Math.max(0, clip.start);
+    const playable = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+    const end = start + playable;
+    const cutStart = punchIn + crossFade;
+    const cutEnd = punchOut - crossFade;
+
+    if (end <= cutStart || start >= cutEnd) {
+      kept.push(clip);
+      continue;
+    }
+    if (start < cutStart) {
+      kept.push({ ...clip, duration: cutStart - start });
+    }
+    if (end > cutEnd) {
+      kept.push({
+        ...clip,
+        id: model.uid(),
+        start: cutEnd,
+        duration: end - cutEnd,
+        sourceStart: clip.sourceStart + (cutEnd - start)
+      });
+    }
+  }
+  track.clips = kept;
+}
+
+async function applyPunchRecording(track, buffer, position, baseName) {
+  if (!isPunchActiveFor(track.id)) return null;
+  const punch = state.session.punch;
+  const offset = Math.max(0, punch.in - position);
+  const length = Math.min(punch.out - punch.in, buffer.duration - offset);
+  if (length <= 0.05) return null;
+
+  const sampleRate = buffer.sampleRate;
+  const startFrame = Math.floor(offset * sampleRate);
+  const frames = Math.max(1, Math.floor(length * sampleRate));
+  const channels = buffer.numberOfChannels;
+  if (!engine.ctx) return null;
+
+  const sliced = engine.ctx.createBuffer(channels, frames, sampleRate);
+  for (let channel = 0; channel < channels; channel += 1) {
+    const source = buffer.getChannelData(channel).subarray(startFrame, startFrame + frames);
+    sliced.getChannelData(channel).set(source);
+  }
+
+  const crossFade = Math.min(0.03, length / 6);
+  const fadeFrames = Math.max(1, Math.min(Math.floor(crossFade * sampleRate), Math.floor(frames / 4)));
+  for (let channel = 0; channel < channels; channel += 1) {
+    const data = sliced.getChannelData(channel);
+    for (let frame = 0; frame < fadeFrames; frame += 1) {
+      const gain = frame / fadeFrames;
+      data[frame] *= gain;
+      data[frames - 1 - frame] *= gain;
+    }
+  }
+
+  const blob = encodeWav(sliced);
+  const fileName = `${safeName(baseName)}-punch-${Date.now()}.wav`;
+  const fileId = await model.saveFile(blob, fileName);
+  state.buffers.set(fileId, sliced);
+  engine.buffers.set(fileId, sliced);
+  state.peaks.set(fileId, computePeaks(sliced));
+  model.saveStore(state.store);
+
+  trimClipsForPunch(track, punch.in, punch.out, crossFade);
+  track.clips.push({
+    id: model.uid(),
+    name: 'Punch',
+    fileId,
+    start: punch.in,
+    duration: length,
+    sourceStart: 0,
+    sourceDuration: length
+  });
+  track.clips.sort((left, right) => left.start - right.start);
+
+  return { fileId, name: 'Punch', start: punch.in, duration: length };
 }
 
 function toast(message) {
@@ -350,6 +454,193 @@ async function preloadAudio() {
   for (const id of ids) await ensureBuffer(id);
 }
 
+// ---------- Studio mode ----------
+
+function applyStudioMode() {
+  document.body.classList.toggle('mode-simple', state.mode === 'simple');
+  document.body.classList.toggle('mode-pro', state.mode === 'pro');
+  [el.modeSimpleBtn, el.modeProBtn].forEach((button) => {
+    if (!button) return;
+    const active = button.dataset.mode === state.mode;
+    button.classList.toggle('on', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function setStudioMode(mode) {
+  const next = mode === 'pro' ? 'pro' : 'simple';
+  if (state.mode === next) return;
+  state.mode = next;
+  localStorage.setItem('studio.mode', next);
+  if (next === 'simple') {
+    state.automationTrack = null;
+    state.selectedAutomationPoint = null;
+    state.groupSelectionMode = false;
+    state.selectedGroupTrackIDs = [];
+  }
+  applyStudioMode();
+  render();
+}
+
+// ---------- Take lane ----------
+
+function ensureTakes(track) {
+  if (!Array.isArray(track.takes)) track.takes = [];
+  return track.takes;
+}
+
+function registerTake(track, { name, fileId, start, duration }) {
+  const takes = ensureTakes(track);
+  const take = {
+    id: model.uid(),
+    name: `${name} ${takes.length + 1}`,
+    fileId,
+    start: Math.max(0, Number(start) || 0),
+    duration: Math.max(0, Number(duration) || 0)
+  };
+
+  if (track.activeTakeId) {
+    track.clips = track.clips.filter((clip) => clip.id !== `take:${track.activeTakeId}`);
+  }
+  takes.push(take);
+  track.activeTakeId = take.id;
+  track.clips.push({
+    id: `take:${take.id}`,
+    takeId: take.id,
+    name: take.name,
+    fileId: take.fileId,
+    start: take.start,
+    duration: take.duration,
+    sourceStart: 0,
+    sourceDuration: take.duration
+  });
+  track.clips.sort((left, right) => left.start - right.start);
+  return take;
+}
+
+function setActiveTake(track, takeId) {
+  const take = ensureTakes(track).find((item) => item.id === takeId);
+  if (!take) return;
+  if (track.activeTakeId) {
+    track.clips = track.clips.filter((clip) => clip.id !== `take:${track.activeTakeId}`);
+  }
+  track.activeTakeId = take.id;
+  track.clips.push({
+    id: `take:${take.id}`,
+    takeId: take.id,
+    name: take.name,
+    fileId: take.fileId,
+    start: take.start,
+    duration: take.duration,
+    sourceStart: 0,
+    sourceDuration: take.duration
+  });
+  track.clips.sort((left, right) => left.start - right.start);
+}
+
+async function openTakeLane(trackId) {
+  const track = trackById(trackId);
+  if (!track) return;
+  state.modal = 'takes';
+  state.takeLaneTrackId = trackId;
+
+  const takes = ensureTakes(track);
+  const previews = [];
+  for (const take of takes) {
+    const entry = await model.loadFile(take.fileId).catch(() => null);
+    previews.push(entry ? URL.createObjectURL(entry.blob) : '');
+  }
+  if (state.modal !== 'takes' || state.takeLaneTrackId !== trackId) {
+    previews.forEach((url) => url && URL.revokeObjectURL(url));
+    return;
+  }
+  (state.takePreviewURLs || []).forEach((url) => url && URL.revokeObjectURL(url));
+  state.takePreviewURLs = previews;
+
+  const rows = takes.map((take, index) => {
+    const isActive = track.activeTakeId === take.id;
+    return `<article class="take-row ${isActive ? 'active' : ''}">
+      <div class="take-number">T${index + 1}</div>
+      <div class="take-meta">
+        <strong>${escapeHtml(take.name)}</strong>
+        <span>${model.formatTime(take.duration)} · starts ${model.formatTime(take.start)}</span>
+      </div>
+      ${isActive ? '<span class="take-active-chip">ACTIVE</span>' : ''}
+      <audio class="take-preview" controls preload="none" src="${escapeHtml(previews[index] || '')}" aria-label="Audition ${escapeHtml(take.name)}"></audio>
+      <div class="take-actions">
+        <button class="tool" data-take-promote="${take.id}" ${isActive ? 'disabled' : ''}>${isActive ? 'On Timeline' : 'Promote'}</button>
+        <button class="icon-btn" data-take-rename="${take.id}" title="Rename">✎</button>
+        <button class="icon-btn" data-take-delete="${take.id}" title="Delete">×</button>
+      </div>
+    </article>`;
+  }).join('');
+
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0">
+        <h2>Take Lane</h2>
+        <div class="sub">${escapeHtml(track.name.toUpperCase())} · ${takes.length} ${takes.length === 1 ? 'TAKE' : 'TAKES'}</div>
+      </div>
+      <button class="modal-close" data-close>Done</button>
+    </header>
+    <div class="modal-body">
+      ${rows || '<p class="export-empty">No takes yet. Record onto this track and every pass will be kept here.</p>'}
+    </div>`, { tall: true });
+
+  el.modalRoot.querySelectorAll('[data-take-promote]').forEach((button) => {
+    button.addEventListener('click', () => {
+      snapshot();
+      setActiveTake(track, button.dataset.takePromote);
+      persist();
+      engine.rebuild();
+      render();
+      openTakeLane(trackId);
+      toast('Take placed on the timeline');
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-take-rename]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const take = takes.find((item) => item.id === button.dataset.takeRename);
+      if (!take) return;
+      const entered = window.prompt('Take name', take.name);
+      if (entered === null) return;
+      const name = entered.trim();
+      if (!name) return;
+      snapshot();
+      take.name = name;
+      track.clips.forEach((clip) => {
+        if (clip.takeId === take.id) clip.name = name;
+      });
+      persist();
+      engine.rebuild();
+      render();
+      openTakeLane(trackId);
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-take-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const takeId = button.dataset.takeDelete;
+      const take = takes.find((item) => item.id === takeId);
+      if (!take || !window.confirm(`Delete "${take.name}"?`)) return;
+      snapshot();
+      track.takes = takes.filter((item) => item.id !== takeId);
+      if (track.activeTakeId === takeId) {
+        track.clips = track.clips.filter((clip) => clip.id !== `take:${takeId}`);
+        track.activeTakeId = null;
+        const fallback = track.takes[track.takes.length - 1];
+        if (fallback) setActiveTake(track, fallback.id);
+      }
+      persist();
+      engine.rebuild();
+      render();
+      openTakeLane(trackId);
+      toast('Take deleted');
+    });
+  });
+}
+
 // ---------- Rendering: header + transport ----------
 
 function renderHeader() {
@@ -380,6 +671,19 @@ function renderTransport() {
   el.loopRangeLabel.textContent = model.hasLoopRange(session)
     ? `${model.formatTime(session.loop.start)} – ${model.formatTime(session.loop.end)}`
     : 'Drag markers on the ruler';
+
+  el.punchBtn.classList.toggle('on', session.punch.enabled);
+  el.punchBtn.disabled = !hasPunchRange();
+  el.punchRangeLabel.textContent = hasPunchRange()
+    ? `${model.formatTime(session.punch.in)} – ${model.formatTime(session.punch.out)}`
+    : 'Set IN and OUT';
+  const armSignature = session.tracks.map((track) => `${track.id}:${track.name}`).join('|');
+  if (el.punchArm.dataset.signature !== armSignature) {
+    el.punchArm.innerHTML = '<option value="">ARM TRACK</option>'
+      + session.tracks.map((track) => `<option value="${track.id}">${escapeHtml(track.name)}</option>`).join('');
+    el.punchArm.dataset.signature = armSignature;
+  }
+  el.punchArm.value = session.punch.armedTrackId || '';
 
   el.metronomeBtn.classList.toggle('on', session.metronome.enabled);
   if (document.activeElement !== el.metronomeLevel) {
@@ -417,6 +721,7 @@ function renderTimeline() {
   renderRuler(contentWidth, beatPx);
   renderLanes(contentWidth, pps, beatPx);
   renderLoopStrip(contentWidth, pps);
+  renderPunchStrip(pps);
   renderSections(pps);
   updatePlayhead();
   updateClipToolbar();
@@ -431,24 +736,31 @@ function renderHeads() {
     const color = trackColorFor(track, index);
     const group = session.groups?.find((item) => item.trackIDs.includes(track.id));
     const frozen = Boolean(track.frozen?.fileId);
+    const takes = track.takes || [];
+    const activeTakeNumber = Math.max(1, takes.findIndex((take) => take.id === track.activeTakeId) + 1);
     parts.push(`
       <div class="track-head" style="--track-color:${color}">
         <div class="track-head-top">
           <span class="track-index">${String(index + 1).padStart(2, '0')}</span>
           <span class="track-name">${escapeHtml(track.name)}</span>
+          ${takes.length ? `<button class="take-badge" data-act="takes" data-track="${track.id}" title="Take lane">T${activeTakeNumber} · ${takes.length}</button>` : ''}
           <button class="icon-btn" data-act="eq" data-track="${track.id}" title="Equalizer">≡</button>
           <button class="icon-btn ${frozen ? 'off' : ''}" data-act="roll" data-track="${track.id}" title="Piano roll" ${frozen ? 'disabled' : ''}>♫</button>
-          <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'volume' ? '' : 'off'}" data-act="automation" data-track="${track.id}" title="Volume automation">⋀</button>
-          <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'pan' ? '' : 'off'}" data-act="automation-pan" data-track="${track.id}" title="Pan automation">⇄</button>
+          ${state.mode === 'pro' ? `
+            <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'volume' ? '' : 'off'}" data-act="automation" data-track="${track.id}" title="Volume automation">⋀</button>
+            <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'pan' ? '' : 'off'}" data-act="automation-pan" data-track="${track.id}" title="Pan automation">⇄</button>
+          ` : ''}
         </div>
         <div class="track-head-row">
-          ${group ? `<span class="group-badge" style="--group-color:${color}" title="${escapeHtml(group.name)}">${escapeHtml(group.name)}</span>` : ''}
+          ${group && state.mode === 'pro' ? `<span class="group-badge" style="--group-color:${color}" title="${escapeHtml(group.name)}">${escapeHtml(group.name)}</span>` : ''}
           <div style="display:flex;flex-direction:column;gap:4px">
             <button class="mini ${track.muted ? 'on' : ''}" data-act="mute" data-track="${track.id}" title="Mute">M</button>
             <button class="mini ${track.soloed ? 'on' : ''}" data-act="solo" data-track="${track.id}" title="Solo">S</button>
           </div>
-          <button class="mini snow ${frozen ? 'frozen' : ''}" data-act="freeze" data-track="${track.id}" title="${frozen ? 'Unfreeze' : 'Freeze to audio'}">❄</button>
-          <button class="mini instrument-open" data-act="instrument" data-track="${track.id}" title="Open instruments for ${escapeHtml(track.name)}">♫</button>
+          ${state.mode === 'pro' ? `
+            <button class="mini snow ${frozen ? 'frozen' : ''}" data-act="freeze" data-track="${track.id}" title="${frozen ? 'Unfreeze' : 'Freeze to audio'}">❄</button>
+            <button class="mini instrument-open" data-act="instrument" data-track="${track.id}" title="Open instruments for ${escapeHtml(track.name)}">♫</button>
+          ` : ''}
           <div class="spacer"></div>
           <input type="range" class="fader" min="0" max="1" step="0.01" value="${track.volume}" data-act="volume" data-track="${track.id}" aria-label="Volume for ${escapeHtml(track.name)}">
           <div class="meter" data-meter="${track.id}"><div class="meter-fill"></div></div>
@@ -457,6 +769,19 @@ function renderHeads() {
   });
 
   el.arrHeads.innerHTML = parts.join('');
+}
+
+function renderPunchStrip(pps) {
+  const region = el.punchRegion;
+  if (!region) return;
+  const punch = state.session.punch;
+  if (!punch.enabled || !hasPunchRange()) {
+    region.style.display = 'none';
+    return;
+  }
+  region.style.display = 'block';
+  region.style.left = `${Math.max(0, punch.in) * pps}px`;
+  region.style.width = `${Math.max(1, (punch.out - punch.in) * pps)}px`;
 }
 
 function renderRuler(width, beatPx) {
@@ -507,6 +832,15 @@ function renderRuler(width, beatPx) {
   }
 }
 
+function fadePath(clip) {
+  const duration = Math.max(0.01, clip.duration);
+  const inPercent = Math.min(50, ((Number(clip.fadeIn) || 0) / duration) * 100);
+  const outPercent = Math.min(50, ((Number(clip.fadeOut) || 0) / duration) * 100);
+  const startY = inPercent > 0 ? 100 : 0;
+  const endY = outPercent > 0 ? 100 : 0;
+  return `M 0 ${startY} L ${inPercent} 0 L ${100 - outPercent} 0 L 100 ${endY}`;
+}
+
 function renderLanes(contentWidth, pps, beatPx) {
   const session = state.session;
   const parts = [];
@@ -522,13 +856,18 @@ function renderLanes(contentWidth, pps, beatPx) {
       return `<div class="clip ${selected ? 'selected' : ''} ${frozen ? 'frozen' : ''}" data-clip="${clip.id}" data-track="${track.id}" style="left:${Math.max(0, clip.start) * pps}px;width:${width}px">
         <span class="clip-label">${escapeHtml(clip.name.toUpperCase())}</span>
         <canvas class="clip-wave" data-file="${clip.fileId}"></canvas>
+        ${selected && state.mode === 'pro' ? `<svg class="clip-fades" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="${fadePath(clip)}"></path></svg>
+        <button class="fade-handle fade-in" data-fade-edge="in" data-clip="${clip.id}" data-track="${track.id}" style="left:${Math.min(50, ((clip.fadeIn || 0) / Math.max(0.01, clip.duration)) * 100)}%" aria-label="Fade in"></button>
+        <button class="fade-handle fade-out" data-fade-edge="out" data-clip="${clip.id}" data-track="${track.id}" style="left:${100 - Math.min(50, ((clip.fadeOut || 0) / Math.max(0.01, clip.duration)) * 100)}%" aria-label="Fade out"></button>` : ''}
         <span class="trim trim-left" data-edge="left"></span>
         <span class="trim trim-right" data-edge="right"></span>
       </div>`;
     }).join('');
 
-    const automation = state.automationTrack === track.id ? '<canvas class="automation-canvas"></canvas>' : '';
-    const activePoints = state.automationTrack === track.id
+    const automation = state.mode === 'pro' && state.automationTrack === track.id
+      ? '<canvas class="automation-canvas"></canvas>'
+      : '';
+    const activePoints = state.mode === 'pro' && state.automationTrack === track.id
       ? activeAutomationPoints(track)
       : [];
     const points = activePoints.length
@@ -537,13 +876,55 @@ function renderLanes(contentWidth, pps, beatPx) {
       )).join('')
       : '';
 
-    parts.push(`<div class="lane" data-track="${track.id}" style="--beat-width:${beatPx}px">${clipHtml}${automation}${points}</div>`);
+    const takeChips = state.mode === 'pro' && (track.takes || []).length
+      ? `<div class="take-lane">${track.takes.map((take, index) => {
+        const active = track.activeTakeId === take.id;
+        return `<button class="take-chip ${active ? 'active' : ''}" data-act="audition-take" data-track="${track.id}" data-take="${take.id}" style="left:${take.start * pps}px;width:${Math.max(22, take.duration * pps)}px" title="${escapeHtml(take.name)}">T${index + 1}</button>`;
+      }).join('')}</div>`
+      : '';
+
+    parts.push(`<div class="lane" data-track="${track.id}" style="--beat-width:${beatPx}px">${clipHtml}${takeChips}${automation}${points}</div>`);
   });
 
   el.lanes.innerHTML = parts.join('');
 
   el.lanes.querySelectorAll('canvas.clip-wave').forEach((canvas) => {
     drawClipWave(canvas, state.peaks.get(canvas.dataset.file));
+  });
+
+  el.lanes.querySelectorAll('[data-fade-edge]').forEach((handle) => {
+    handle.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const clip = model.playbackClips(trackById(handle.dataset.track)).find((item) => item.id === handle.dataset.clip);
+      const clipElement = handle.closest('.clip');
+      if (!clip || !clipElement) return;
+      const edge = handle.dataset.fadeEdge;
+      const origin = edge === 'in' ? (Number(clip.fadeIn) || 0) : (Number(clip.fadeOut) || 0);
+      const startX = event.clientX;
+      const path = clipElement.querySelector('.clip-fades path');
+
+      const onMove = (moveEvent) => {
+        const delta = (moveEvent.clientX - startX) / state.zoom;
+        const value = Math.max(0, Math.min(clip.duration, edge === 'in' ? origin + delta : origin - delta));
+        if (edge === 'in') clip.fadeIn = value;
+        else clip.fadeOut = value;
+        if (path) path.setAttribute('d', fadePath(clip));
+        const percent = Math.min(50, (value / Math.max(0.01, clip.duration)) * 100);
+        handle.style.left = `${edge === 'in' ? percent : 100 - percent}%`;
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        persist();
+        engine.rebuild();
+        render();
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp, { once: true });
+    });
   });
 
   if (state.automationTrack) {
@@ -716,6 +1097,9 @@ function frame() {
     updatePlayhead();
     updateDrumSequencerPlayhead();
     updateMeters();
+    if (state.modal === 'mastering') {
+      updateMasteringMeters();
+    }
     if (state.countInActive) {
       renderTransport();
     }
@@ -1719,6 +2103,9 @@ function closeModal() {
   state.sessionsRequestID = (state.sessionsRequestID || 0) + 1;
   (state.exportPreviewURLs || []).forEach((url) => URL.revokeObjectURL(url));
   state.exportPreviewURLs = [];
+  (state.takePreviewURLs || []).forEach((url) => url && URL.revokeObjectURL(url));
+  state.takePreviewURLs = [];
+  state.takeLaneTrackId = null;
   state.modal = null;
   el.modalRoot.innerHTML = '';
   el.modalRoot.style.pointerEvents = 'none';
@@ -1732,19 +2119,53 @@ function openMixer() {
   if (!session) return;
   state.modal = 'mixer';
 
+  if (!session.auxA || !session.auxB) {
+    const defaults = model.defaultAuxBuses();
+    session.auxA = session.auxA || defaults.auxA;
+    session.auxB = session.auxB || defaults.auxB;
+  }
+
+  const auxSendRow = (track, bus) => {
+    const stem = bus.toLowerCase();
+    const value = bus === 'A' ? (track.sendA ?? 0) : (track.sendB ?? 0);
+    return `<div class="send-row">
+        <span class="send-label">${bus}</span>
+        <input type="range" class="send-slider" min="0" max="1" step="0.01" value="${value}" data-send-${stem}="${track.id}" aria-label="Aux ${bus} send for ${escapeHtml(track.name)}" title="Aux ${bus} send">
+        <span class="send-value" data-send-label="${stem}-${track.id}">${Math.round(value * 100)}%</span>
+      </div>`;
+  };
+
+  const auxReturnRow = (bus, id) => {
+    const fxLabel = bus.effect === 'delay' ? 'DELAY' : 'REVERB';
+    return `<div class="aux-return">
+        <div class="aux-return-head">
+          <strong>${escapeHtml(bus.name.toUpperCase())}</strong>
+          <span class="aux-effect">${fxLabel}</span>
+        </div>
+        <input type="range" class="aux-level" min="0" max="1" step="0.01" value="${bus.level}" data-aux-level="${id}" aria-label="${escapeHtml(bus.name)} return level">
+        <span class="db" data-aux-db="${id}">${model.dbLabel(bus.level)}</span>
+        <button class="mini ${bus.bypassed ? '' : 'on'}" data-aux-bypass="${id}">${bus.bypassed ? 'BYP' : 'ON'}</button>
+      </div>`;
+  };
+
   const strips = session.tracks.map((track, index) => {
     const color = trackColorFor(track, index);
     const selected = state.selectedGroupTrackIDs.includes(track.id);
     return `<div class="strip ${state.groupSelectionMode && selected ? 'group-selected' : ''}" style="--track-color:${color}">
       <div class="strip-name">${escapeHtml(track.name.toUpperCase())}</div>
       ${state.groupSelectionMode ? `<button class="pill ${selected ? 'on' : ''}" data-group-select="${track.id}">${selected ? 'SELECTED' : 'ADD TO BUS'}</button>` : ''}
+      ${state.mode === 'pro' ? `
       <input type="range" class="pan-slider" min="-1" max="1" step="0.05" value="${track.pan}" data-mix-pan="${track.id}" style="width:64px" aria-label="Pan for ${escapeHtml(track.name)}">
-      <div class="pan-label" data-pan-label="${track.id}">${model.panLabel(track.pan)}</div>
+      <div class="pan-label" data-pan-label="${track.id}">${model.panLabel(track.pan)}</div>` : ''}
       <div class="fader-block">
         <input type="range" class="fader" min="0" max="1" step="0.01" value="${track.volume}" data-mix-volume="${track.id}" aria-label="Volume for ${escapeHtml(track.name)}">
         <div class="meter" data-mix-meter="${track.id}"><div class="meter-fill"></div></div>
       </div>
       <div class="db" data-db-label="${track.id}">${model.dbLabel(track.volume)}</div>
+      <div class="sends">
+        ${auxSendRow(track, 'A')}
+        ${state.mode === 'pro' ? auxSendRow(track, 'B') : ''}
+      </div>
       <div class="mini-row">
         <button class="mini ${track.muted ? 'on' : ''}" data-mix-mute="${track.id}">M</button>
         <button class="mini ${track.soloed ? 'on' : ''}" data-mix-solo="${track.id}">S</button>
@@ -1778,12 +2199,12 @@ function openMixer() {
         <h2>Mixer</h2>
         <div class="sub">${escapeHtml(session.name.toUpperCase())} · ${session.tracks.length} ${session.tracks.length === 1 ? 'CHANNEL' : 'CHANNELS'}</div>
       </div>
-      <button class="pill ${state.groupSelectionMode ? 'on' : ''}" id="groupTracksBtn">${state.groupSelectionMode ? 'GROUPING' : 'GROUP TRACKS'}</button>
+      <button class="pill ${state.groupSelectionMode ? 'on' : ''}" id="groupTracksBtn" ${state.mode === 'pro' ? '' : 'hidden'}>${state.groupSelectionMode ? 'GROUPING' : 'GROUP TRACKS'}</button>
       <button class="modal-close" data-close>Done</button>
     </header>
     <div class="modal-body">
-      ${selectionTools}
-      ${buses ? `<div class="group-bus-list"><h3>BUSES</h3>${buses}</div>` : ''}
+      ${state.mode === 'pro' ? selectionTools : ''}
+      ${state.mode === 'pro' && buses ? `<div class="group-bus-list"><h3>BUSES</h3>${buses}</div>` : ''}
       <div class="mixer-board">
         ${strips}
         <div class="strip master">
@@ -1795,6 +2216,13 @@ function openMixer() {
           </div>
           <div class="db" data-db-label="master">${model.dbLabel(session.masterVolume)}</div>
           <div class="mini-row"><button class="mini on">ST</button></div>
+        </div>
+      </div>
+      <div class="aux-returns">
+        <h3>AUX RETURNS</h3>
+        <div class="aux-return-list">
+          ${auxReturnRow(session.auxA, 'A')}
+          ${state.mode === 'pro' ? auxReturnRow(session.auxB, 'B') : ''}
         </div>
       </div>
     </div>
@@ -1925,6 +2353,49 @@ function openMixer() {
     });
   });
 
+  el.modalRoot.querySelectorAll('[data-send-a], [data-send-b]').forEach((input) => {
+    input.addEventListener('pointerdown', () => snapshot());
+    input.addEventListener('input', () => {
+      const isA = input.hasAttribute('data-send-a');
+      const track = trackById(isA ? input.dataset.sendA : input.dataset.sendB);
+      if (!track) return;
+      const value = model.clamp(Number(input.value), 0, 1);
+      if (isA) track.sendA = value;
+      else track.sendB = value;
+      const label = el.modalRoot.querySelector(`[data-send-label="${isA ? 'a' : 'b'}-${track.id}"]`);
+      if (label) label.textContent = `${Math.round(value * 100)}%`;
+      engine.updateMix(state.playhead);
+      persist();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-aux-level]').forEach((input) => {
+    input.addEventListener('pointerdown', () => snapshot());
+    input.addEventListener('input', () => {
+      const id = input.dataset.auxLevel;
+      const bus = id === 'B' ? session.auxB : session.auxA;
+      if (!bus) return;
+      bus.level = model.clamp(Number(input.value), 0, 1);
+      const label = el.modalRoot.querySelector(`[data-aux-db="${id}"]`);
+      if (label) label.textContent = model.dbLabel(bus.level);
+      engine.applyAuxBuses();
+      persist();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-aux-bypass]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = button.dataset.auxBypass;
+      const bus = id === 'B' ? session.auxB : session.auxA;
+      if (!bus) return;
+      snapshot();
+      bus.bypassed = !bus.bypassed;
+      engine.applyAuxBuses();
+      persist();
+      openMixer();
+    });
+  });
+
   document.getElementById('mixerPlayBtn').addEventListener('click', () => {
     togglePlay();
     const button = document.getElementById('mixerPlayBtn');
@@ -1978,10 +2449,11 @@ function openEQ(trackId) {
   state.modal = 'eq';
 
   const band = (key, title, gainRange) => `
+    ${state.mode === 'pro' ? `
     <div class="field">
       <div class="label-row"><span>${title} frequency</span><span data-eq-value="${key}-frequency">${Math.round(track.eq[key].frequency)} Hz</span></div>
       <input type="range" min="30" max="16000" step="10" value="${track.eq[key].frequency}" data-eq="${key}-frequency" data-track="${track.id}">
-    </div>
+    </div>` : ''}
     <div class="field">
       <div class="label-row"><span>${title} gain</span><span data-eq-value="${key}-gain">${track.eq[key].gain.toFixed(1)} dB</span></div>
       <input type="range" min="${gainRange[0]}" max="${gainRange[1]}" step="0.5" value="${track.eq[key].gain}" data-eq="${key}-gain" data-track="${track.id}">
@@ -2005,6 +2477,7 @@ function openEQ(trackId) {
         ${band('mid', 'Mid', [-24, 24])}
         ${band('high', 'High shelf', [-24, 24])}
       </div>
+      ${state.mode === 'pro' ? `
       <div class="panel">
         <div class="switch-row" style="margin-bottom:12px">
           <h3 style="margin:0">COMPRESSOR</h3>
@@ -2026,7 +2499,7 @@ function openEQ(trackId) {
           <div class="label-row"><span>Release</span><span data-comp-value="release">${Math.round(track.comp.release * 1000)} ms</span></div>
           <input type="range" min="0.02" max="1" step="0.01" value="${track.comp.release}" data-comp="release" data-track="${track.id}">
         </div>
-      </div>
+      </div>` : ''}
     </div>`, { tall: true });
 
   el.modalRoot.querySelectorAll('[data-eq]').forEach((input) => {
@@ -2145,10 +2618,11 @@ function openMasterEffects() {
           <div class="label-row"><span>Mix</span><span data-fx-value="reverbMix">${Math.round(fx.reverbMix * 100)}%</span></div>
           <input type="range" min="0" max="1" step="0.01" value="${fx.reverbMix}" data-fx="reverbMix">
         </div>
+        ${state.mode === 'pro' ? `
         <div class="field">
           <div class="label-row"><span>Decay</span><span data-fx-value="reverbDecay">${fx.reverbDecay.toFixed(1)} s</span></div>
           <input type="range" min="0.2" max="5" step="0.1" value="${fx.reverbDecay}" data-fx="reverbDecay">
-        </div>
+        </div>` : ''}
       </div>
       <div class="panel">
         <h3>DELAY</h3>
@@ -2163,10 +2637,11 @@ function openMasterEffects() {
             <option value="2" ${fx.delayBeats === 2 ? 'selected' : ''}>1/2</option>
           </select>
         </div>
+        ${state.mode === 'pro' ? `
         <div class="field">
           <div class="label-row"><span>Feedback</span><span data-fx-value="delayFeedback">${Math.round(fx.delayFeedback * 100)}%</span></div>
           <input type="range" min="0" max="0.9" step="0.01" value="${fx.delayFeedback}" data-fx="delayFeedback">
-        </div>
+        </div>` : ''}
         <div class="field">
           <div class="label-row"><span>Mix</span><span data-fx-value="delayMix">${Math.round(fx.delayMix * 100)}%</span></div>
           <input type="range" min="0" max="1" step="0.01" value="${fx.delayMix}" data-fx="delayMix">
@@ -2210,6 +2685,217 @@ function openMasterEffects() {
       persist();
     });
   }
+}
+
+// ---------- Mastering ----------
+
+function formatMasterValue(key, value) {
+  if (key.endsWith('attack') || key.endsWith('release')) return `${Math.round(value * 1000)} ms`;
+  if (key === 'eq.midFrequency') return `${Math.round(value)} Hz`;
+  if (key === 'compressor.ratio') return `${value.toFixed(1)}:1`;
+  if (key === 'limiter.ceiling') return `${value.toFixed(1)} dB`;
+  return `${value >= 0 ? '+' : ''}${value.toFixed(1)} dB`;
+}
+
+function updateMasteringMeters() {
+  const session = state.session;
+  if (!session || state.modal !== 'mastering' || !el.modalRoot) return;
+  const chain = session.mastering || model.defaultMastering();
+  const target = model.loudnessTarget(chain.target);
+  const reading = engine.readLoudness();
+  const values = {
+    integrated: reading.integrated,
+    shortTerm: reading.shortTerm,
+    truePeak: reading.truePeak
+  };
+
+  el.modalRoot.querySelectorAll('[data-loudness]').forEach((node) => {
+    const key = node.dataset.loudness;
+    const value = values[key];
+    node.textContent = value == null ? '—' : value.toFixed(1);
+    node.classList.toggle('over', key === 'truePeak' && value != null && value > target.truePeak);
+  });
+
+  el.modalRoot.querySelectorAll('[data-loudness-bar]').forEach((node) => {
+    const key = node.dataset.loudnessBar;
+    const value = values[key];
+    const isPeak = key === 'truePeak';
+    const base = isPeak ? -12 : -36;
+    const span = isPeak ? 12 : 36;
+    const progress = value == null ? 0 : model.clamp((value - base) / span, 0, 1);
+    node.style.width = `${Math.round(progress * 100)}%`;
+    node.classList.toggle('over', isPeak && value != null && value > target.truePeak);
+  });
+}
+
+function openMastering() {
+  const session = state.session;
+  if (!session) return;
+  state.modal = 'mastering';
+
+  if (!session.mastering) session.mastering = model.defaultMastering();
+  const chain = session.mastering;
+  const target = model.loudnessTarget(chain.target);
+  const eqOff = chain.bypassed || chain.eq.bypassed;
+  const compOff = chain.bypassed || chain.compressor.bypassed;
+  const limiterOff = chain.bypassed || chain.limiter.bypassed;
+
+  const targetButtons = model.LOUDNESS_TARGETS.map((item) => `
+      <button class="mastering-target ${chain.target === item.id ? 'on' : ''}" data-target="${item.id}">
+        <strong>${item.name}</strong>
+        <span>${item.loudness} LUFS</span>
+      </button>`).join('');
+
+  const control = (key, label, min, max, step) => {
+    const [group, field] = key.split('.');
+    const value = chain[group][field];
+    return `<div class="field">
+        <div class="label-row"><span>${label}</span><span data-master-value="${key}">${formatMasterValue(key, value)}</span></div>
+        <input type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-master="${key}">
+      </div>`;
+  };
+
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0">
+        <h2>Mastering</h2>
+        <div class="sub">${escapeHtml(session.name.toUpperCase())} · MASTER CHAIN</div>
+      </div>
+      <button class="modal-close" data-close>Done</button>
+    </header>
+    <div class="modal-body">
+      <div class="panel">
+        <div class="switch-row">
+          <div>
+            <h3 style="margin:0 0 4px">MASTER CHAIN</h3>
+            <span class="range-label">${chain.bypassed ? 'Bypassed · EQ, compressor and limiter are off' : 'EQ · bus compressor · limiter'}</span>
+          </div>
+          <button class="switch ${chain.bypassed ? '' : 'on'}" id="masteringBypass" aria-label="Toggle master chain"></button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>TARGET</h3>
+        <div class="mastering-targets">${targetButtons}</div>
+        <p class="range-label" style="margin:8px 0 0">${target.name} · ${target.loudness} LUFS · ${target.truePeak} dBTP · ${target.detail}</p>
+      </div>
+
+      <div class="panel">
+        <div class="label-row" style="margin-bottom:8px">
+          <h3 style="margin:0">LOUDNESS</h3>
+          <button class="pill" id="masteringReset">RESET</button>
+        </div>
+        <div class="loudness-grid">
+          <div class="loudness-cell">
+            <span class="loudness-title">INTEGRATED</span>
+            <strong class="loudness-value" data-loudness="integrated">—</strong>
+            <span class="loudness-unit">LUFS</span>
+            <div class="loudness-bar"><div class="loudness-fill" data-loudness-bar="integrated"></div></div>
+          </div>
+          <div class="loudness-cell">
+            <span class="loudness-title">SHORT-TERM</span>
+            <strong class="loudness-value" data-loudness="shortTerm">—</strong>
+            <span class="loudness-unit">LUFS</span>
+            <div class="loudness-bar"><div class="loudness-fill" data-loudness-bar="shortTerm"></div></div>
+          </div>
+          <div class="loudness-cell">
+            <span class="loudness-title">TRUE PEAK</span>
+            <strong class="loudness-value" data-loudness="truePeak">—</strong>
+            <span class="loudness-unit">dBTP</span>
+            <div class="loudness-bar"><div class="loudness-fill" data-loudness-bar="truePeak"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="label-row">
+          <h3 style="margin:0">MASTER EQ</h3>
+          <button class="mini ${eqOff ? '' : 'on'}" data-master-bypass="eq">${eqOff ? 'BYP' : 'ON'}</button>
+        </div>
+        ${control('eq.lowGain', 'Low', -12, 12, 0.5)}
+        ${control('eq.midFrequency', 'Mid frequency', 200, 6000, 10)}
+        ${control('eq.midGain', 'Mid gain', -12, 12, 0.5)}
+        ${control('eq.highGain', 'High', -12, 12, 0.5)}
+      </div>
+
+      <div class="panel">
+        <div class="label-row">
+          <h3 style="margin:0">BUS COMPRESSOR</h3>
+          <button class="mini ${compOff ? '' : 'on'}" data-master-bypass="compressor">${compOff ? 'BYP' : 'ON'}</button>
+        </div>
+        <div class="field">
+          <div class="label-row"><span>Threshold</span><span data-master-value="compressor.threshold">${formatMasterValue('compressor.threshold', chain.compressor.threshold)}</span></div>
+          <input type="range" min="-40" max="0" step="0.5" value="${chain.compressor.threshold}" data-master="compressor.threshold">
+        </div>
+        <div class="field">
+          <div class="label-row"><span>Ratio</span><span data-master-value="compressor.ratio">${formatMasterValue('compressor.ratio', chain.compressor.ratio)}</span></div>
+          <input type="range" min="1" max="8" step="0.1" value="${chain.compressor.ratio}" data-master="compressor.ratio">
+        </div>
+        ${control('compressor.attack', 'Attack', 0.001, 0.1, 0.001)}
+        ${control('compressor.release', 'Release', 0.05, 1, 0.01)}
+      </div>
+
+      <div class="panel">
+        <div class="label-row">
+          <h3 style="margin:0">LIMITER</h3>
+          <button class="mini ${limiterOff ? '' : 'on'}" data-master-bypass="limiter">${limiterOff ? 'BYP' : 'ON'}</button>
+        </div>
+        ${control('limiter.drive', 'Drive', -12, 12, 0.5)}
+        ${control('limiter.ceiling', 'Ceiling', -6, 0, 0.1)}
+        ${control('limiter.release', 'Release', 0.02, 0.5, 0.01)}
+      </div>
+
+      <p class="range-label" style="text-align:center">Applied to playback, the mix bounce and stems.</p>
+    </div>`, { tall: true });
+
+  document.getElementById('masteringBypass').addEventListener('click', () => {
+    snapshot();
+    chain.bypassed = !chain.bypassed;
+    engine.applyMastering();
+    persist();
+    openMastering();
+  });
+
+  el.modalRoot.querySelectorAll('[data-target]').forEach((button) => {
+    button.addEventListener('click', () => {
+      snapshot();
+      chain.target = button.dataset.target;
+      chain.limiter.ceiling = model.loudnessTarget(chain.target).truePeak;
+      engine.applyMastering();
+      persist();
+      openMastering();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-master]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const [group, field] = input.dataset.master.split('.');
+      const value = Number(input.value);
+      chain[group][field] = value;
+      const label = el.modalRoot.querySelector(`[data-master-value="${input.dataset.master}"]`);
+      if (label) label.textContent = formatMasterValue(input.dataset.master, value);
+      engine.applyMastering();
+      persist();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-master-bypass]').forEach((button) => {
+    button.addEventListener('click', () => {
+      snapshot();
+      const group = button.dataset.masterBypass;
+      chain[group].bypassed = !chain[group].bypassed;
+      engine.applyMastering();
+      persist();
+      openMastering();
+    });
+  });
+
+  document.getElementById('masteringReset').addEventListener('click', () => {
+    engine.resetLoudness();
+    updateMasteringMeters();
+  });
+
+  updateMasteringMeters();
 }
 
 // ---------- Channel presets ----------
@@ -2531,29 +3217,31 @@ function startInstrumentRecording() {
       if (state.session.id === sessionID) snapshot();
       const extension = type.includes('mp4') ? 'm4a' : 'webm';
       const fileName = `${safeName(takeName)}-${Date.now()}.${extension}`;
-      const fileId = await model.saveFile(blob, fileName);
-      const clipName = `${takeName} ${destinationTrack.clips.length + 1}`;
-      destinationTrack.clips.push({
-        id: model.uid(),
-        name: clipName,
-        fileId,
-        start: position,
-        duration: buffer.duration,
-        sourceStart: 0,
-        sourceDuration: buffer.duration
-      });
-      destinationTrack.clips.sort((left, right) => left.start - right.start);
+      let recordedName = 'Take';
+      const punched = await applyPunchRecording(destinationTrack, buffer, position, takeName);
+      if (punched) {
+        recordedName = punched.name;
+      } else {
+        const fileId = await model.saveFile(blob, fileName);
+        const take = registerTake(destinationTrack, {
+          name: takeName,
+          fileId,
+          start: position,
+          duration: buffer.duration
+        });
+        state.buffers.set(fileId, buffer);
+        engine.buffers.set(fileId, buffer);
+        state.peaks.set(fileId, peaks);
+        recordedName = take.name;
+      }
       session.editedAt = Date.now();
-      state.buffers.set(fileId, buffer);
-      engine.buffers.set(fileId, buffer);
-      state.peaks.set(fileId, peaks);
       model.saveStore(state.store);
       if (state.session.id === sessionID) {
         persist();
         engine.rebuild();
         render();
       }
-      toast(`Recorded ${clipName} at ${model.formatTime(position)}`);
+      toast(`Recorded ${recordedName} at ${model.formatTime(position)}`);
     } catch (error) {
       toast(error.message || 'The instrument take could not be added to the session');
     }
@@ -2740,30 +3428,33 @@ async function startMicrophoneRecording() {
 
       const extension = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
       const fileName = `Microphone-Take-${Date.now()}.${extension}`;
-      const fileId = await model.saveFile(blob, fileName);
-      const clipName = `Microphone Take ${currentTrack.clips.length + 1}`;
+      const takeName = 'Microphone Take';
       if (state.session.id === sessionID) snapshot();
-      currentTrack.clips.push({
-        id: model.uid(),
-        name: clipName,
-        fileId,
-        start: position,
-        duration: buffer.duration,
-        sourceStart: 0,
-        sourceDuration: buffer.duration
-      });
-      currentTrack.clips.sort((left, right) => left.start - right.start);
+      let recordedName = 'Take';
+      const punched = await applyPunchRecording(currentTrack, buffer, position, takeName);
+      if (punched) {
+        recordedName = punched.name;
+      } else {
+        const fileId = await model.saveFile(blob, fileName);
+        const take = registerTake(currentTrack, {
+          name: takeName,
+          fileId,
+          start: position,
+          duration: buffer.duration
+        });
+        state.buffers.set(fileId, buffer);
+        engine.buffers.set(fileId, buffer);
+        state.peaks.set(fileId, computePeaks(buffer));
+        recordedName = take.name;
+      }
       currentSession.editedAt = Date.now();
-      state.buffers.set(fileId, buffer);
-      engine.buffers.set(fileId, buffer);
-      state.peaks.set(fileId, computePeaks(buffer));
       model.saveStore(state.store);
       if (state.session.id === sessionID) {
         persist();
         engine.rebuild();
         render();
       }
-      toast(`Recorded ${clipName} at ${model.formatTime(position)}`);
+      toast(`Recorded ${recordedName} at ${model.formatTime(position)}`);
     } catch (error) {
       toast(error.message || 'The microphone take could not be added to the session');
     } finally {
@@ -3021,6 +3712,7 @@ function openInstruments(destinationTrackID = null) {
     && !state.microphoneRecording
     && !state.microphoneFinalizing
     && !state.microphoneRequesting;
+  const punchArmed = Boolean(recordTrack) && isPunchActiveFor(recordTrack.id);
   const canRecordMicrophone = Boolean(recordTrack) && !state.instrumentRecording && !state.microphoneFinalizing;
   const microphoneButtonDisabled = !state.microphoneRecording
     && (state.microphoneRequesting || state.microphoneFinalizing || !canRecordMicrophone);
@@ -3057,9 +3749,9 @@ function openInstruments(destinationTrackID = null) {
           <span>${escapeHtml(recordStatus)}</span>
         </div>
         <span class="instrument-record-time" id="instrumentRecordTime">${model.formatTime(state.instrumentRecordDuration)}</span>
-        <button class="instrument-record-button ${state.instrumentRecording ? 'recording' : ''}" data-instrument-record ${state.instrumentRecording || canRecord ? '' : 'disabled'}>${state.instrumentRecording ? 'STOP' : 'REC'}</button>
+        <button class="instrument-record-button ${state.instrumentRecording ? 'recording' : ''}" data-instrument-record ${state.instrumentRecording || canRecord ? '' : 'disabled'}>${state.instrumentRecording ? 'STOP' : punchArmed ? 'PUNCH' : 'REC'}</button>
       </div>
-      <p class="instrument-record-hint">Play any instrument; your take is placed at the current playhead.</p>
+      <p class="instrument-record-hint">${punchArmed ? 'Punch is armed: only the IN–OUT range will be captured.' : 'Play any instrument; your take is placed at the current playhead.'}</p>
       <div class="instrument-record-bar microphone-record-bar ${state.microphoneRecording ? 'recording' : ''}">
         <span class="record-light"></span>
         <div class="instrument-record-meta">
@@ -3379,9 +4071,56 @@ async function openSessions() {
       </div>
     </div>`;
   }).join('');
-  const exportRows = exports.map((item) => {
+  const previewURLs = new Map();
+  exports.forEach((item) => {
     const previewURL = URL.createObjectURL(item.blob);
+    previewURLs.set(item.id, previewURL);
     state.exportPreviewURLs.push(previewURL);
+  });
+
+  let exportQuery = '';
+  let exportFilter = 'all';
+
+  const exportTerm = () => exportQuery.trim().toLowerCase();
+
+  const matchesExportFilter = (item) => exportFilter === 'all'
+    || (exportFilter === 'mix' && item.kind !== 'stem')
+    || (exportFilter === 'stem' && item.kind === 'stem');
+
+  const visibleExports = () => exports
+    .filter((item) => {
+      if (!matchesExportFilter(item)) return false;
+      const term = exportTerm();
+      if (!term) return true;
+      const haystack = `${item.name || ''} ${item.sessionName || ''}`.toLowerCase();
+      return haystack.includes(term);
+    })
+    .sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
+
+  const exportEmptyMarkup = () => {
+    if (!exports.length) {
+      return '<p class="export-empty">No bounces yet. Render a mix or stems to build your library.</p>';
+    }
+    if (exportTerm()) {
+      return `<p class="export-empty">No exports match “${escapeHtml(exportQuery.trim())}”. Try another name or switch the filter.</p>`;
+    }
+    if (exportFilter !== 'all') {
+      const label = exportFilter === 'stem' ? 'stems' : 'mixes';
+      return `<p class="export-empty">No ${label} saved yet. Switch the filter to see the rest of your library.</p>`;
+    }
+    return '<p class="export-empty">Nothing to show right now.</p>';
+  };
+
+  const exportExtension = (item) => {
+    const match = /\.([a-z0-9]+)$/i.exec(item.name || '');
+    if (match) return match[1].toLowerCase();
+    return (item.format || 'wav').toLowerCase();
+  };
+
+  const exportBaseName = (item) => (item.name || 'export').replace(/\.[a-z0-9]+$/i, '');
+
+  const exportRowsMarkup = () => visibleExports().map((item) => {
+    const previewURL = previewURLs.get(item.id) || '';
     const kind = item.kind === 'stem' ? 'STEM' : 'MIX';
     const name = item.name || `${kind.toLowerCase()} export`;
     return `<article class="export-row">
@@ -3393,11 +4132,87 @@ async function openSessions() {
       </div>
       <audio class="export-preview" controls preload="none" src="${escapeHtml(previewURL)}" aria-label="Preview ${escapeHtml(name)}"></audio>
       <div class="export-actions">
+        <button class="icon-btn export-rename" data-export-rename="${escapeHtml(item.id)}" title="Rename" aria-label="Rename ${escapeHtml(name)}">✎</button>
         <button class="tool" data-export-download="${escapeHtml(item.id)}">Download</button>
         <button class="icon-btn" data-export-delete="${escapeHtml(item.id)}" title="Delete" aria-label="Delete ${escapeHtml(name)}">×</button>
       </div>
     </article>`;
   }).join('');
+
+  const exportCountText = () => {
+    const shown = visibleExports().length;
+    const total = exports.length;
+    return shown === total ? `${total} SAVED` : `${shown} OF ${total} SHOWN`;
+  };
+
+  const bindExportRowActions = () => {
+    el.modalRoot.querySelectorAll('[data-export-rename]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const item = exports.find((entry) => entry.id === button.dataset.exportRename);
+        if (!item) return;
+
+        const extension = exportExtension(item);
+        const entered = window.prompt('Export name', exportBaseName(item));
+        if (entered === null) return;
+
+        const trimmed = entered.trim().replace(/\.[a-z0-9]+$/i, '').trim();
+        if (!trimmed) return;
+
+        const name = `${trimmed}.${extension}`;
+        if (name === item.name) return;
+
+        try {
+          const renamed = await model.renameExport(item.id, name);
+          if (!renamed) {
+            toast('This export is no longer in the library');
+            return;
+          }
+          item.name = name;
+          updateExportList();
+          toast(`Export renamed to ${name}`);
+        } catch (error) {
+          toast('Could not rename this export');
+        }
+      });
+    });
+
+    el.modalRoot.querySelectorAll('[data-export-download]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const item = exports.find((entry) => entry.id === button.dataset.exportDownload);
+        if (item?.blob) download(item.blob, item.name || 'audio-export');
+      });
+    });
+
+    el.modalRoot.querySelectorAll('[data-export-delete]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const item = exports.find((entry) => entry.id === button.dataset.exportDelete);
+        if (!item || !window.confirm(`Delete export "${item.name}"?`)) return;
+        try {
+          await model.removeExport(item.id);
+          exports = exports.filter((entry) => entry.id !== item.id);
+          const previewURL = previewURLs.get(item.id);
+          if (previewURL) {
+            URL.revokeObjectURL(previewURL);
+            previewURLs.delete(item.id);
+            state.exportPreviewURLs = state.exportPreviewURLs.filter((url) => url !== previewURL);
+          }
+          updateExportList();
+          toast('Export deleted');
+        } catch (error) {
+          toast('Could not delete this export');
+        }
+      });
+    });
+  };
+
+  const updateExportList = () => {
+    const list = el.modalRoot.querySelector('#exportList');
+    if (!list) return;
+    list.innerHTML = exportRowsMarkup() || exportEmptyMarkup();
+    const count = el.modalRoot.querySelector('#exportCount');
+    if (count) count.textContent = exportCountText();
+    bindExportRowActions();
+  };
 
   openModal(`
     <header class="modal-header">
@@ -3407,8 +4222,23 @@ async function openSessions() {
     <div class="modal-body">
       <div class="list">${rows}</div>
       <section class="exports-section">
-        <div class="exports-heading"><h3>Exports</h3><span>${exports.length} SAVED</span></div>
-        <div class="export-list">${exportRows || '<p class="export-empty">No bounces yet. Render a mix or stems to build your library.</p>'}</div>
+        <div class="exports-heading"><h3>Exports</h3><span id="exportCount">${exportCountText()}</span></div>
+        <div class="export-toolbar">
+          <input
+            id="exportSearch"
+            class="export-search"
+            type="search"
+            placeholder="Search exports and sessions"
+            aria-label="Search exports and sessions"
+            autocomplete="off"
+            spellcheck="false" />
+          <div class="export-filters" role="group" aria-label="Filter exports by type">
+            <button class="pill on" data-export-filter="all" aria-pressed="true">All</button>
+            <button class="pill" data-export-filter="mix" aria-pressed="false">Mixes</button>
+            <button class="pill" data-export-filter="stem" aria-pressed="false">Stems</button>
+          </div>
+        </div>
+        <div class="export-list" id="exportList">${exportRowsMarkup() || exportEmptyMarkup()}</div>
       </section>
     </div>
     <footer class="modal-footer">
@@ -3436,24 +4266,25 @@ async function openSessions() {
     toast(`Template "${template.name}" saved`);
   });
 
-  el.modalRoot.querySelectorAll('[data-export-download]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const item = exports.find((entry) => entry.id === button.dataset.exportDownload);
-      if (item?.blob) download(item.blob, item.name || 'audio-export');
-    });
-  });
+  bindExportRowActions();
 
-  el.modalRoot.querySelectorAll('[data-export-delete]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const item = exports.find((entry) => entry.id === button.dataset.exportDelete);
-      if (!item || !window.confirm(`Delete export "${item.name}"?`)) return;
-      try {
-        await model.removeExport(item.id);
-        await openSessions();
-        toast('Export deleted');
-      } catch (error) {
-        toast('Could not delete this export');
-      }
+  const exportSearchInput = el.modalRoot.querySelector('#exportSearch');
+  if (exportSearchInput) {
+    exportSearchInput.addEventListener('input', () => {
+      exportQuery = exportSearchInput.value;
+      updateExportList();
+    });
+  }
+
+  el.modalRoot.querySelectorAll('[data-export-filter]').forEach((button) => {
+    button.addEventListener('click', () => {
+      exportFilter = button.dataset.exportFilter || 'all';
+      el.modalRoot.querySelectorAll('[data-export-filter]').forEach((other) => {
+        const active = other === button;
+        other.classList.toggle('on', active);
+        other.setAttribute('aria-pressed', String(active));
+      });
+      updateExportList();
     });
   });
 
@@ -3549,6 +4380,8 @@ function uniqueSessionName(base) {
 // ---------- Event wiring ----------
 
 function bindEvents() {
+  el.modeSimpleBtn.addEventListener('click', () => setStudioMode('simple'));
+  el.modeProBtn.addEventListener('click', () => setStudioMode('pro'));
   el.addTrackBtn.addEventListener('click', () => el.fileInput.click());
   el.emptyImportBtn.addEventListener('click', () => el.fileInput.click());
   el.fileInput.addEventListener('change', () => {
@@ -3567,6 +4400,7 @@ function bindEvents() {
   el.undoBtn.addEventListener('click', undo);
   el.redoBtn.addEventListener('click', redo);
   el.mixerBtn.addEventListener('click', openMixer);
+  el.masteringBtn.addEventListener('click', openMastering);
   el.fxBtn.addEventListener('click', openMasterEffects);
   el.presetBtn.addEventListener('click', openChannelPresets);
   el.sessionsBtn.addEventListener('click', openSessions);
@@ -3585,6 +4419,41 @@ function bindEvents() {
     if (!model.hasLoopRange(session)) return;
     snapshot();
     session.loop.enabled = !session.loop.enabled;
+    persist();
+    render();
+  });
+
+  el.punchBtn.addEventListener('click', () => {
+    const session = state.session;
+    if (!hasPunchRange()) return;
+    snapshot();
+    session.punch.enabled = !session.punch.enabled;
+    persist();
+    render();
+  });
+
+  el.punchInBtn.addEventListener('click', () => {
+    const session = state.session;
+    snapshot();
+    const time = Math.max(0, currentPosition());
+    session.punch.in = time;
+    if (session.punch.out <= time + 0.05) session.punch.out = time + 1;
+    persist();
+    render();
+  });
+
+  el.punchOutBtn.addEventListener('click', () => {
+    const session = state.session;
+    snapshot();
+    session.punch.out = Math.max(session.punch.in + 0.05, currentPosition());
+    persist();
+    render();
+  });
+
+  el.punchArm.addEventListener('change', () => {
+    const session = state.session;
+    snapshot();
+    session.punch.armedTrackId = el.punchArm.value || null;
     persist();
     render();
   });
@@ -3709,6 +4578,8 @@ function bindEvents() {
       case 'instrument': openInstruments(trackId); break;
       case 'automation': toggleAutomation(trackId); break;
       case 'automation-pan': toggleAutomation(trackId, 'pan'); break;
+      case 'takes': openTakeLane(trackId); break;
+      case 'audition-take': openTakeLane(trackId); break;
       default: break;
     }
   });
@@ -4132,6 +5003,8 @@ async function boot() {
 
   state.store.needsDemo = false;
   state.store.houseDemoSeeded = true;
+  state.mode = localStorage.getItem('studio.mode') === 'pro' ? 'pro' : 'simple';
+  applyStudioMode();
   const index = state.store.sessions.findIndex((session) => session.id === state.session.id);
   if (index >= 0) state.store.sessions[index] = state.session;
   else state.store.sessions.push(state.session);

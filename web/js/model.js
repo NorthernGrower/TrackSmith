@@ -81,6 +81,103 @@ function defaultCompressor() {
   };
 }
 
+/// The two shared send buses: A is a reverb, B is a tempo-synced delay.
+export function defaultAuxBuses() {
+  return {
+    auxA: {
+      name: 'Aux A',
+      effect: 'reverb',
+      bypassed: false,
+      level: 0.8,
+      reverbMix: 0.4,
+      reverbDecay: 1.8,
+      delayBeats: 0.5,
+      delayFeedback: 0.3,
+      delayMix: 0.3
+    },
+    auxB: {
+      name: 'Aux B',
+      effect: 'delay',
+      bypassed: false,
+      level: 0.7,
+      reverbMix: 0.3,
+      reverbDecay: 1.4,
+      delayBeats: 0.75,
+      delayFeedback: 0.35,
+      delayMix: 0.35
+    }
+  };
+}
+
+function normalizeAuxBus(bus, defaults) {
+  const value = bus && typeof bus === 'object' ? bus : {};
+  return {
+    name: typeof value.name === 'string' && value.name.trim() ? value.name.trim() : defaults.name,
+    effect: value.effect === 'delay' ? 'delay' : defaults.effect,
+    bypassed: value.bypassed === true,
+    level: clamp(Number(value.level ?? defaults.level), 0, 1),
+    reverbMix: clamp(Number(value.reverbMix ?? defaults.reverbMix), 0, 1),
+    reverbDecay: clamp(Number(value.reverbDecay ?? defaults.reverbDecay), 0.2, 5),
+    delayBeats: clamp(Number(value.delayBeats ?? defaults.delayBeats), 0.25, 2),
+    delayFeedback: clamp(Number(value.delayFeedback ?? defaults.delayFeedback), 0, 0.9),
+    delayMix: clamp(Number(value.delayMix ?? defaults.delayMix), 0, 1)
+  };
+}
+
+/// Loudness targets the mastering meters are judged against.
+export const LOUDNESS_TARGETS = [
+  { id: 'streaming', name: 'Streaming', loudness: -14, truePeak: -1, detail: 'Spotify, Apple Music' },
+  { id: 'podcast', name: 'Podcast', loudness: -16, truePeak: -1, detail: 'Spoken word' },
+  { id: 'club', name: 'Club', loudness: -9, truePeak: -0.1, detail: 'Loud club master' }
+];
+
+/// Master EQ, bus compressor and limiter applied to the whole mix.
+export function defaultMastering() {
+  return {
+    bypassed: true,
+    target: 'streaming',
+    eq: { bypassed: false, lowGain: 0, midFrequency: 1000, midGain: 0, highGain: 0 },
+    compressor: { bypassed: false, threshold: -18, ratio: 2, attack: 0.03, release: 0.25 },
+    limiter: { bypassed: false, drive: 0, ceiling: -1, release: 0.08 }
+  };
+}
+
+export function loudnessTarget(id) {
+  return LOUDNESS_TARGETS.find((item) => item.id === id) || LOUDNESS_TARGETS[0];
+}
+
+function normalizeMastering(mastering) {
+  const defaults = defaultMastering();
+  const value = mastering && typeof mastering === 'object' ? mastering : {};
+  const eq = value.eq && typeof value.eq === 'object' ? value.eq : {};
+  const compressor = value.compressor && typeof value.compressor === 'object' ? value.compressor : {};
+  const limiter = value.limiter && typeof value.limiter === 'object' ? value.limiter : {};
+  return {
+    bypassed: value.bypassed !== false,
+    target: LOUDNESS_TARGETS.some((item) => item.id === value.target) ? value.target : defaults.target,
+    eq: {
+      bypassed: eq.bypassed === true,
+      lowGain: clamp(Number(eq.lowGain ?? defaults.eq.lowGain), -12, 12),
+      midFrequency: clamp(Number(eq.midFrequency ?? defaults.eq.midFrequency), 200, 6000),
+      midGain: clamp(Number(eq.midGain ?? defaults.eq.midGain), -12, 12),
+      highGain: clamp(Number(eq.highGain ?? defaults.eq.highGain), -12, 12)
+    },
+    compressor: {
+      bypassed: compressor.bypassed === true,
+      threshold: clamp(Number(compressor.threshold ?? defaults.compressor.threshold), -40, 0),
+      ratio: clamp(Number(compressor.ratio ?? defaults.compressor.ratio), 1, 8),
+      attack: clamp(Number(compressor.attack ?? defaults.compressor.attack), 0.001, 0.1),
+      release: clamp(Number(compressor.release ?? defaults.compressor.release), 0.05, 1)
+    },
+    limiter: {
+      bypassed: limiter.bypassed === true,
+      drive: clamp(Number(limiter.drive ?? defaults.limiter.drive), -12, 12),
+      ceiling: clamp(Number(limiter.ceiling ?? defaults.limiter.ceiling), -6, 0),
+      release: clamp(Number(limiter.release ?? defaults.limiter.release), 0.02, 0.5)
+    }
+  };
+}
+
 export function createTrack({ name, fileId = null, duration = 0, index = 0 }) {
   const track = {
     id: uid(),
@@ -90,6 +187,8 @@ export function createTrack({ name, fileId = null, duration = 0, index = 0 }) {
     pan: 0,
     muted: false,
     soloed: false,
+    sendA: 0,
+    sendB: 0,
     eq: defaultEQ(),
     comp: defaultCompressor(),
     automation: [],
@@ -115,11 +214,15 @@ export function createTrack({ name, fileId = null, duration = 0, index = 0 }) {
 }
 
 export function createSession(name = 'Untitled Session') {
+  const auxBuses = defaultAuxBuses();
   return {
     id: uid(),
     name,
     tempo: 120,
     masterVolume: 1,
+    auxA: auxBuses.auxA,
+    auxB: auxBuses.auxB,
+    mastering: defaultMastering(),
     masterEffects: {
       bypassed: true,
       reverbMix: 0.32,
@@ -129,6 +232,7 @@ export function createSession(name = 'Untitled Session') {
       delayMix: 0.22
     },
     loop: { start: 0, end: 0, enabled: false },
+    punch: { enabled: false, in: 0, out: 0, armedTrackId: null },
     metronome: { enabled: false, level: 0.7, countIn: false },
     drumPattern: emptyDrumPattern(),
     sections: [],
@@ -290,8 +394,38 @@ export function hasLoopRange(session) {
   return session.loop.end - session.loop.start > 0.01;
 }
 
-export function automationGain(track, time) {
-  const points = [...(track.automation || [])].sort((a, b) => a.time - b.time);
+/// The gain of a clip at an absolute timeline moment, including its own fades
+/// and automatic crossfades with the clips it overlaps.
+export function clipGainAt(clip, track, time) {
+  const start = Math.max(0, clip.start);
+  const playable = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+  const local = time - start;
+  if (local < 0 || local > playable) return 0;
+
+  let gain = 1;
+  const fadeIn = Math.max(0, Number(clip.fadeIn) || 0);
+  const fadeOut = Math.max(0, Number(clip.fadeOut) || 0);
+  if (fadeIn > 0 && local < fadeIn) gain *= local / fadeIn;
+  if (fadeOut > 0 && local > playable - fadeOut) gain *= (playable - local) / fadeOut;
+
+  const others = (track.clips || [])
+    .filter((item) => item.id !== clip.id)
+    .sort((left, right) => left.start - right.start);
+  const previous = [...others].reverse().find((item) => item.start <= start);
+  if (previous && previous.start + previous.duration > start) {
+    const overlap = previous.start + previous.duration - start;
+    if (local < overlap && overlap > 0) gain *= 0.5 + 0.5 * (local / overlap);
+  }
+  const next = others.find((item) => item.start > start);
+  if (next && next.start < start + playable) {
+    const overlap = start + playable - next.start;
+    const remaining = playable - local;
+    if (remaining < overlap && overlap > 0) gain *= 0.5 + 0.5 * (remaining / overlap);
+  }
+  return clamp(gain, 0, 1);
+}
+
+export function automationGain(track, time) {  const points = [...(track.automation || [])].sort((a, b) => a.time - b.time);
   if (!points.length) return 1;
   const first = points[0];
   if (time <= first.time) return clamp(first.gain, 0, 1);
@@ -347,11 +481,20 @@ export function normalizeSession(session) {
   normal.masterEffects.delayBeats = clamp(Number(normal.masterEffects.delayBeats ?? 0.5), 0.25, 2);
   normal.masterEffects.delayFeedback = clamp(Number(normal.masterEffects.delayFeedback ?? 0.38), 0, 0.9);
   normal.masterEffects.delayMix = clamp(Number(normal.masterEffects.delayMix ?? 0.22), 0, 1);
+  const auxDefaults = defaultAuxBuses();
+  normal.auxA = normalizeAuxBus(normal.auxA, auxDefaults.auxA);
+  normal.auxB = normalizeAuxBus(normal.auxB, auxDefaults.auxB);
+  normal.mastering = normalizeMastering(normal.mastering);
   normal.loop = normal.loop || { start: 0, end: 0, enabled: false };
   normal.loop.start = Math.max(0, Number(normal.loop.start) || 0);
   normal.loop.end = Math.max(normal.loop.start, Number(normal.loop.end) || 0);
   normal.loop.enabled = Boolean(normal.loop.enabled);
   normal.metronome = normal.metronome || { enabled: false, level: 0.7, countIn: false };
+  normal.punch = normal.punch || { enabled: false, in: 0, out: 0, armedTrackId: null };
+  normal.punch.enabled = Boolean(normal.punch.enabled);
+  normal.punch.in = Math.max(0, Number(normal.punch.in) || 0);
+  normal.punch.out = Math.max(0, Number(normal.punch.out) || 0);
+  normal.punch.armedTrackId = normal.punch.armedTrackId || null;
   normal.metronome.level = clamp(Number(normal.metronome.level ?? 0.7), 0, 1);
   normal.metronome.enabled = Boolean(normal.metronome.enabled);
   normal.metronome.countIn = Boolean(normal.metronome.countIn);
@@ -381,6 +524,8 @@ export function normalizeSession(session) {
     track.pan = clamp(Number(track.pan ?? 0), -1, 1);
     track.muted = Boolean(track.muted);
     track.soloed = Boolean(track.soloed);
+    track.sendA = clamp(Number(track.sendA ?? 0), 0, 1);
+    track.sendB = clamp(Number(track.sendB ?? 0), 0, 1);
     track.eq = track.eq || defaultEQ();
     track.eq.bypassed = Boolean(track.eq.bypassed);
     track.eq.low = track.eq.low || { frequency: 120, gain: 0 };
@@ -391,6 +536,12 @@ export function normalizeSession(session) {
     track.automation = Array.isArray(track.automation) ? track.automation : [];
     track.panAutomation = Array.isArray(track.panAutomation) ? track.panAutomation : [];
     track.clips = Array.isArray(track.clips) ? track.clips : [];
+    track.clips.forEach((clip) => {
+      clip.fadeIn = Math.max(0, Number(clip.fadeIn) || 0);
+      clip.fadeOut = Math.max(0, Number(clip.fadeOut) || 0);
+    });
+    track.takes = Array.isArray(track.takes) ? track.takes : [];
+    track.activeTakeId = track.activeTakeId || null;
     track.notes = Array.isArray(track.notes) ? track.notes : [];
     track.frozen = track.frozen || { fileId: null, duration: 0 };
     track.frozen.fileId = track.frozen.fileId || null;
@@ -524,4 +675,24 @@ export function listExports() {
 
 export function removeExport(id) {
   return withStore('readwrite', (store) => store.delete(id), DB_EXPORT_STORE);
+}
+
+export async function renameExport(id, name) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(DB_EXPORT_STORE, 'readwrite');
+    const store = transaction.objectStore(DB_EXPORT_STORE);
+    const request = store.get(id);
+    let renamed = false;
+
+    request.onsuccess = () => {
+      const entry = request.result;
+      if (!entry) return;
+      store.put({ ...entry, name }, id);
+      renamed = true;
+    };
+    transaction.oncomplete = () => resolve(renamed);
+    transaction.onerror = () => reject(transaction.error || request.error);
+    transaction.onabort = () => reject(transaction.error || new Error('IndexedDB transaction was aborted'));
+  });
 }

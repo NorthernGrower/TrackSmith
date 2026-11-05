@@ -67,6 +67,14 @@ struct Track: Identifiable, Codable, Equatable {
     var notes: [SynthNote]
     /// Instrument the track's piano-roll notes are played with.
     var voice: TrackVoiceKind
+    /// Recorded passes on this track, each kept in the take lane.
+    var takes: [TrackTake]
+    /// The take currently placed on the timeline.
+    var activeTakeID: UUID?
+    /// Send level to aux bus A, from 0 to 1.
+    var sendA: Float
+    /// Send level to aux bus B, from 0 to 1.
+    var sendB: Float
     /// Rendered audio of this track while it is frozen.
     var frozenFileName: String?
     var frozenDuration: TimeInterval
@@ -87,6 +95,10 @@ struct Track: Identifiable, Codable, Equatable {
         panAutomationPoints: [PanAutomationPoint] = [],
         notes: [SynthNote] = [],
         voice: TrackVoiceKind = .synth,
+        takes: [TrackTake] = [],
+        activeTakeID: UUID? = nil,
+        sendA: Float = 0,
+        sendB: Float = 0,
         frozenFileName: String? = nil,
         frozenDuration: TimeInterval = 0
     ) {
@@ -113,6 +125,10 @@ struct Track: Identifiable, Codable, Equatable {
         self.panAutomationPoints = panAutomationPoints
         self.notes = notes
         self.voice = voice
+        self.takes = takes
+        self.activeTakeID = activeTakeID
+        self.sendA = min(1, max(0, sendA))
+        self.sendB = min(1, max(0, sendB))
         self.frozenFileName = frozenFileName
         self.frozenDuration = frozenDuration
         clipLayoutInitialized = true
@@ -133,6 +149,10 @@ struct Track: Identifiable, Codable, Equatable {
         case panAutomationPoints
         case notes
         case voice
+        case takes
+        case activeTakeID
+        case sendA
+        case sendB
         case frozenFileName
         case frozenDuration
         case clipLayoutInitialized
@@ -171,6 +191,10 @@ struct Track: Identifiable, Codable, Equatable {
         panAutomationPoints = try values.decodeIfPresent([PanAutomationPoint].self, forKey: .panAutomationPoints) ?? []
         notes = try values.decodeIfPresent([SynthNote].self, forKey: .notes) ?? []
         voice = try values.decodeIfPresent(TrackVoiceKind.self, forKey: .voice) ?? .synth
+        takes = try values.decodeIfPresent([TrackTake].self, forKey: .takes) ?? []
+        activeTakeID = try values.decodeIfPresent(UUID.self, forKey: .activeTakeID)
+        sendA = min(1, max(0, try values.decodeIfPresent(Float.self, forKey: .sendA) ?? 0))
+        sendB = min(1, max(0, try values.decodeIfPresent(Float.self, forKey: .sendB) ?? 0))
         frozenFileName = try values.decodeIfPresent(String.self, forKey: .frozenFileName)
         frozenDuration = try values.decodeIfPresent(TimeInterval.self, forKey: .frozenDuration) ?? 0
         clipLayoutInitialized = true
@@ -260,6 +284,12 @@ struct AudioClip: Identifiable, Codable, Equatable {
     /// Full length of the underlying source file.
     var sourceDuration: TimeInterval
     var isOriginal: Bool
+    /// The recorded take this clip represents, when it came from the take lane.
+    var takeID: UUID?
+    /// Fade in at the start of the clip, in seconds.
+    var fadeIn: TimeInterval
+    /// Fade out at the end of the clip, in seconds.
+    var fadeOut: TimeInterval
 
     init(
         id: UUID = UUID(),
@@ -269,7 +299,10 @@ struct AudioClip: Identifiable, Codable, Equatable {
         duration: TimeInterval,
         sourceStartTime: TimeInterval = 0,
         sourceDuration: TimeInterval? = nil,
-        isOriginal: Bool = false
+        isOriginal: Bool = false,
+        takeID: UUID? = nil,
+        fadeIn: TimeInterval = 0,
+        fadeOut: TimeInterval = 0
     ) {
         self.id = id
         self.name = name
@@ -279,6 +312,9 @@ struct AudioClip: Identifiable, Codable, Equatable {
         self.sourceStartTime = sourceStartTime
         self.sourceDuration = sourceDuration ?? duration
         self.isOriginal = isOriginal
+        self.takeID = takeID
+        self.fadeIn = max(0, fadeIn)
+        self.fadeOut = max(0, fadeOut)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -290,6 +326,9 @@ struct AudioClip: Identifiable, Codable, Equatable {
         case sourceStartTime
         case sourceDuration
         case isOriginal
+        case takeID
+        case fadeIn
+        case fadeOut
     }
 
     init(from decoder: Decoder) throws {
@@ -302,5 +341,40 @@ struct AudioClip: Identifiable, Codable, Equatable {
         sourceStartTime = try values.decodeIfPresent(TimeInterval.self, forKey: .sourceStartTime) ?? 0
         sourceDuration = try values.decodeIfPresent(TimeInterval.self, forKey: .sourceDuration) ?? duration
         isOriginal = try values.decodeIfPresent(Bool.self, forKey: .isOriginal) ?? false
+        takeID = try values.decodeIfPresent(UUID.self, forKey: .takeID)
+        fadeIn = max(0, try values.decodeIfPresent(TimeInterval.self, forKey: .fadeIn) ?? 0)
+        fadeOut = max(0, try values.decodeIfPresent(TimeInterval.self, forKey: .fadeOut) ?? 0)
+    }
+
+    /// Gain of this clip at an absolute timeline moment, including automatic
+    /// crossfades with the clips it overlaps on the same track.
+    func gain(at time: TimeInterval, in track: Track) -> Float {
+        let local = time - startTime
+        guard local >= 0, local <= duration else { return 0 }
+        var gain = 1.0
+        if local < fadeIn, fadeIn > 0 {
+            gain *= local / fadeIn
+        }
+        if local > duration - fadeOut, fadeOut > 0 {
+            gain *= (duration - local) / fadeOut
+        }
+
+        let others = track.playbackClips.filter { $0.id != id }.sorted { $0.startTime < $1.startTime }
+        if let previous = others.last(where: { $0.startTime <= startTime }),
+           previous.startTime + previous.duration > startTime {
+            let overlap = previous.startTime + previous.duration - startTime
+            if local < overlap, overlap > 0 {
+                gain *= 0.5 + 0.5 * (local / overlap)
+            }
+        }
+        if let next = others.first(where: { $0.startTime > startTime }),
+           next.startTime < startTime + duration {
+            let overlap = startTime + duration - next.startTime
+            let remaining = duration - local
+            if remaining < overlap, overlap > 0 {
+                gain *= 0.5 + 0.5 * (remaining / overlap)
+            }
+        }
+        return Float(min(1, max(0, gain)))
     }
 }

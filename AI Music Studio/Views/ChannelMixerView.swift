@@ -145,6 +145,105 @@ struct ChannelMixerView: View {
                 .padding(.horizontal, 14)
                 .padding(.bottom, 14)
             }
+
+            auxReturns
+        }
+    }
+
+    // MARK: - Aux sends and returns
+
+    private func sendsBlock(for track: Track) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("SENDS")
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .foregroundStyle(.tertiary)
+            auxSendRow(label: "A", value: track.sendA, trackID: track.id, bus: "A")
+            if model.isProMode {
+                auxSendRow(label: "B", value: track.sendB, trackID: track.id, bus: "B")
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func auxSendRow(label: String, value: Float, trackID: UUID, bus: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color.studioAccent)
+                .frame(width: 8)
+            Slider(
+                value: Binding(
+                    get: { Double(value) },
+                    set: { model.setSend(trackID, bus: bus, value: Float($0)) }
+                ),
+                in: 0...1
+            )
+            .tint(Color.studioAccent)
+            .controlSize(.mini)
+            Text("\(Int(value * 100))")
+                .font(.system(size: 7, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, alignment: .trailing)
+        }
+    }
+
+    private var auxReturns: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("AUX RETURNS")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(0.7)
+                .foregroundStyle(.secondary)
+            auxReturnRow(model.auxBusA)
+            if model.isProMode {
+                auxReturnRow(model.auxBusB)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color.studioPanel)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
+        }
+    }
+
+    private func auxReturnRow(_ bus: AuxBusSettings) -> some View {
+        HStack(spacing: 10) {
+            Text(bus.name.uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .frame(width: 52, alignment: .leading)
+            Text(bus.effect.title.uppercased())
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+
+            Slider(
+                value: Binding(
+                    get: { Double(bus.level) },
+                    set: { newValue in
+                        var settings = bus
+                        settings.level = Float(newValue)
+                        model.updateAuxBus(settings)
+                    }
+                ),
+                in: 0...1
+            )
+            .tint(Color.studioAccent)
+
+            Button {
+                var settings = bus
+                settings.isBypassed.toggle()
+                model.updateAuxBus(settings)
+            } label: {
+                Text(bus.isBypassed ? "BYP" : "ON")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .frame(width: 36, height: 24)
+                    .foregroundStyle(bus.isBypassed ? Color.secondary : Color.black)
+                    .background(
+                        bus.isBypassed ? Color.studioPanelHighlight : Color.studioAccent,
+                        in: RoundedRectangle(cornerRadius: 6)
+                    )
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -382,20 +481,24 @@ struct ChannelMixerView: View {
             }
             .frame(height: 37)
 
-            PanKnobView(
-                value: Binding(
-                    get: { track.pan },
-                    set: { model.setPan(track.id, $0) }
-                ),
-                color: color,
-                onCommit: { model.commitSession() }
-            )
-            .frame(width: 36, height: 36)
+            if model.isProMode {
+                PanKnobView(
+                    value: Binding(
+                        get: { track.pan },
+                        set: { model.setPan(track.id, $0) }
+                    ),
+                    color: color,
+                    onCommit: { model.commitSession() }
+                )
+                .frame(width: 36, height: 36)
 
-            Text(panLabel(track.pan))
-                .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(height: 10)
+                Text(panLabel(track.pan))
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(height: 10)
+            }
+
+            sendsBlock(for: track)
 
             HStack(spacing: 6) {
                 CompactFaderView(

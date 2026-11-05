@@ -31,6 +31,10 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var levels: [UUID: Float] = [:]
     @Published private(set) var masterVolume: Float = 1
     @Published private(set) var masterEffects = MasterEffectsSettings()
+    @Published private(set) var mastering = MasteringSettings()
+    @Published private(set) var loudness = LoudnessReading()
+    @Published private(set) var auxBusA = AuxBusSettings.busA
+    @Published private(set) var auxBusB = AuxBusSettings.busB
     @Published private(set) var sections: [SongSection] = []
     @Published private(set) var channelPresets: [ChannelPreset] = []
     @Published private(set) var customTemplates: [SessionTemplate] = []
@@ -43,10 +47,15 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var isMetronomeEnabled = false
     @Published private(set) var metronomeLevel: Float = 0.7
     @Published private(set) var isCountInEnabled = false
+    @Published private(set) var punchIn: TimeInterval = 0
+    @Published private(set) var punchOut: TimeInterval = 0
+    @Published private(set) var isPunchEnabled = false
+    @Published private(set) var armedTrackID: UUID?
     @Published private(set) var isCountingIn = false
     @Published private(set) var countInBeatsRemaining = 0
     @Published private(set) var drumPattern = DrumPattern()
     @Published private(set) var drumKit = DrumKit.studio808
+    @Published private(set) var studioMode = StudioModeStorage.load()
     @Published private(set) var isDrumSequencerPlaying = false
     @Published private(set) var currentDrumStep: Int?
     @Published private(set) var canUndo = false
@@ -140,10 +149,17 @@ final class MixerViewModel: ObservableObject {
             isLoopEnabled = session.isLoopEnabled
             masterVolume = min(1, max(0, session.masterVolume))
             masterEffects = session.masterEffects
+            mastering = session.mastering
+            auxBusA = session.auxBusA
+            auxBusB = session.auxBusB
             sections = session.sections
             isMetronomeEnabled = session.isMetronomeEnabled
             metronomeLevel = min(1, max(0, session.metronomeLevel))
             isCountInEnabled = session.isCountInEnabled
+            punchIn = max(0, session.punchIn)
+            punchOut = max(punchIn, session.punchOut)
+            isPunchEnabled = session.isPunchEnabled
+            armedTrackID = session.armedTrackID
         }
         exports = MixExportStorage.loadExports()
         resolveClipMetadata()
@@ -154,6 +170,7 @@ final class MixerViewModel: ObservableObject {
         engine.setMasterVolume(masterVolume)
         engine.setTempo(tempoBPM)
         engine.updateMasterEffects(masterEffects, tempoBPM: tempoBPM)
+        engine.updateMasterChain(mastering)
         engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
         loadWaveforms()
 
@@ -237,6 +254,42 @@ final class MixerViewModel: ObservableObject {
     func updateMasterEffects(_ settings: MasterEffectsSettings) {
         masterEffects = settings
         engine.updateMasterEffects(settings, tempoBPM: tempoBPM)
+    }
+
+    /// Applies the mastering chain while its controls are adjusted.
+    func updateMastering(_ settings: MasteringSettings) {
+        mastering = settings
+        engine.updateMasterChain(settings)
+    }
+
+    /// Clears the integrated loudness and peak hold for a fresh measurement.
+    func resetLoudness() {
+        engine.resetLoudness()
+        loudness = LoudnessReading()
+    }
+
+    /// Sets a track's send level to one of the two aux buses.
+    func setSend(_ trackID: UUID, bus: String, value: Float) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        let clamped = min(1, max(0, value))
+        if bus == "B" {
+            tracks[index].sendB = clamped
+        } else {
+            tracks[index].sendA = clamped
+        }
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    /// Applies an aux bus's effects and return level.
+    func updateAuxBus(_ settings: AuxBusSettings) {
+        if settings.id == "B" {
+            auxBusB = settings
+        } else {
+            auxBusA = settings
+        }
+        engine.updateAuxBuses(a: auxBusA, b: auxBusB)
+        commitSession()
     }
 
     // MARK: - Song sections
@@ -754,10 +807,17 @@ final class MixerViewModel: ObservableObject {
         sessions[index].isLoopEnabled = isLoopEnabled
         sessions[index].masterVolume = masterVolume
         sessions[index].masterEffects = masterEffects
+        sessions[index].mastering = mastering
+        sessions[index].auxBusA = auxBusA
+        sessions[index].auxBusB = auxBusB
         sessions[index].sections = sections
         sessions[index].isMetronomeEnabled = isMetronomeEnabled
         sessions[index].metronomeLevel = metronomeLevel
         sessions[index].isCountInEnabled = isCountInEnabled
+        sessions[index].punchIn = punchIn
+        sessions[index].punchOut = punchOut
+        sessions[index].isPunchEnabled = isPunchEnabled
+        sessions[index].armedTrackID = armedTrackID
         if markEdited {
             sessions[index].lastEdited = Date()
         }
@@ -789,10 +849,17 @@ final class MixerViewModel: ObservableObject {
         isLoopEnabled = session.isLoopEnabled
         masterVolume = min(1, max(0, session.masterVolume))
         masterEffects = session.masterEffects
+        mastering = session.mastering
+        auxBusA = session.auxBusA
+        auxBusB = session.auxBusB
         sections = session.sections
         isMetronomeEnabled = session.isMetronomeEnabled
         metronomeLevel = min(1, max(0, session.metronomeLevel))
         isCountInEnabled = session.isCountInEnabled
+        punchIn = max(0, session.punchIn)
+        punchOut = max(punchIn, session.punchOut)
+        isPunchEnabled = session.isPunchEnabled
+        armedTrackID = session.armedTrackID
         pendingUndoSnapshot = nil
         undoStack.removeAll()
         redoStack.removeAll()
@@ -805,6 +872,7 @@ final class MixerViewModel: ObservableObject {
         engine.setMasterVolume(masterVolume)
         engine.setTempo(tempoBPM)
         engine.updateMasterEffects(masterEffects, tempoBPM: tempoBPM)
+        engine.updateMasterChain(mastering)
         engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
         isPlaying = false
         currentTime = 0
@@ -973,10 +1041,20 @@ final class MixerViewModel: ObservableObject {
         persistActiveSession()
     }
 
+    /// Whether the full depth of the studio is on show.
+    var isProMode: Bool { studioMode == .pro }
+
+    /// Switches between the simple and full studio surfaces, remembered per device.
+    func setStudioMode(_ mode: StudioMode) {
+        guard mode != studioMode else { return }
+        studioMode = mode
+        StudioModeStorage.save(mode)
+    }
+
     /// Switches the kit that voices the session's drum pattern.
-    func setDrumKit(_ kit: DrumKit) {
-        guard kit != drumKit else { return }
-        drumKit = kit
+    func setDrumKit(_ drumKit: DrumKit) {
+        guard drumKit != self.drumKit else { return }
+        self.drumKit = drumKit
         persistActiveSession()
     }
 
@@ -1251,15 +1329,19 @@ final class MixerViewModel: ObservableObject {
             return
         }
 
-        let clip = AudioClip(
-            name: "Take \(tracks[index].clips.count + 1)",
-            fileName: take.url.lastPathComponent,
-            startTime: recordingStartTime,
-            duration: take.duration
-        )
-        tracks[index].clips.append(clip)
-        recordingElapsed = take.duration
-
+        if isPunchActive(for: take.trackID),
+           let punchedLength = applyPunch(take: take) {
+            recordingElapsed = punchedLength
+        } else {
+            registerTake(
+                trackID: take.trackID,
+                fileName: take.url.lastPathComponent,
+                startTime: recordingStartTime,
+                duration: take.duration,
+                name: "Take"
+            )
+            recordingElapsed = take.duration
+        }
         engine.load(tracks: tracks)
         duration = engine.duration
         currentTime = min(max(0, resumeTime), duration)
@@ -1275,6 +1357,156 @@ final class MixerViewModel: ObservableObject {
 
     func clearRecordingError() {
         recordingError = nil
+    }
+
+    // MARK: - Clip fades
+
+    /// Sets the fade lengths on a clip; overlapping clips crossfade automatically.
+    func setClipFades(trackID: UUID, clipID: UUID, fadeIn: TimeInterval, fadeOut: TimeInterval) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
+              let clipIndex = tracks[trackIndex].clips.firstIndex(where: { $0.id == clipID }) else { return }
+        let duration = tracks[trackIndex].clips[clipIndex].duration
+        tracks[trackIndex].clips[clipIndex].fadeIn = min(max(0, fadeIn), max(0, duration - 0.01))
+        tracks[trackIndex].clips[clipIndex].fadeOut = min(max(0, fadeOut), max(0, duration - tracks[trackIndex].clips[clipIndex].fadeIn - 0.01))
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
+    // MARK: - Take lane
+    @Published private(set) var auditioningTakeID: UUID?
+    private var takeAuditionPlayer: AVAudioPlayer?
+
+    /// Adds a recorded pass to the take lane and places it on the timeline,
+    /// leaving the previous active take in the lane untouched.
+    private func registerTake(
+        trackID: UUID,
+        fileName: String,
+        startTime: TimeInterval,
+        duration: TimeInterval,
+        name: String
+    ) {
+        guard duration > 0,
+              let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+
+        var track = tracks[index]
+        let take = TrackTake(
+            name: "\(name) \(track.takes.count + 1)",
+            fileName: fileName,
+            startTime: max(0, startTime),
+            duration: duration
+        )
+        if let previous = track.activeTakeID {
+            track.clips.removeAll { $0.takeID == previous }
+        }
+        track.takes.append(take)
+        track.activeTakeID = take.id
+        track.clips.append(clip(for: take))
+        track.clips.sort { $0.startTime < $1.startTime }
+        tracks[index] = track
+    }
+
+    /// Auditions a take without changing the arrangement.
+    func auditionTake(trackID: UUID, takeID: UUID) {
+        guard let track = tracks.first(where: { $0.id == trackID }),
+              let take = track.takes.first(where: { $0.id == takeID }) else { return }
+
+        stopTakeAudition()
+        let url = TrackStorage.url(forFileName: take.fileName)
+        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        takeAuditionPlayer = player
+        auditioningTakeID = takeID
+        player.play()
+
+        let duration = take.duration
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0.3, duration)))
+            guard let self, self.takeAuditionPlayer === player else { return }
+            self.stopTakeAudition()
+        }
+    }
+
+    func stopTakeAudition() {
+        takeAuditionPlayer?.stop()
+        takeAuditionPlayer = nil
+        auditioningTakeID = nil
+    }
+
+    /// Puts a take from the lane on the timeline, replacing the active one.
+    func promoteTake(trackID: UUID, takeID: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }),
+              let take = tracks[index].takes.first(where: { $0.id == takeID }),
+              tracks[index].activeTakeID != takeID else { return }
+
+        var track = tracks[index]
+        if let previous = track.activeTakeID {
+            track.clips.removeAll { $0.takeID == previous }
+        }
+        track.activeTakeID = takeID
+        track.clips.append(clip(for: take))
+        track.clips.sort { $0.startTime < $1.startTime }
+        tracks[index] = track
+        refreshAfterTakeChange()
+        commitSession()
+    }
+
+    func renameTake(trackID: UUID, takeID: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = tracks.firstIndex(where: { $0.id == trackID }),
+              let takeIndex = tracks[index].takes.firstIndex(where: { $0.id == takeID }) else { return }
+
+        tracks[index].takes[takeIndex].name = trimmed
+        for clipIndex in tracks[index].clips.indices where tracks[index].clips[clipIndex].takeID == takeID {
+            tracks[index].clips[clipIndex].name = trimmed
+        }
+        commitSession()
+    }
+
+    /// Removes a take from the lane, promoting the next best take if it was active.
+    func deleteTake(trackID: UUID, takeID: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }),
+              tracks[index].takes.contains(where: { $0.id == takeID }) else { return }
+
+        var track = tracks[index]
+        let wasActive = track.activeTakeID == takeID
+        track.takes.removeAll { $0.id == takeID }
+
+        if wasActive {
+            track.clips.removeAll { $0.takeID == takeID }
+            if let fallback = track.takes.last {
+                track.activeTakeID = fallback.id
+                track.clips.append(clip(for: fallback))
+                track.clips.sort { $0.startTime < $1.startTime }
+            } else {
+                track.activeTakeID = nil
+            }
+        }
+
+        tracks[index] = track
+        if auditioningTakeID == takeID {
+            stopTakeAudition()
+        }
+        refreshAfterTakeChange()
+        commitSession()
+    }
+
+    private func clip(for take: TrackTake) -> AudioClip {
+        AudioClip(
+            name: take.name,
+            fileName: take.fileName,
+            startTime: take.startTime,
+            duration: take.duration,
+            sourceStartTime: 0,
+            sourceDuration: take.duration,
+            takeID: take.id
+        )
+    }
+
+    private func refreshAfterTakeChange() {
+        engine.load(tracks: tracks)
+        duration = engine.duration
+        currentTime = min(currentTime, duration)
+        loadWaveforms()
     }
 
     func bounceMix(settings: BounceSettings) {
@@ -1293,6 +1525,9 @@ final class MixerViewModel: ObservableObject {
         let groupsToBounce = groups
         let masterVolumeToBounce = masterVolume
         let masterEffectsToBounce = masterEffects
+        let masteringToBounce = mastering
+        let auxBusAToBounce = auxBusA
+        let auxBusBToBounce = auxBusB
         let tempoToBounce = tempoBPM
         let settingsToBounce = settings
         let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
@@ -1310,6 +1545,9 @@ final class MixerViewModel: ObservableObject {
                         groups: groupsToBounce,
                         masterVolume: masterVolumeToBounce,
                         masterEffects: masterEffectsToBounce,
+                        mastering: masteringToBounce,
+                        auxBusA: auxBusAToBounce,
+                        auxBusB: auxBusBToBounce,
                         tempoBPM: tempoToBounce,
                         settings: settingsToBounce,
                         to: outputURL,
@@ -1350,6 +1588,7 @@ final class MixerViewModel: ObservableObject {
 
         let master = masterVolume
         let effects = masterEffects
+        let chain = mastering
         let tempo = tempoBPM
         let baseName = settings.fileName
         let settingsToBounce = settings
@@ -1379,6 +1618,7 @@ final class MixerViewModel: ObservableObject {
                             groups: groupsToBounce,
                             masterVolume: master,
                             masterEffects: effects,
+                            mastering: chain,
                             tempoBPM: tempo,
                             settings: settingsToBounce,
                             to: stemURL,
@@ -1829,6 +2069,99 @@ final class MixerViewModel: ObservableObject {
         persistActiveSession()
     }
 
+    // MARK: - Punch recording
+
+    /// Whether a usable punch window has been set on the ruler.
+    var hasPunchRange: Bool {
+        punchOut > punchIn + 0.05
+    }
+
+    /// Whether a recording on this track would punch in over the set range.
+    func isPunchActive(for trackID: UUID) -> Bool {
+        isPunchEnabled && hasPunchRange && armedTrackID == trackID
+    }
+
+    func togglePunch() {
+        isPunchEnabled.toggle()
+        persistActiveSession()
+    }
+
+    /// Sets the punch-in point at the playhead.
+    func setPunchIn(at time: TimeInterval) {
+        punchIn = max(0, time)
+        if punchOut <= punchIn + 0.05 {
+            punchOut = punchIn + max(0.5, beatDuration)
+        }
+        persistActiveSession()
+    }
+
+    /// Sets the punch-out point at the playhead.
+    func setPunchOut(at time: TimeInterval) {
+        punchOut = max(punchIn + 0.05, time)
+        persistActiveSession()
+    }
+
+    /// Chooses the track a punch recording is armed on.
+    func armTrack(_ id: UUID?) {
+        armedTrackID = id
+        persistActiveSession()
+    }
+
+    /// Cuts the punched region out of the recording, trims the existing clips
+    /// around it and crossfades the new audio into the joins.
+    private func applyPunch(take: RecordedInstrumentTake) -> TimeInterval? {
+        guard hasPunchRange,
+              let index = tracks.firstIndex(where: { $0.id == take.trackID }) else { return nil }
+
+        let offset = max(0, punchIn - recordingStartTime)
+        let length = min(punchOut - punchIn, take.duration - offset)
+        guard length > 0.05 else { return nil }
+
+        let crossFade = min(0.03, length / 6)
+        guard let punched = PunchTakeRenderer.render(
+            sourceURL: take.url,
+            offset: offset,
+            duration: length,
+            crossFade: crossFade
+        ) else { return nil }
+
+        var track = tracks[index]
+        var keptClips: [AudioClip] = []
+        for clip in track.clips {
+            let start = max(0, clip.startTime)
+            let playable = min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+            let end = start + playable
+            let cutStart = punchIn + crossFade
+            let cutEnd = punchOut - crossFade
+            guard end > cutStart, start < cutEnd else {
+                keptClips.append(clip)
+                continue
+            }
+            if start < cutStart {
+                var left = clip
+                left.duration = cutStart - start
+                keptClips.append(left)
+            }
+            if end > cutEnd {
+                var right = clip
+                right.startTime = cutEnd
+                right.duration = end - cutEnd
+                right.sourceStartTime += (cutEnd - start)
+                keptClips.append(right)
+            }
+        }
+        track.clips = keptClips
+        track.clips.append(AudioClip(
+            name: "Punch",
+            fileName: punched.url.lastPathComponent,
+            startTime: punchIn,
+            duration: punched.duration
+        ))
+        track.clips.sort { $0.startTime < $1.startTime }
+        tracks[index] = track
+        return punched.duration
+    }
+
     /// Plays a count-in of clicks on the metronome voices.
     func playMetronomeCountIn(beats: Int) {
         _ = engine.playCountIn(beats: beats)
@@ -2123,6 +2456,7 @@ final class MixerViewModel: ObservableObject {
             }
         }
         updateLevels()
+        loudness = engine.loudnessReading()
     }
 
     private func updateLevels() {

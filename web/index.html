@@ -17,9 +17,14 @@
         <p id="sessionSubtitle">No tracks</p>
       </div>
       <div class="session-actions">
+        <div class="mode-switch" role="group" aria-label="Studio mode">
+          <button class="mode-btn" id="modeSimpleBtn" data-mode="simple" aria-pressed="false">SIMPLE</button>
+          <button class="mode-btn" id="modeProBtn" data-mode="pro" aria-pressed="false">PRO</button>
+        </div>
         <button class="icon-btn" id="undoBtn" title="Undo" aria-label="Undo">↶</button>
         <button class="icon-btn" id="redoBtn" title="Redo" aria-label="Redo">↷</button>
         <button class="icon-btn" id="mixerBtn" title="Channel mixer" aria-label="Channel mixer">▥</button>
+        <button class="icon-btn" id="masteringBtn" title="Mastering" aria-label="Mastering">◈</button>
         <button class="icon-btn" id="fxBtn" title="Master effects" aria-label="Master effects">◉</button>
         <button class="icon-btn" id="presetBtn" title="Channel presets" aria-label="Channel presets">❐</button>
         <button class="icon-btn" id="sessionsBtn" title="Sessions" aria-label="Sessions">◫</button>
@@ -50,6 +55,7 @@
               <span class="loop-hint" id="loopHint">DRAG TO SET A LOOP</span>
             </div>
             <div class="section-layer" id="sectionLayer"></div>
+            <div class="punch-strip" id="punchStrip"><div class="punch-region" id="punchRegion"></div></div>
             <canvas id="rulerCanvas"></canvas>
           </div>
           <div class="lanes" id="lanes"></div>
@@ -82,6 +88,13 @@
       <button class="pill" id="loopBtn">⟲ LOOP</button>
       <span class="range-label" id="loopRangeLabel">Drag markers on the ruler</span>
       <button class="pill" id="sectionBtn" style="margin-left:auto">+ SECTION</button>
+    </div>
+    <div class="control-row">
+      <button class="pill" id="punchBtn">● PUNCH</button>
+      <button class="pill" id="punchInBtn">IN</button>
+      <button class="pill" id="punchOutBtn">OUT</button>
+      <span class="range-label" id="punchRangeLabel">Set IN and OUT</span>
+      <select id="punchArm" class="punch-arm" aria-label="Arm a track for punch recording"></select>
     </div>
     <div class="control-row">
       <button class="pill" id="metronomeBtn">◔ CLICK</button>

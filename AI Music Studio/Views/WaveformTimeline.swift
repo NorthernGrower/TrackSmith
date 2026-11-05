@@ -19,6 +19,8 @@ struct WaveformTimeline: View {
     @State private var selectedClipID: UUID?
     @State private var automationTrackID: UUID?
     @State private var selectedAutomationPointID: UUID?
+    @State private var takeLaneTrackID: UUID?
+    @State private var fadeDragOrigins: [UUID: (in: TimeInterval, out: TimeInterval)] = [:]
     @State private var moveOrigins: [UUID: TimeInterval] = [:]
     @State private var leftTrimOrigins: [UUID: AudioClip] = [:]
     @State private var rightTrimOrigins: [UUID: AudioClip] = [:]
@@ -37,7 +39,8 @@ struct WaveformTimeline: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let automationTrack = model.tracks.first(where: { $0.id == automationTrackID }) {
+            if model.isProMode,
+               let automationTrack = model.tracks.first(where: { $0.id == automationTrackID }) {
                 automationEditToolbar(for: automationTrack)
             }
             if let selectedClipInfo {
@@ -66,6 +69,12 @@ struct WaveformTimeline: View {
             .frame(maxHeight: .infinity)
         }
         .background(Color.studioBackground)
+        .onChange(of: model.studioMode) { _, mode in
+            if mode == .simple {
+                automationTrackID = nil
+                selectedAutomationPointID = nil
+            }
+        }
         .alert("Rename Section", isPresented: $showingRename) {
             TextField("Section name", text: $renameDraft)
             Button("Cancel", role: .cancel) { renameSectionID = nil }
@@ -78,6 +87,23 @@ struct WaveformTimeline: View {
         } message: {
             Text("Name this part of the song.")
         }
+        .sheet(isPresented: Binding(
+            get: { takeLaneTrackID != nil },
+            set: { isPresented in
+                if !isPresented { takeLaneTrackID = nil }
+            }
+        )) {
+            if let trackID = takeLaneTrackID {
+                TakeLaneView(model: model, trackID: trackID)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
+        }
+    }
+
+    private func takeBadgeLabel(_ track: Track) -> String {
+        let number = track.takes.firstIndex(where: { $0.id == track.activeTakeID }).map { $0 + 1 } ?? 1
+        return "T\(number) · \(track.takes.count)"
     }
 
     private var contentWidth: CGFloat {
@@ -405,9 +431,29 @@ struct WaveformTimeline: View {
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(color)
                 Text(track.name)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                if model.armedTrackID == track.id {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 6, height: 6)
+                        .accessibilityLabel("Armed for punch recording")
+                }
+                if !track.takes.isEmpty {
+                    Button {
+                        takeLaneTrackID = track.id
+                    } label: {
+                        Text(takeBadgeLabel(track))
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .frame(height: 18)
+                            .foregroundStyle(Color.studioAccent)
+                            .background(Color.studioAccent.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Take lane for \(track.name)")
+                }
                 Button {
                     onOpenTrackEQ(track.id)
                 } label: {
@@ -432,23 +478,25 @@ struct WaveformTimeline: View {
                 .disabled(track.isFrozen)
                 .opacity(track.isFrozen ? 0.35 : 1)
                 .accessibilityLabel("Piano roll for \(track.name)")
-                Button {
-                    automationTrackID = automationTrackID == track.id ? nil : track.id
-                    selectedAutomationPointID = nil
-                    if automationTrackID == track.id { selectedClipID = nil }
-                } label: {
-                    Image(systemName: "chart.xyaxis.line")
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(width: 18, height: 22)
-                        .contentShape(Rectangle())
+                if model.isProMode {
+                    Button {
+                        automationTrackID = automationTrackID == track.id ? nil : track.id
+                        selectedAutomationPointID = nil
+                        if automationTrackID == track.id { selectedClipID = nil }
+                    } label: {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 18, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(automationTrackID == track.id ? Color.studioAccent : Color.white.opacity(0.55))
+                    .accessibilityLabel("Volume automation for \(track.name)")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(automationTrackID == track.id ? Color.studioAccent : Color.white.opacity(0.55))
-                .accessibilityLabel("Volume automation for \(track.name)")
                 Spacer(minLength: 0)
             }
 
-            if let group {
+            if model.isProMode, let group {
                 groupBadge(group)
             }
 
@@ -462,34 +510,36 @@ struct WaveformTimeline: View {
                     }
                 }
 
-                Button {
-                    model.toggleFreeze(trackID: track.id)
-                } label: {
-                    Image(systemName: "snowflake")
-                        .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 24, height: 22)
-                        .foregroundStyle(track.isFrozen ? Color.black : Color.white.opacity(0.7))
-                        .background(
-                            track.isFrozen ? Color.studioAccent : Color.studioPanelHighlight.opacity(0.7),
-                            in: RoundedRectangle(cornerRadius: 5)
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(model.isFreezingTrack)
-                .accessibilityLabel(track.isFrozen ? "Unfreeze \(track.name)" : "Freeze \(track.name) to audio")
-                .accessibilityAddTraits(track.isFrozen ? .isSelected : [])
+                if model.isProMode {
+                    Button {
+                        model.toggleFreeze(trackID: track.id)
+                    } label: {
+                        Image(systemName: "snowflake")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 24, height: 22)
+                            .foregroundStyle(track.isFrozen ? Color.black : Color.white.opacity(0.7))
+                            .background(
+                                track.isFrozen ? Color.studioAccent : Color.studioPanelHighlight.opacity(0.7),
+                                in: RoundedRectangle(cornerRadius: 5)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isFreezingTrack)
+                    .accessibilityLabel(track.isFrozen ? "Unfreeze \(track.name)" : "Freeze \(track.name) to audio")
+                    .accessibilityAddTraits(track.isFrozen ? .isSelected : [])
 
-                Button {
-                    onOpenInstrumentsForTrack(track.id)
-                } label: {
-                    Image(systemName: "music.note")
-                        .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 24, height: 22)
-                        .foregroundStyle(Color.studioAccent)
-                        .background(Color.studioPanelHighlight.opacity(0.7), in: RoundedRectangle(cornerRadius: 5))
+                    Button {
+                        onOpenInstrumentsForTrack(track.id)
+                    } label: {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 24, height: 22)
+                            .foregroundStyle(Color.studioAccent)
+                            .background(Color.studioPanelHighlight.opacity(0.7), in: RoundedRectangle(cornerRadius: 5))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open instruments for \(track.name)")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Open instruments for \(track.name)")
 
                 Spacer(minLength: 2)
 
@@ -617,6 +667,10 @@ struct WaveformTimeline: View {
 
             sectionMarkers
 
+            if model.isPunchEnabled && model.hasPunchRange {
+                punchRangeOverlay
+            }
+
             loopStrip
         }
         .background(Color.studioBackground)
@@ -626,6 +680,27 @@ struct WaveformTimeline: View {
     }
 
     // MARK: - Section markers
+
+    private var punchRangeOverlay: some View {
+        let startX = CGFloat(max(0, model.punchIn)) * zoom
+        let width = max(1, CGFloat(max(0, model.punchOut - model.punchIn)) * zoom)
+
+        return ZStack(alignment: .topLeading) {
+            Rectangle()
+                .fill(Color.red.opacity(0.16))
+                .frame(width: width, height: rulerHeight)
+                .offset(x: startX)
+            Rectangle()
+                .fill(Color.red.opacity(0.85))
+                .frame(width: 1.5, height: rulerHeight)
+                .offset(x: startX)
+            Rectangle()
+                .fill(Color.red.opacity(0.85))
+                .frame(width: 1.5, height: rulerHeight)
+                .offset(x: startX + width)
+        }
+        .allowsHitTesting(false)
+    }
 
     private var sectionMarkers: some View {
         let sections = model.sections
@@ -817,7 +892,7 @@ struct WaveformTimeline: View {
                     .allowsHitTesting(automationTrackID != track.id && !track.isFrozen)
             }
 
-            if automationTrackID == track.id {
+            if model.isProMode, automationTrackID == track.id {
                 let activeParameter = automationParameter
                 let otherParameter: AutomationParameter = activeParameter == .volume ? .pan : .volume
                 let otherHandles = automationHandles(for: track, parameter: otherParameter)
@@ -850,7 +925,8 @@ struct WaveformTimeline: View {
                         .allowsHitTesting(false)
                     }
                 }
-            } else if !track.volumeAutomationPoints.isEmpty || !track.panAutomationPoints.isEmpty {
+            } else if model.isProMode,
+                      !track.volumeAutomationPoints.isEmpty || !track.panAutomationPoints.isEmpty {
                 ZStack {
                     if !track.volumeAutomationPoints.isEmpty {
                         AutomationCurveView(
@@ -871,6 +947,38 @@ struct WaveformTimeline: View {
                 }
                 .frame(width: contentWidth, height: rowHeight)
                 .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if model.isProMode, !track.takes.isEmpty {
+                ZStack(alignment: .topLeading) {
+                    ForEach(Array(track.takes.enumerated()), id: \.element.id) { index, take in
+                        let isActive = track.activeTakeID == take.id
+                        Button {
+                            model.auditionTake(trackID: track.id, takeID: take.id)
+                        } label: {
+                            Text("T\(index + 1)")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .lineLimit(1)
+                                .padding(.horizontal, 4)
+                                .frame(width: max(24, CGFloat(take.duration) * zoom), height: 18, alignment: .leading)
+                                .foregroundStyle(isActive ? Color.black : Color.white.opacity(0.82))
+                                .background(
+                                    isActive ? Color.studioAccent : Color.studioPanelHighlight,
+                                    in: RoundedRectangle(cornerRadius: 4)
+                                )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(isActive ? Color.studioAccent : Color.white.opacity(0.18), lineWidth: 1)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: CGFloat(take.startTime) * zoom)
+                        .accessibilityLabel("Audition take \(index + 1) of \(track.name)")
+                    }
+                }
+                .frame(width: contentWidth, height: 18, alignment: .topLeading)
+                .padding(.bottom, 4)
             }
         }
         .overlay(alignment: .bottom) {
@@ -915,8 +1023,75 @@ struct WaveformTimeline: View {
             RoundedRectangle(cornerRadius: 7)
                 .stroke(isSelected ? Color.studioAccent : color.opacity(0.68), lineWidth: isSelected ? 1.8 : 1)
         }
+        .overlay {
+            if model.isProMode, clip.fadeIn > 0 || clip.fadeOut > 0 {
+                ClipFadeCurve(
+                    fadeIn: clip.fadeIn,
+                    fadeOut: clip.fadeOut,
+                    duration: clip.duration
+                )
+                .stroke(Color.black.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+                .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if model.isProMode, isSelected {
+                fadeHandle(trackID: trackID, clip: clip, edge: .in)
+                    .offset(x: CGFloat(min(clip.fadeIn, clip.duration * 0.5)) * zoom - 7, y: 4)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if model.isProMode, isSelected {
+                fadeHandle(trackID: trackID, clip: clip, edge: .out)
+                    .offset(x: -CGFloat(min(clip.fadeOut, clip.duration * 0.5)) * zoom + 7, y: 4)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Audio clip \(clip.name)")
+    }
+
+    private enum FadeEdge {
+        case `in`
+        case out
+    }
+
+    private func fadeHandle(trackID: UUID, clip: AudioClip, edge: FadeEdge) -> some View {
+        Circle()
+            .fill(Color.studioAccent)
+            .frame(width: 14, height: 14)
+            .overlay {
+                Circle().stroke(Color.black.opacity(0.45), lineWidth: 1)
+            }
+            .contentShape(Rectangle().size(width: 26, height: 26))
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        if fadeDragOrigins[clip.id] == nil {
+                            fadeDragOrigins[clip.id] = (clip.fadeIn, clip.fadeOut)
+                        }
+                        let origin = fadeDragOrigins[clip.id] ?? (clip.fadeIn, clip.fadeOut)
+                        let delta = Double(value.translation.width / max(zoom, 1))
+                        if edge == .in {
+                            model.setClipFades(
+                                trackID: trackID,
+                                clipID: clip.id,
+                                fadeIn: origin.in + delta,
+                                fadeOut: origin.out
+                            )
+                        } else {
+                            model.setClipFades(
+                                trackID: trackID,
+                                clipID: clip.id,
+                                fadeIn: origin.in,
+                                fadeOut: origin.out - delta
+                            )
+                        }
+                    }
+                    .onEnded { _ in
+                        fadeDragOrigins[clip.id] = nil
+                    }
+            )
+            .accessibilityLabel(edge == .in ? "Fade in" : "Fade out")
     }
 
     private func moveGesture(trackID: UUID, clip: AudioClip) -> some Gesture {
@@ -1465,7 +1640,30 @@ private struct AutomationCurveView: View {
     }
 }
 
-/// Editable automation lane: tap to add points, drag to reshape, select to delete.
+/// Draws a clip's fade envelope across its width.
+private struct ClipFadeCurve: Shape {
+    let fadeIn: TimeInterval
+    let fadeOut: TimeInterval
+    let duration: TimeInterval
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard duration > 0 else { return path }
+        let inWidth = CGFloat(min(fadeIn, duration) / duration) * rect.width
+        let outWidth = CGFloat(min(fadeOut, duration) / duration) * rect.width
+
+        path.move(to: CGPoint(x: rect.minX, y: fadeIn > 0 ? rect.maxY : rect.minY))
+        if inWidth > 0 {
+            path.addLine(to: CGPoint(x: rect.minX + inWidth, y: rect.minY))
+        }
+        path.addLine(to: CGPoint(x: rect.maxX - outWidth, y: rect.minY))
+        if outWidth > 0 {
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        }
+        return path
+    }
+}
+
 private struct AutomationLaneEditor: View {
     let handles: [AutomationHandle]
     let zoom: CGFloat

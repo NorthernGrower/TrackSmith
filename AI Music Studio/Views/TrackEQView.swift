@@ -56,7 +56,9 @@ struct TrackEQView: View {
                         frequencyRange: 1_000...18_000,
                         gain: $settings.highGain
                     )
-                    compressorPanel
+                    if model.isProMode {
+                        compressorPanel
+                    }
                 }
                 .padding(16)
             }
@@ -65,12 +67,14 @@ struct TrackEQView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showingPresets = true
-                    } label: {
-                        Image(systemName: "bookmark")
+                    if model.isProMode {
+                        Button {
+                            showingPresets = true
+                        } label: {
+                            Image(systemName: "bookmark")
+                        }
+                        .accessibilityLabel("Channel presets")
                     }
-                    .accessibilityLabel("Channel presets")
                 }
                 ToolbarItem(placement: .principal) {
                     VStack(spacing: 2) {
@@ -263,18 +267,20 @@ struct TrackEQView: View {
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
             }
 
-            HStack {
-                Text("FREQ")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text(frequency.wrappedValue >= 1_000
-                     ? String(format: "%.1f kHz", frequency.wrappedValue / 1_000)
-                     : String(format: "%.0f Hz", frequency.wrappedValue))
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
+            if model.isProMode {
+                HStack {
+                    Text("FREQ")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Text(frequency.wrappedValue >= 1_000
+                         ? String(format: "%.1f kHz", frequency.wrappedValue / 1_000)
+                         : String(format: "%.0f Hz", frequency.wrappedValue))
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: frequency, in: frequencyRange)
             }
-            Slider(value: frequency, in: frequencyRange)
 
             HStack {
                 Text("GAIN")

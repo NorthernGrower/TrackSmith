@@ -10,6 +10,8 @@ private struct BounceClip {
     let file: AVAudioFile
     let clip: AudioClip
     let player: AVAudioPlayerNode
+    let mixer: AVAudioMixerNode
+    let trackID: UUID
 }
 
 private struct BounceNote {
@@ -41,6 +43,9 @@ enum MixBounceRenderer {
         groups: [TrackGroup] = [],
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
+        mastering: MasteringSettings = MasteringSettings(),
+        auxBusA: AuxBusSettings = .busA,
+        auxBusB: AuxBusSettings = .busB,
         tempoBPM: Int = 120,
         applyMuteSolo: Bool = true,
         settings: BounceSettings = BounceSettings(),
@@ -56,6 +61,8 @@ enum MixBounceRenderer {
         var queuedClips: [BounceClip] = []
         var queuedNotes: [BounceNote] = []
         var trackMixers: [UUID: AVAudioMixerNode] = [:]
+        var trackSendA: [UUID: AVAudioMixerNode] = [:]
+        var trackSendB: [UUID: AVAudioMixerNode] = [:]
         var duration: TimeInterval = 0
         let mutedTrackIDs = Set(groups.filter(\.isMuted).flatMap(\.trackIDs))
         let soloedTrackIDs = Set(groups.filter(\.isSoloed).flatMap(\.trackIDs))
@@ -64,13 +71,57 @@ enum MixBounceRenderer {
         let masterBus = AVAudioMixerNode()
         let reverb = AVAudioUnitReverb()
         let delay = AVAudioUnitDelay()
+        let masterEQ = AVAudioUnitEQ(numberOfBands: 3)
+        let busCompressor = TrackCompressorUnit.make()
+        let limiter = MasteringChainUnit.makeLimiter()
+        let ceiling = AVAudioMixerNode()
         engine.attach(masterBus)
         engine.attach(reverb)
         engine.attach(delay)
+        engine.attach(masterEQ)
+        engine.attach(busCompressor)
+        engine.attach(limiter)
+        engine.attach(ceiling)
         engine.connect(masterBus, to: reverb, format: outputFormat)
         engine.connect(reverb, to: delay, format: outputFormat)
-        engine.connect(delay, to: engine.mainMixerNode, format: outputFormat)
+        engine.connect(delay, to: masterEQ, format: outputFormat)
+        engine.connect(masterEQ, to: busCompressor, format: outputFormat)
+        engine.connect(busCompressor, to: limiter, format: outputFormat)
+        engine.connect(limiter, to: ceiling, format: outputFormat)
+        engine.connect(ceiling, to: engine.mainMixerNode, format: outputFormat)
         applyMasterEffects(masterEffects, tempoBPM: tempoBPM, reverb: reverb, delay: delay)
+        MasteringChainUnit.configure(
+            eq: masterEQ,
+            compressor: busCompressor,
+            limiter: limiter,
+            ceiling: ceiling,
+            settings: mastering
+        )
+
+        let auxAInput = AVAudioMixerNode()
+        let auxAReverb = AVAudioUnitReverb()
+        let auxAReturn = AVAudioMixerNode()
+        let auxBInput = AVAudioMixerNode()
+        let auxBDelay = AVAudioUnitDelay()
+        let auxBReturn = AVAudioMixerNode()
+        engine.attach(auxAInput)
+        engine.attach(auxAReverb)
+        engine.attach(auxAReturn)
+        engine.attach(auxBInput)
+        engine.attach(auxBDelay)
+        engine.attach(auxBReturn)
+        engine.connect(auxAInput, to: auxAReverb, format: outputFormat)
+        engine.connect(auxAReverb, to: auxAReturn, format: outputFormat)
+        engine.connect(auxAReturn, to: masterBus, format: outputFormat)
+        engine.connect(auxBInput, to: auxBDelay, format: outputFormat)
+        engine.connect(auxBDelay, to: auxBReturn, format: outputFormat)
+        engine.connect(auxBReturn, to: masterBus, format: outputFormat)
+        auxAReverb.wetDryMix = auxBusA.isBypassed ? 0 : Float(min(1, max(0, auxBusA.reverbMix)) * 100)
+        auxAReturn.outputVolume = auxBusA.isBypassed ? 0 : auxBusA.level
+        auxBDelay.delayTime = min(2, max(0.01, auxBusB.delayBeats * 60 / Double(max(60, tempoBPM))))
+        auxBDelay.feedback = auxBusB.isBypassed ? 0 : Float(min(0.9, max(0, auxBusB.delayFeedback)) * 100)
+        auxBDelay.wetDryMix = auxBusB.isBypassed ? 0 : Float(min(1, max(0, auxBusB.delayMix)) * 100)
+        auxBReturn.outputVolume = auxBusB.isBypassed ? 0 : auxBusB.level
 
         for track in tracks {
             let trackMixer = AVAudioMixerNode()
@@ -79,6 +130,17 @@ enum MixBounceRenderer {
             engine.attach(compressor)
             engine.connect(trackMixer, to: compressor, format: outputFormat)
             engine.connect(compressor, to: masterBus, format: outputFormat)
+
+            let sendA = AVAudioMixerNode()
+            let sendB = AVAudioMixerNode()
+            engine.attach(sendA)
+            engine.attach(sendB)
+            engine.connect(compressor, to: sendA, format: outputFormat)
+            engine.connect(sendA, to: auxAInput, format: outputFormat)
+            engine.connect(compressor, to: sendB, format: outputFormat)
+            engine.connect(sendB, to: auxBInput, format: outputFormat)
+            trackSendA[track.id] = sendA
+            trackSendB[track.id] = sendB
             let audible = !applyMuteSolo
                 || (!(track.isMuted || mutedTrackIDs.contains(track.id))
                     && (!anySolo || track.isSoloed || soloedTrackIDs.contains(track.id)))
@@ -105,9 +167,18 @@ enum MixBounceRenderer {
                 guard playableSourceDuration > 0 else { continue }
 
                 let player = AVAudioPlayerNode()
+                let clipMixer = AVAudioMixerNode()
                 engine.attach(player)
-                engine.connect(player, to: trackMixer, format: file.processingFormat)
-                queuedClips.append(BounceClip(file: file, clip: clip, player: player))
+                engine.attach(clipMixer)
+                engine.connect(player, to: clipMixer, format: file.processingFormat)
+                engine.connect(clipMixer, to: trackMixer, format: file.processingFormat)
+                queuedClips.append(BounceClip(
+                    file: file,
+                    clip: clip,
+                    player: player,
+                    mixer: clipMixer,
+                    trackID: track.id
+                ))
                 duration = max(duration, clip.startTime + playableSourceDuration)
             }
 
@@ -195,6 +266,12 @@ enum MixBounceRenderer {
                     * track.automationGain(at: automationTime)
                 trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
                 trackMixers[track.id]?.pan = min(1, max(-1, track.panAutomationValue(at: automationTime)))
+                trackSendA[track.id]?.outputVolume = audible ? min(1, max(0, track.sendA)) : 0
+                trackSendB[track.id]?.outputVolume = audible ? min(1, max(0, track.sendB)) : 0
+            }
+            for queued in queuedClips {
+                guard let track = tracks.first(where: { $0.id == queued.trackID }) else { continue }
+                queued.mixer.outputVolume = queued.clip.gain(at: automationTime, in: track)
             }
             let status = try engine.renderOffline(framesToRender, to: buffer)
 
@@ -238,6 +315,9 @@ enum MixBounceRenderer {
         groups: [TrackGroup] = [],
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
+        mastering: MasteringSettings = MasteringSettings(),
+        auxBusA: AuxBusSettings = .busA,
+        auxBusB: AuxBusSettings = .busB,
         tempoBPM: Int = 120,
         settings: BounceSettings = BounceSettings(),
         to outputURL: URL,
@@ -248,6 +328,7 @@ enum MixBounceRenderer {
             groups: groups,
             masterVolume: masterVolume,
             masterEffects: masterEffects,
+            mastering: mastering,
             tempoBPM: tempoBPM,
             applyMuteSolo: false,
             settings: settings,

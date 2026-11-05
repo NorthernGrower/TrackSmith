@@ -29,8 +29,7 @@ struct MixerView: View {
     @State private var model = MixerViewModel()
     @State private var showImporter = false
     @State private var showSplitPicker = false
-    @State private var showChat = false
-    @State private var chat = AgentChatViewModel()
+    @StateObject private var chat = AgentChatViewModel()
     @State private var activeSheet: StudioSheet?
     @State private var selectedEQTrackID: UUID?
     @State private var selectedPianoRollTrackID: UUID?
@@ -84,20 +83,6 @@ struct MixerView: View {
                 freezeProgressCard
             }
         }
-        .overlay {
-            if showChat {
-                ZStack(alignment: .bottom) {
-                    Color.black.opacity(0.42)
-                        .ignoresSafeArea()
-                        .onTapGesture { showChat = false }
-
-                    AgentChatDrawer(chat: chat, onClose: { showChat = false })
-                        .frame(maxHeight: 460)
-                        .transition(.move(edge: .bottom))
-                }
-            }
-        }
-        .animation(.spring(duration: 0.35), value: showChat)
         .onAppear {
             chat.mixer = model
         }
@@ -153,12 +138,21 @@ struct MixerView: View {
                 SongwriterView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .agent:
+                AgentChatDrawer(chat: chat, onClose: { activeSheet = nil })
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(Color.studioPanel)
             case .mixer:
                 ChannelMixerView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             case .masterEffects:
                 MasterEffectsView(model: model)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+            case .mastering:
+                MasteringView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             case .channelPresets:
@@ -229,13 +223,17 @@ struct MixerView: View {
                     Text(model.sessionName)
                         .font(.system(size: 17, weight: .semibold))
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .minimumScaleFactor(0.8)
                     Text(sessionSubtitle.uppercased())
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .tracking(0.8)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Spacer(minLength: 8)
+                modeSwitch
 
                 Button {
                     model.undo()
@@ -263,42 +261,33 @@ struct MixerView: View {
                 .opacity(model.canRedo ? 1 : 0.35)
                 .accessibilityLabel("Redo")
 
-                Button {
-                    activeSheet = .mixer
-                } label: {
-                    Image(systemName: "slider.vertical.3")
-                        .font(.system(size: 15, weight: .medium))
-                        .frame(width: 38, height: 38)
-                        .background(Color.studioPanelHighlight.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Channel mixer")
-
-                Button {
-                    activeSheet = .masterEffects
-                } label: {
-                    Image(systemName: "speaker.wave.2")
-                        .font(.system(size: 14, weight: .medium))
-                        .frame(width: 38, height: 38)
-                        .background(Color.studioPanelHighlight.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
-                        .overlay(alignment: .topTrailing) {
-                            if !model.masterEffects.isBypassed {
-                                Circle()
-                                    .fill(Color.studioAccent)
-                                    .frame(width: 6, height: 6)
-                                    .padding(6)
-                            }
-                        }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Master effects")
-
                 Menu {
+                    Button {
+                        activeSheet = .mixer
+                    } label: {
+                        Label("Channel Mixer", systemImage: "slider.vertical.3")
+                    }
+                    Button {
+                        activeSheet = .masterEffects
+                    } label: {
+                        Label("Master Effects", systemImage: "speaker.wave.2")
+                    }
+                    Button {
+                        activeSheet = .mastering
+                    } label: {
+                        Label("Mastering", systemImage: "slider.horizontal.3")
+                    }
+                    Button {
+                        activeSheet = .channelPresets
+                    } label: {
+                        Label("Channel Presets", systemImage: "bookmark")
+                    }
                     Button {
                         activeSheet = .songwriter
                     } label: {
                         Label("AI Songwriter", systemImage: "sparkles")
                     }
+                    Divider()
                     Button {
                         activeSheet = .templates
                     } label: {
@@ -315,30 +304,20 @@ struct MixerView: View {
                     } label: {
                         Label("Mix Exports", systemImage: "square.stack")
                     }
+                    Divider()
                     Button {
-                        activeSheet = .channelPresets
+                        activeSheet = .settings
                     } label: {
-                        Label("Channel Presets", systemImage: "bookmark")
+                        Label("Studio Settings", systemImage: "gearshape")
                     }
                 } label: {
-                    Image(systemName: "folder")
-                        .font(.system(size: 15, weight: .medium))
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 17, weight: .medium))
                         .frame(width: 38, height: 38)
                         .background(Color.studioPanelHighlight.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Session and export library")
-
-                Button {
-                    activeSheet = .settings
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 16, weight: .medium))
-                        .frame(width: 38, height: 38)
-                        .background(Color.studioPanelHighlight.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Studio settings")
+                .accessibilityLabel("Studio menu")
             }
 
             HStack(spacing: 8) {
@@ -372,7 +351,7 @@ struct MixerView: View {
 
                 Button {
                     chat.mixer = model
-                    showChat = true
+                    activeSheet = .agent
                 } label: {
                     StudioToolbarButton(title: "Agent", systemImage: "text.bubble")
                 }
@@ -412,6 +391,34 @@ struct MixerView: View {
         let count = model.tracks.count
         let tracksText = count == 1 ? "1 track" : "\(count) tracks"
         return "\(tracksText)  ·  \(studioTimeString(model.duration))"
+    }
+
+    // MARK: - Studio mode
+
+    private var modeSwitch: some View {
+        HStack(spacing: 0) {
+            ForEach(StudioMode.allCases) { mode in
+                Button {
+                    model.setStudioMode(mode)
+                } label: {
+                    Text(mode.title.uppercased())
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .tracking(0.4)
+                        .frame(width: 34, height: 26)
+                        .foregroundStyle(model.studioMode == mode ? Color.black : Color.white.opacity(0.7))
+                        .background(
+                            model.studioMode == mode ? Color.studioAccent : Color.clear,
+                            in: Capsule()
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(mode.title) studio mode")
+                .accessibilityAddTraits(model.studioMode == mode ? .isSelected : [])
+            }
+        }
+        .background(Color.studioPanelHighlight.opacity(0.7), in: Capsule())
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Studio mode")
     }
 
     // MARK: - Empty state
@@ -588,10 +595,12 @@ private enum StudioSheet: String, Identifiable {
     case templates
     case mixer
     case masterEffects
+    case mastering
     case channelPresets
     case pianoRoll
     case bounce
     case songwriter
+    case agent
 
     var id: String { rawValue }
 }

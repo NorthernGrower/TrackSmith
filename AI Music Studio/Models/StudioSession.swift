@@ -25,8 +25,21 @@ struct StudioSession: Identifiable, Codable, Equatable {
     /// Overall output level of the master strip, from 0 to 1.
     var masterVolume: Float
     var masterEffects: MasterEffectsSettings
+    /// Master EQ, bus compressor and limiter on the whole mix.
+    var mastering: MasteringSettings
+    /// Shared reverb send bus.
+    var auxBusA: AuxBusSettings
+    /// Shared delay send bus.
+    var auxBusB: AuxBusSettings
     var sections: [SongSection]
     var isMetronomeEnabled: Bool
+    /// First moment a punch recording captures.
+    var punchIn: TimeInterval
+    /// Last moment a punch recording captures.
+    var punchOut: TimeInterval
+    var isPunchEnabled: Bool
+    /// The track a punch recording is armed on.
+    var armedTrackID: UUID?
     /// Click level of the metronome and count-in, from 0 to 1.
     var metronomeLevel: Float
     var isCountInEnabled: Bool
@@ -46,8 +59,15 @@ struct StudioSession: Identifiable, Codable, Equatable {
         isLoopEnabled: Bool = false,
         masterVolume: Float = 1,
         masterEffects: MasterEffectsSettings = MasterEffectsSettings(),
+        mastering: MasteringSettings = MasteringSettings(),
+        auxBusA: AuxBusSettings = .busA,
+        auxBusB: AuxBusSettings = .busB,
         sections: [SongSection] = [],
         isMetronomeEnabled: Bool = false,
+        punchIn: TimeInterval = 0,
+        punchOut: TimeInterval = 0,
+        isPunchEnabled: Bool = false,
+        armedTrackID: UUID? = nil,
         metronomeLevel: Float = 0.7,
         isCountInEnabled: Bool = false,
         lastEdited: Date = Date()
@@ -65,8 +85,15 @@ struct StudioSession: Identifiable, Codable, Equatable {
         self.isLoopEnabled = isLoopEnabled
         self.masterVolume = masterVolume
         self.masterEffects = masterEffects
+        self.mastering = mastering
+        self.auxBusA = auxBusA
+        self.auxBusB = auxBusB
         self.sections = sections
         self.isMetronomeEnabled = isMetronomeEnabled
+        self.punchIn = punchIn
+        self.punchOut = punchOut
+        self.isPunchEnabled = isPunchEnabled
+        self.armedTrackID = armedTrackID
         self.metronomeLevel = metronomeLevel
         self.isCountInEnabled = isCountInEnabled
         self.lastEdited = lastEdited
@@ -86,8 +113,15 @@ struct StudioSession: Identifiable, Codable, Equatable {
         case isLoopEnabled
         case masterVolume
         case masterEffects
+        case mastering
+        case auxBusA
+        case auxBusB
         case sections
         case isMetronomeEnabled
+        case punchIn
+        case punchOut
+        case isPunchEnabled
+        case armedTrackID
         case metronomeLevel
         case isCountInEnabled
         case lastEdited
@@ -108,8 +142,15 @@ struct StudioSession: Identifiable, Codable, Equatable {
         isLoopEnabled = try values.decodeIfPresent(Bool.self, forKey: .isLoopEnabled) ?? false
         masterVolume = try values.decodeIfPresent(Float.self, forKey: .masterVolume) ?? 1
         masterEffects = try values.decodeIfPresent(MasterEffectsSettings.self, forKey: .masterEffects) ?? MasterEffectsSettings()
+        mastering = try values.decodeIfPresent(MasteringSettings.self, forKey: .mastering) ?? MasteringSettings()
+        auxBusA = try values.decodeIfPresent(AuxBusSettings.self, forKey: .auxBusA) ?? .busA
+        auxBusB = try values.decodeIfPresent(AuxBusSettings.self, forKey: .auxBusB) ?? .busB
         sections = try values.decodeIfPresent([SongSection].self, forKey: .sections) ?? []
         isMetronomeEnabled = try values.decodeIfPresent(Bool.self, forKey: .isMetronomeEnabled) ?? false
+        punchIn = try values.decodeIfPresent(TimeInterval.self, forKey: .punchIn) ?? 0
+        punchOut = try values.decodeIfPresent(TimeInterval.self, forKey: .punchOut) ?? 0
+        isPunchEnabled = try values.decodeIfPresent(Bool.self, forKey: .isPunchEnabled) ?? false
+        armedTrackID = try values.decodeIfPresent(UUID.self, forKey: .armedTrackID)
         metronomeLevel = try values.decodeIfPresent(Float.self, forKey: .metronomeLevel) ?? 0.7
         isCountInEnabled = try values.decodeIfPresent(Bool.self, forKey: .isCountInEnabled) ?? false
         lastEdited = try values.decodeIfPresent(Date.self, forKey: .lastEdited) ?? Date()

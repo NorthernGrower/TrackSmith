@@ -30,6 +30,13 @@ export class StudioEngine {
     this.oscillators = new Set();
     this.sequencedDrumNodes = new Set();
     this.drumHitScheduler = null;
+
+    this.kWeightAnalyser = null;
+    this.loudnessBlockSum = 0;
+    this.loudnessBlockReads = 0;
+    this.loudnessBlockStartedAt = 0;
+    this.loudnessBlocks = [];
+    this.loudnessPeak = 0;
   }
 
   ensureContext() {
@@ -43,11 +50,30 @@ export class StudioEngine {
         masterVolume: this.session?.masterVolume ?? 1,
         effects: this.session?.masterEffects,
         tempo: this.session?.tempo ?? 120,
-        includeEffects: true
+        includeEffects: true,
+        mastering: this.session?.mastering
       });
       this.masterGain = chain.input;
       this.masterChain = chain;
       this.masterAnalyser.connect(this.ctx.destination);
+
+      // K-weighting branch used by the loudness meters.
+      this.kWeightAnalyser = this.ctx.createAnalyser();
+      this.kWeightAnalyser.fftSize = 2048;
+      const kShelf = this.ctx.createBiquadFilter();
+      kShelf.type = 'highshelf';
+      kShelf.frequency.value = 1681.97;
+      kShelf.gain.value = 4;
+      const kHighPass = this.ctx.createBiquadFilter();
+      kHighPass.type = 'highpass';
+      kHighPass.frequency.value = 38.14;
+      kHighPass.Q.value = 0.5;
+      this.masterAnalyser.connect(kShelf);
+      kShelf.connect(kHighPass);
+      kHighPass.connect(this.kWeightAnalyser);
+
+      this.auxChain = buildAuxChain(this.ctx, this.masterGain);
+      applyAuxBusSettings(this.auxChain, this.session?.auxA, this.session?.auxB, this.session?.tempo ?? 120);
 
       this.clickBus = this.ctx.createGain();
       this.clickBus.connect(this.masterAnalyser);
@@ -85,8 +111,91 @@ export class StudioEngine {
     if (!this.session) return;
     applyMasterChain(this.masterChain, {
       effects: this.session.masterEffects,
-      tempo: this.session.tempo
+      tempo: this.session.tempo,
+      mastering: this.session.mastering
     });
+    this.applyAuxBuses();
+  }
+
+  /// Applies the master EQ, bus compressor and limiter.
+  applyMastering() {
+    if (!this.session) return;
+    applyMastering(this.masterChain, this.session.mastering);
+  }
+
+  /// Measures the master output for the loudness meters.
+  readLoudness() {
+    if (!this.ctx || !this.kWeightAnalyser || !this.masterAnalyser) return emptyLoudness();
+    if (!this.isPlaying) return this.loudnessSnapshot();
+
+    const weighted = new Float32Array(this.kWeightAnalyser.fftSize);
+    this.kWeightAnalyser.getFloatTimeDomainData(weighted);
+    const raw = new Float32Array(this.masterAnalyser.fftSize);
+    this.masterAnalyser.getFloatTimeDomainData(raw);
+
+    let sum = 0;
+    for (let i = 0; i < weighted.length; i += 1) sum += weighted[i] * weighted[i];
+    let peak = 0;
+    for (let i = 0; i < raw.length; i += 1) {
+      const value = Math.abs(raw[i]);
+      if (value > peak) peak = Math.abs(value);
+    }
+
+    const now = this.ctx.currentTime;
+    if (!this.loudnessBlockStartedAt) this.loudnessBlockStartedAt = now;
+    this.loudnessBlockSum += sum / Math.max(1, weighted.length);
+    this.loudnessBlockReads += 1;
+    this.loudnessPeak = Math.max(this.loudnessPeak, peak);
+
+    if (now - this.loudnessBlockStartedAt >= 0.4) {
+      this.loudnessBlocks.push(this.loudnessBlockSum / Math.max(1, this.loudnessBlockReads));
+      if (this.loudnessBlocks.length > 4500) this.loudnessBlocks.shift();
+      this.loudnessBlockSum = 0;
+      this.loudnessBlockReads = 0;
+      this.loudnessBlockStartedAt = now;
+    }
+
+    return this.loudnessSnapshot();
+  }
+
+  loudnessSnapshot() {
+    const blocks = this.loudnessBlocks;
+    const absoluteGate = Math.pow(10, (-70 + 0.691) / 10);
+    const gated = blocks.filter((value) => value >= absoluteGate);
+    let integrated = null;
+    if (gated.length) {
+      const ungatedMean = gated.reduce((sum, value) => sum + value, 0) / gated.length;
+      const relativeGate = ungatedMean * Math.pow(10, -10 / 10);
+      const above = gated.filter((value) => value >= relativeGate);
+      const mean = above.length
+        ? above.reduce((sum, value) => sum + value, 0) / above.length
+        : ungatedMean;
+      integrated = -0.691 + 10 * Math.log10(Math.max(1e-12, mean));
+    }
+
+    const recent = blocks.slice(-8);
+    let shortTerm = null;
+    if (recent.length) {
+      const mean = recent.reduce((sum, value) => sum + value, 0) / recent.length;
+      shortTerm = -0.691 + 10 * Math.log10(Math.max(1e-12, mean));
+    }
+
+    const truePeak = this.loudnessPeak > 0 ? 20 * Math.log10(this.loudnessPeak) : null;
+    return { integrated, shortTerm, truePeak, seconds: 0 };
+  }
+
+  resetLoudness() {
+    this.loudnessBlockSum = 0;
+    this.loudnessBlockReads = 0;
+    this.loudnessBlockStartedAt = 0;
+    this.loudnessBlocks = [];
+    this.loudnessPeak = 0;
+  }
+
+  /// Applies both send buses' effects, return levels and delay time.
+  applyAuxBuses() {
+    if (!this.session) return;
+    applyAuxBusSettings(this.auxChain, this.session.auxA, this.session.auxB, this.session.tempo);
   }
 
   duration() {
@@ -123,8 +232,10 @@ export class StudioEngine {
     this.masterGain.gain.value = this.session.masterVolume;
     applyMasterChain(this.masterChain, {
       effects: this.session.masterEffects,
-      tempo: this.session.tempo
+      tempo: this.session.tempo,
+      mastering: this.session.mastering
     });
+    applyAuxBusSettings(this.auxChain, this.session.auxA, this.session.auxB, this.session.tempo);
     this.updateMix(this.isPlaying ? this.getPosition() : this.position);
   }
 
@@ -142,6 +253,8 @@ export class StudioEngine {
     const comp = ctx.createDynamicsCompressor();
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 1024;
+    const sendA = ctx.createGain();
+    const sendB = ctx.createGain();
 
     let tail = input;
     if (pan) {
@@ -155,7 +268,14 @@ export class StudioEngine {
     comp.connect(analyser);
     analyser.connect(this.masterGain);
 
-    return { input, pan, low, mid, high, comp, analyser, meterData: new Float32Array(analyser.fftSize) };
+    if (this.auxChain) {
+      comp.connect(sendA);
+      sendA.connect(this.auxChain.aInput);
+      comp.connect(sendB);
+      sendB.connect(this.auxChain.bInput);
+    }
+
+    return { input, pan, low, mid, high, comp, analyser, sendA, sendB, meterData: new Float32Array(analyser.fftSize) };
   }
 
   disposeTrackNodes(nodes) {
@@ -167,6 +287,8 @@ export class StudioEngine {
       nodes.high.disconnect();
       nodes.comp.disconnect();
       nodes.analyser.disconnect();
+      nodes.sendA?.disconnect();
+      nodes.sendB?.disconnect();
     } catch (error) {
       // already disconnected
     }
@@ -214,6 +336,9 @@ export class StudioEngine {
       nodes.input.gain.value = audible
         ? track.volume * (group ? group.volume : 1) * model.automationGain(track, position)
         : 0;
+      // Sends are post-fader: they follow the track level and drop out when it is muted.
+      nodes.sendA.gain.value = audible ? model.clamp(Number(track.sendA ?? 0), 0, 1) : 0;
+      nodes.sendB.gain.value = audible ? model.clamp(Number(track.sendB ?? 0), 0, 1) : 0;
       if (nodes.pan) {
         const automatedPan = model.automationValue(track.panAutomation, position, 'pan');
         const pan = automatedPan === null ? (track.pan ?? 0) : automatedPan;
@@ -256,6 +381,7 @@ export class StudioEngine {
     this.cursorPos = this.position;
     this.cursorCtx = now;
     this.isPlaying = true;
+    this.resetLoudness();
     this.updateMix(this.position);
     this.tick();
     this.timer = setInterval(() => this.tick(), TICK_MS);
@@ -351,7 +477,22 @@ export class StudioEngine {
 
         const source = this.ctx.createBufferSource();
         source.buffer = buffer;
-        source.connect(nodes.input);
+        const fadeGain = this.ctx.createGain();
+        const clipStartAbs = clipStart;
+        const gainAt = (time) => model.clipGainAt(clip, track, time);
+        const startGain = gainAt(overlapStart);
+        fadeGain.gain.setValueAtTime(startGain, Math.max(this.ctx.currentTime, atCtx + (overlapStart - fromPos)));
+        const fadeInEnd = clipStartAbs + Math.max(0, Number(clip.fadeIn) || 0);
+        const fadeOutStart = clipEnd - Math.max(0, Number(clip.fadeOut) || 0);
+        if (fadeInEnd > overlapStart && fadeInEnd < overlapEnd) {
+          fadeGain.gain.linearRampToValueAtTime(gainAt(fadeInEnd), Math.max(this.ctx.currentTime, atCtx + (fadeInEnd - fromPos)));
+        }
+        if (fadeOutStart > overlapStart && fadeOutStart < overlapEnd) {
+          fadeGain.gain.linearRampToValueAtTime(gainAt(fadeOutStart), Math.max(this.ctx.currentTime, atCtx + (fadeOutStart - fromPos)));
+        }
+        fadeGain.gain.linearRampToValueAtTime(gainAt(overlapEnd), Math.max(this.ctx.currentTime, atCtx + (overlapEnd - fromPos)));
+        source.connect(fadeGain);
+        fadeGain.connect(nodes.input);
         const offset = clip.sourceStart + (overlapStart - clipStart);
         const when = Math.max(this.ctx.currentTime, atCtx + (overlapStart - fromPos));
         try {
@@ -558,9 +699,16 @@ export class StudioEngine {
       masterVolume: includeMixer ? masterVolume : 1,
       effects: this.session?.masterEffects,
       tempo: this.session?.tempo ?? 120,
-      includeEffects: includeMixer
+      includeEffects: includeMixer,
+      mastering: includeMixer ? this.session?.mastering : null
     });
     const master = masterChain.input;
+
+    let auxChain = null;
+    if (includeMixer) {
+      auxChain = buildAuxChain(offline, master);
+      applyAuxBusSettings(auxChain, this.session?.auxA, this.session?.auxB, this.session?.tempo ?? 120);
+    }
 
     const groups = this.session?.groups || [];
     const soloedTrackIDs = new Set(groups.filter((group) => group.soloed).flatMap((group) => group.trackIDs));
@@ -572,7 +720,9 @@ export class StudioEngine {
         anySolo,
         duration,
         applyMuteSolo,
-        groups: this.session?.groups || []
+        groups: this.session?.groups || [],
+        auxChain,
+        forceSource
       });
       this.scheduleOfflineTrack(offline, track, input, duration, forceSource);
     }
@@ -580,15 +730,15 @@ export class StudioEngine {
     return offline.startRendering();
   }
 
-  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration, applyMuteSolo = true, groups = [] }) {
+  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration, applyMuteSolo = true, groups = [], auxChain = null, forceSource = false }) {
     const input = ctx.createGain();
     const group = groups.find((item) => item.trackIDs.includes(track.id));
     const mutedByGroup = group?.muted ?? false;
     const soloedByGroup = group?.soloed ?? false;
+    const audible = !applyMuteSolo
+      || (!(track.muted || mutedByGroup) && (!anySolo || track.soloed || soloedByGroup));
 
     if (includeMixer) {
-      const audible = !applyMuteSolo
-        || (!(track.muted || mutedByGroup) && (!anySolo || track.soloed || soloedByGroup));
       const volume = audible ? track.volume * (group ? group.volume : 1) : 0;
       input.gain.setValueAtTime(volume * model.automationGain(track, 0), 0);
       const step = 0.05;
@@ -644,6 +794,19 @@ export class StudioEngine {
     high.connect(comp);
     comp.connect(destination);
 
+    if (includeMixer && auxChain) {
+      const sendLevel = (value) => (applyMuteSolo && !audible ? 0 : model.clamp(Number(value ?? 0), 0, 1));
+      const sendA = ctx.createGain();
+      sendA.gain.value = sendLevel(track.sendA);
+      comp.connect(sendA);
+      sendA.connect(auxChain.aInput);
+
+      const sendB = ctx.createGain();
+      sendB.gain.value = sendLevel(track.sendB);
+      comp.connect(sendB);
+      sendB.connect(auxChain.bInput);
+    }
+
     return input;
   }
 
@@ -659,7 +822,16 @@ export class StudioEngine {
 
       const source = ctx.createBufferSource();
       source.buffer = buffer;
-      source.connect(input);
+      const fadeGain = ctx.createGain();
+      const gainAt = (time) => model.clipGainAt(clip, track, time);
+      fadeGain.gain.setValueAtTime(gainAt(Math.max(0, clip.start)), Math.max(0, clip.start));
+      const fadeInEnd = Math.max(0, clip.start) + Math.max(0, Number(clip.fadeIn) || 0);
+      const fadeOutStart = Math.max(0, clip.start) + playable - Math.max(0, Number(clip.fadeOut) || 0);
+      if (fadeInEnd > clip.start) fadeGain.gain.linearRampToValueAtTime(gainAt(fadeInEnd), fadeInEnd);
+      if (fadeOutStart > clip.start) fadeGain.gain.linearRampToValueAtTime(gainAt(fadeOutStart), fadeOutStart);
+      fadeGain.gain.linearRampToValueAtTime(0, Math.max(0, clip.start) + playable);
+      source.connect(fadeGain);
+      fadeGain.connect(input);
       try {
         source.start(Math.max(0, clip.start), clip.sourceStart, playable);
       } catch (error) {
@@ -701,16 +873,68 @@ function makeImpulseResponse(ctx, decay) {
   return impulse;
 }
 
-function buildMasterChain(ctx, destination, { masterVolume = 1, effects, tempo = 120, includeEffects = true }) {
+function emptyLoudness() {
+  return { integrated: null, shortTerm: null, truePeak: null, seconds: 0 };
+}
+
+function buildMasterChain(ctx, destination, { masterVolume = 1, effects, tempo = 120, includeEffects = true, mastering = null }) {
   const input = ctx.createGain();
   input.gain.value = masterVolume;
 
+  // Master EQ, bus compressor and limiter sit on everything, before the
+  // reverb and delay sends and before the destination.
+  const eqLow = ctx.createBiquadFilter();
+  eqLow.type = 'lowshelf';
+  eqLow.frequency.value = 120;
+  const eqMid = ctx.createBiquadFilter();
+  eqMid.type = 'peaking';
+  eqMid.Q.value = 1.2;
+  eqMid.frequency.value = 1000;
+  const eqHigh = ctx.createBiquadFilter();
+  eqHigh.type = 'highshelf';
+  eqHigh.frequency.value = 8000;
+  const compressor = ctx.createDynamicsCompressor();
+  const drive = ctx.createGain();
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.ratio.value = 20;
+  limiter.knee.value = 0;
+  limiter.attack.value = 0.002;
+  const ceiling = ctx.createGain();
+
+  input.connect(eqLow);
+  eqLow.connect(eqMid);
+  eqMid.connect(eqHigh);
+  eqHigh.connect(compressor);
+  compressor.connect(drive);
+  drive.connect(limiter);
+  limiter.connect(ceiling);
+
+  const chain = {
+    input,
+    eqLow,
+    eqMid,
+    eqHigh,
+    compressor,
+    drive,
+    limiter,
+    ceiling,
+    dry: null,
+    reverb: null,
+    revWet: null,
+    delay: null,
+    delayWet: null,
+    feedback: null,
+    impulseDecay: 0
+  };
+
   const dry = ctx.createGain();
-  input.connect(dry);
+  ceiling.connect(dry);
   dry.connect(destination);
+  chain.dry = dry;
 
   if (!includeEffects) {
-    return { input, dry, reverb: null, revWet: null, delay: null, delayWet: null, feedback: null, impulseDecay: 0 };
+    applyMasterChain(chain, { effects, tempo, mastering });
+    return chain;
   }
 
   const reverb = ctx.createConvolver();
@@ -719,23 +943,31 @@ function buildMasterChain(ctx, destination, { masterVolume = 1, effects, tempo =
   const feedback = ctx.createGain();
   const delayWet = ctx.createGain();
 
-  input.connect(reverb);
+  ceiling.connect(reverb);
   reverb.connect(revWet);
   revWet.connect(destination);
 
-  input.connect(delay);
+  ceiling.connect(delay);
   delay.connect(feedback);
   feedback.connect(delay);
   delay.connect(delayWet);
   delayWet.connect(destination);
 
-  const chain = { input, dry, reverb, revWet, delay, delayWet, feedback, impulseDecay: 0 };
-  applyMasterChain(chain, { effects, tempo });
+  chain.reverb = reverb;
+  chain.revWet = revWet;
+  chain.delay = delay;
+  chain.delayWet = delayWet;
+  chain.feedback = feedback;
+
+  applyMasterChain(chain, { effects, tempo, mastering });
   return chain;
 }
 
-function applyMasterChain(chain, { effects, tempo }) {
-  if (!chain || !chain.reverb) return;
+function applyMasterChain(chain, { effects, tempo, mastering }) {
+  if (!chain) return;
+  applyMastering(chain, mastering);
+  if (!chain.reverb) return;
+
   const settings = effects || { bypassed: true };
   const bypassed = settings.bypassed !== false;
   const tempoSafe = tempo || 120;
@@ -755,6 +987,90 @@ function applyMasterChain(chain, { effects, tempo }) {
   chain.feedback.gain.value = bypassed ? 0 : model.clamp(Number(settings.delayFeedback ?? 0.38), 0, 0.9);
   const beats = Number(settings.delayBeats ?? 0.5);
   chain.delay.delayTime.value = Math.min(2, Math.max(0.01, beats * 60 / tempoSafe));
+}
+
+/// Applies the mastering settings to a built master chain.
+function applyMastering(chain, mastering) {
+  if (!chain || !chain.eqLow) return;
+
+  const settings = mastering || { bypassed: true };
+  const off = settings.bypassed === true;
+
+  const eq = settings.eq || {};
+  const eqOff = off || eq.bypassed === true;
+  chain.eqLow.gain.value = eqOff ? 0 : model.clamp(Number(eq.lowGain ?? 0), -12, 12);
+  chain.eqMid.frequency.value = model.clamp(Number(eq.midFrequency ?? 1000), 200, 6000);
+  chain.eqMid.gain.value = eqOff ? 0 : model.clamp(Number(eq.midGain ?? 0), -12, 12);
+  chain.eqHigh.gain.value = eqOff ? 0 : model.clamp(Number(eq.highGain ?? 0), -12, 12);
+
+  const comp = settings.compressor || {};
+  const compOff = off || comp.bypassed === true;
+  chain.compressor.threshold.value = compOff ? 0 : model.clamp(Number(comp.threshold ?? -18), -60, 0);
+  chain.compressor.ratio.value = compOff ? 1 : model.clamp(Number(comp.ratio ?? 2), 1, 20);
+  chain.compressor.attack.value = model.clamp(Number(comp.attack ?? 0.03), 0.001, 1);
+  chain.compressor.release.value = model.clamp(Number(comp.release ?? 0.25), 0.05, 1);
+
+  const lim = settings.limiter || {};
+  const limOff = off || lim.bypassed === true;
+  const ceilingDB = model.clamp(Number(lim.ceiling ?? -1), -6, 0);
+  chain.drive.gain.value = limOff
+    ? 1
+    : Math.pow(10, model.clamp(Number(lim.drive ?? 0), -12, 12) / 20);
+  chain.limiter.threshold.value = limOff ? 0 : ceilingDB;
+  chain.limiter.ratio.value = limOff ? 1 : 20;
+  chain.limiter.knee.value = 0;
+  chain.limiter.attack.value = 0.002;
+  chain.limiter.release.value = model.clamp(Number(lim.release ?? 0.08), 0.02, 0.5);
+}
+
+function buildAuxChain(ctx, destination) {
+  const aInput = ctx.createGain();
+  const aReverb = ctx.createConvolver();
+  const aWet = ctx.createGain();
+  const aReturn = ctx.createGain();
+  aInput.connect(aReverb);
+  aReverb.connect(aWet);
+  aWet.connect(aReturn);
+  aReturn.connect(destination);
+
+  const bInput = ctx.createGain();
+  const bDelay = ctx.createDelay(2);
+  const bWet = ctx.createGain();
+  const bFeedback = ctx.createGain();
+  const bReturn = ctx.createGain();
+  bInput.connect(bDelay);
+  bDelay.connect(bWet);
+  bWet.connect(bReturn);
+  bReturn.connect(destination);
+  bDelay.connect(bFeedback);
+  bFeedback.connect(bDelay);
+
+  return { aInput, aReverb, aWet, aReturn, bInput, bDelay, bWet, bFeedback, bReturn, reverbDecay: 0 };
+}
+
+function applyAuxBusSettings(chain, auxA, auxB, tempo) {
+  if (!chain) return;
+  const a = auxA || {};
+  const decay = model.clamp(Number(a.reverbDecay ?? 1.4), 0.2, 5);
+  if (chain.reverbDecay !== decay) {
+    chain.reverbDecay = decay;
+    try {
+      chain.aReverb.buffer = makeImpulseResponse(chain.aReverb.context, decay);
+    } catch (error) {
+      // keep the previous impulse if the browser rejects the swap
+    }
+  }
+  const aOff = a.bypassed === true;
+  chain.aWet.gain.value = aOff ? 0 : model.clamp(Number(a.reverbMix ?? 0.4), 0, 1);
+  chain.aReturn.gain.value = aOff ? 0 : model.clamp(Number(a.level ?? 0.8), 0, 1);
+
+  const b = auxB || {};
+  const bOff = b.bypassed === true;
+  const beats = Number(b.delayBeats ?? 0.75);
+  chain.bDelay.delayTime.value = Math.min(2, Math.max(0.01, beats * 60 / (tempo || 120)));
+  chain.bWet.gain.value = bOff ? 0 : model.clamp(Number(b.delayMix ?? 0.35), 0, 1);
+  chain.bFeedback.gain.value = bOff ? 0 : model.clamp(Number(b.delayFeedback ?? 0.35), 0, 0.9);
+  chain.bReturn.gain.value = bOff ? 0 : model.clamp(Number(b.level ?? 0.7), 0, 1);
 }
 
 export function encodeWav(buffer, bitDepth = 16) {
