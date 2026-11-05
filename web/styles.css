@@ -210,6 +210,8 @@ button { cursor: pointer; }
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 /* ---------- Header ---------- */
@@ -602,7 +604,7 @@ button { cursor: pointer; }
   flex: 0 0 auto;
   background: var(--panel);
   border-top: 1px solid var(--line);
-  padding-bottom: 6px;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom));
 }
 
 .progress { height: 2px; background: var(--panel-highlight); margin: 0 15px; }
@@ -1583,3 +1585,39 @@ button { cursor: pointer; }
   transition: width 0.12s linear;
 }
 .loudness-fill.over { background: #ff5c5c; }
+
+
+/* Landscape phones: shorter header and a two-column transport so the
+   arrangement keeps a usable height when the device turns sideways. */
+@media (orientation: landscape) and (max-height: 560px) {
+  .studio-header { padding: 6px 12px 8px; gap: 7px; }
+  .studio-mark { width: 30px; height: 30px; font-size: 17px; border-radius: 8px; }
+  .session-meta h1 { font-size: 15px; }
+  .session-meta p { display: none; }
+  .session-actions { gap: 5px; }
+  .icon-btn { width: 32px; height: 32px; font-size: 13px; border-radius: 8px; }
+  .mode-btn { height: 20px; }
+
+  .tool-row {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tool-row::-webkit-scrollbar { display: none; }
+  .tool { flex: 0 0 auto; min-height: 32px; font-size: 11px; padding: 0 12px; }
+
+  .transport {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 6px;
+    padding-bottom: calc(2px + env(safe-area-inset-bottom));
+  }
+  .progress { grid-column: 1 / -1; margin: 0 12px; }
+  .transport-row { grid-column: 1 / -1; padding: 4px 12px; }
+  .control-row { min-width: 0; padding: 0 12px 6px; }
+  .control-row .range-label { min-width: 0; }
+  .tbtn { width: 30px; height: 34px; }
+  .play-btn { width: 40px; height: 40px; }
+  .modal.tall { top: 0; inset: 0 0 0 0; border-radius: 0; }
+}

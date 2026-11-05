@@ -699,11 +699,35 @@ function renderTransport() {
 
 // ---------- Rendering: timeline ----------
 
+let layoutWidth = 0;
+let viewportTimer = null;
+let viewportTicks = 0;
+
+/// Re-measures the arrangement after the window changes shape, which happens
+/// when a phone is turned sideways or the browser bars appear and disappear.
+function handleViewportChange() {
+  if (viewportTimer) window.clearTimeout(viewportTimer);
+  viewportTimer = window.setTimeout(() => {
+    viewportTimer = null;
+    if (!state.session || !el.arrScroll) return;
+    const width = el.arrScroll.clientWidth;
+    if (!width || width === layoutWidth) return;
+    const scrollLeft = el.arrScroll.scrollLeft;
+    const scrollTop = el.arrScroll.scrollTop;
+    renderTimeline();
+    renderTransport();
+    el.arrScroll.scrollLeft = scrollLeft;
+    el.arrScroll.scrollTop = scrollTop;
+  }, 120);
+}
+
 function renderTimeline() {
   const session = state.session;
   const hasTracks = session.tracks.length > 0;
   el.emptyState.classList.toggle('visible', !hasTracks);
   el.arrGrid.style.display = hasTracks ? 'flex' : 'none';
+  const scrollWidth = el.arrScroll.clientWidth || 320;
+  layoutWidth = scrollWidth;
   if (!hasTracks) {
     updatePlayhead();
     return;
@@ -711,7 +735,6 @@ function renderTimeline() {
 
   const pps = state.zoom;
   const duration = sessionDuration();
-  const scrollWidth = el.arrScroll.clientWidth || 320;
   const contentWidth = Math.max(scrollWidth, duration * pps + 240, 480);
   const beatPx = beatDuration() * pps;
   el.arrContent.style.width = `${contentWidth}px`;
@@ -1102,6 +1125,15 @@ function frame() {
     }
     if (state.countInActive) {
       renderTransport();
+    }
+
+    // A few web views do not fire a resize event when the device turns, so
+    // the arrangement width is also checked a couple of times a second.
+    viewportTicks += 1;
+    if (viewportTicks >= 30) {
+      viewportTicks = 0;
+      const width = el.arrScroll ? el.arrScroll.clientWidth : 0;
+      if (width > 0 && width !== layoutWidth) handleViewportChange();
     }
   }
   requestAnimationFrame(frame);
@@ -4380,6 +4412,14 @@ function uniqueSessionName(base) {
 // ---------- Event wiring ----------
 
 function bindEvents() {
+  window.addEventListener('resize', handleViewportChange);
+  window.addEventListener('orientationchange', () => {
+    handleViewportChange();
+    window.setTimeout(handleViewportChange, 320);
+  });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', handleViewportChange);
+  }
   el.modeSimpleBtn.addEventListener('click', () => setStudioMode('simple'));
   el.modeProBtn.addEventListener('click', () => setStudioMode('pro'));
   el.addTrackBtn.addEventListener('click', () => el.fileInput.click());
