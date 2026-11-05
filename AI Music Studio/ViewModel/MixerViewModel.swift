@@ -38,6 +38,15 @@ final class MixerViewModel: ObservableObject {
     @Published private(set) var sections: [SongSection] = []
     @Published private(set) var channelPresets: [ChannelPreset] = []
     @Published private(set) var customTemplates: [SessionTemplate] = []
+    @Published private(set) var versions: [SessionVersion] = []
+    @Published private(set) var sessionTransferProgress: Double?
+    @Published private(set) var sessionTransferTitle = ""
+    @Published private(set) var sessionExportURL: URL?
+    @Published var sessionTransferError: String?
+    @Published private(set) var midiExportURL: URL?
+    @Published var midiError: String?
+    private var autosaveTask: Task<Void, Never>?
+    private var storedVersions: [SessionVersion] = []
     @Published private(set) var masterLevel: Float = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var tempoBPM = 120
@@ -161,6 +170,8 @@ final class MixerViewModel: ObservableObject {
             isPunchEnabled = session.isPunchEnabled
             armedTrackID = session.armedTrackID
         }
+        storedVersions = SessionVersionStore.load()
+        versions = storedVersions.filter { $0.sessionID == activeSessionID }
         exports = MixExportStorage.loadExports()
         resolveClipMetadata()
         engine.load(tracks: tracks)
@@ -174,6 +185,14 @@ final class MixerViewModel: ObservableObject {
         engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
         loadWaveforms()
 
+        // Keep a first snapshot so there is always something to go back to.
+        if versions.isEmpty {
+            Task { [weak self] in
+                await Task.yield()
+                self?.saveVersionNow(force: true)
+            }
+        }
+
         playbackTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.refresh()
@@ -183,6 +202,7 @@ final class MixerViewModel: ObservableObject {
     }
 
     deinit {
+        autosaveTask?.cancel()
         playbackTask?.cancel()
         drumSequencerTask?.cancel()
         samplePreviewTask?.cancel()
@@ -491,6 +511,16 @@ final class MixerViewModel: ObservableObject {
         commitSession()
     }
 
+    /// Applies an arpeggiator's settings to a track's arrangement notes.
+    func updateArpeggiator(_ settings: ArpeggiatorSettings, for trackID: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        beginUndoableEdit()
+        tracks[index].arpeggiator = settings
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+        commitSession()
+    }
+
     // MARK: - Piano roll notes
 
     func addSynthNote(
@@ -618,6 +648,104 @@ final class MixerViewModel: ObservableObject {
         engine.updateMix(tracks: tracks)
         duration = engine.duration
         commitSession()
+    }
+
+    // MARK: - MIDI
+
+    /// Adds a new instrument track holding the notes of an imported MIDI file.
+    @discardableResult
+    func addMIDITrack(_ imported: MIDIFile.Imported) -> UUID {
+        if let tempo = imported.tempoBPM {
+            setTempo(tempo)
+        }
+
+        let proposed = (imported.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = proposed.isEmpty ? "MIDI Track" : proposed
+        var name = base
+        var suffix = 2
+        while tracks.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            name = "\(base) \(suffix)"
+            suffix += 1
+        }
+
+        let track = Track(
+            name: name,
+            fileName: "",
+            clips: [],
+            notes: clampedImportedNotes(imported.notes)
+        )
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+
+        tracks.append(track)
+        resolveClipMetadata()
+        engine.load(tracks: tracks)
+        engine.updateGroups(groups)
+        duration = engine.duration
+        applyLoopChangeToEngine()
+        currentTime = min(max(0, resumeTime), duration)
+        engine.seek(to: currentTime)
+        if wasPlaying { engine.play() }
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+        loadWaveforms()
+        commitSession()
+        return track.id
+    }
+
+    /// Swaps a track's piano-roll notes for the ones read from a MIDI file.
+    func replaceSynthNotes(trackID: UUID, with notes: [SynthNote], tempoBPM: Int? = nil) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }),
+              !notes.isEmpty else { return }
+        if let tempo = tempoBPM {
+            setTempo(tempo)
+        }
+        beginUndoableEdit()
+        tracks[index].notes = clampedImportedNotes(notes)
+        engine.updateMix(tracks: tracks)
+        duration = engine.duration
+        commitSession()
+    }
+
+    /// Writes a track's sequenced notes to a standard MIDI file for sharing.
+    func exportMIDI(trackID: UUID) {
+        guard let track = tracks.first(where: { $0.id == trackID }) else { return }
+        guard !track.notes.isEmpty else {
+            midiError = "This track has no sequenced notes to export yet."
+            return
+        }
+
+        let data = MIDIFile.export(track: track, tempoBPM: tempoBPM)
+        let directory = MIDIFile.exportsDirectory
+        let url = directory.appendingPathComponent(MIDIFile.suggestedFileName(for: track.name))
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            midiError = nil
+            midiExportURL = url
+        } catch {
+            midiExportURL = nil
+            midiError = "The MIDI file could not be written."
+        }
+    }
+
+    func clearMIDIExportURL() {
+        midiExportURL = nil
+    }
+
+    /// Brings imported notes into the piano roll's playable range.
+    private func clampedImportedNotes(_ notes: [SynthNote]) -> [SynthNote] {
+        notes
+            .map { note in
+                var copy = note
+                copy.pitch = min(SynthNote.highestPitch, max(SynthNote.lowestPitch, note.pitch))
+                copy.startTime = max(0, note.startTime)
+                copy.duration = max(0.05, note.duration)
+                copy.velocity = min(1, max(0.05, note.velocity))
+                return copy
+            }
+            .sorted { $0.startTime < $1.startTime }
     }
 
     func setTrackEQ(_ id: UUID, settings: TrackEQSettings) {
@@ -785,12 +913,220 @@ final class MixerViewModel: ObservableObject {
             persistActiveSession(markEdited: false)
         }
         sessions.remove(at: index)
+        storedVersions.removeAll { $0.sessionID == id }
+        SessionVersionStore.save(storedVersions)
+        versions = storedVersions.filter { $0.sessionID == activeSessionID }
 
         if deletingActive, let replacement = sessions.first {
             activateSession(replacement)
         } else {
             StudioSessionStorage.save(sessions: sessions, activeSessionID: activeSessionID)
         }
+    }
+
+    // MARK: - Session backup and import
+
+    var isTransferringSession: Bool { sessionTransferProgress != nil }
+
+    /// Reads the header of a backup so the name can be checked first.
+    func inspectSessionArchive(at url: URL) throws -> SessionArchiveSummary {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        return try SessionArchive.summary(at: url)
+    }
+
+    func sessionExists(named name: String) -> Bool {
+        sessions.contains { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// Packs one session and its audio into a single file for sharing.
+    func exportSession(_ id: UUID) {
+        guard sessionTransferProgress == nil,
+              let session = sessions.first(where: { $0.id == id }) else { return }
+
+        sessionTransferError = nil
+        sessionExportURL = nil
+        sessionTransferProgress = 0
+        sessionTransferTitle = "Packing session…"
+
+        let url = SessionArchive.exportURL(for: session.name)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try SessionArchive.export(session: session, to: url) { fraction in
+                    Task { @MainActor in
+                        self?.sessionTransferProgress = fraction
+                        self?.sessionTransferTitle = fraction >= 1
+                            ? "Preparing file…"
+                            : "Packing audio · \(Int(fraction * 100))%"
+                    }
+                }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.sessionTransferProgress = nil
+                    self.sessionTransferTitle = ""
+                    self.sessionExportURL = url
+                }
+            } catch {
+                await MainActor.run {
+                    self?.sessionTransferProgress = nil
+                    self?.sessionTransferTitle = ""
+                    self?.sessionTransferError = (error as? LocalizedError)?.errorDescription
+                        ?? "The session could not be packed."
+                }
+            }
+        }
+    }
+
+    /// Unpacks a backup as a new session. With `keepBoth` a name collision
+    /// becomes a copy; otherwise the existing session of that name is replaced.
+    func importSessionArchive(from url: URL, keepBoth: Bool) {
+        guard sessionTransferProgress == nil else { return }
+
+        let scoped = url.startAccessingSecurityScopedResource()
+        sessionTransferError = nil
+        sessionTransferProgress = 0
+        sessionTransferTitle = "Reading backup…"
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let summary = try SessionArchive.summary(at: url)
+                let finalName: String = await MainActor.run { [weak self] in
+                    guard let self else { return summary.sessionName }
+                    if keepBoth, self.sessionExists(named: summary.sessionName) {
+                        return self.uniqueSessionName(summary.sessionName)
+                    }
+                    return summary.sessionName
+                }
+
+                let imported = try SessionArchive.importSession(from: url, renameTo: finalName) { fraction in
+                    Task { @MainActor in
+                        self?.sessionTransferProgress = fraction
+                        self?.sessionTransferTitle = fraction >= 1
+                            ? "Finishing import…"
+                            : "Unpacking audio · \(Int(fraction * 100))%"
+                    }
+                }
+
+                await MainActor.run {
+                    guard let self else { return }
+                    if !keepBoth,
+                       let existing = self.sessions.first(where: {
+                           $0.name.caseInsensitiveCompare(summary.sessionName) == .orderedSame
+                       }) {
+                        self.sessions.removeAll { $0.id == existing.id }
+                        self.storedVersions.removeAll { $0.sessionID == existing.id }
+                        SessionVersionStore.save(self.storedVersions)
+                    }
+                    self.sessions.append(imported)
+                    StudioSessionStorage.save(sessions: self.sessions, activeSessionID: imported.id)
+                    self.activateSession(imported)
+                    self.sessionTransferProgress = nil
+                    self.sessionTransferTitle = ""
+                }
+            } catch {
+                await MainActor.run {
+                    self?.sessionTransferProgress = nil
+                    self?.sessionTransferTitle = ""
+                    self?.sessionTransferError = (error as? LocalizedError)?.errorDescription
+                        ?? "The session could not be imported."
+                }
+            }
+
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+    }
+
+    func clearSessionExportURL() {
+        sessionExportURL = nil
+    }
+
+    // MARK: - Session versions
+
+    /// Captures the current state of a session as a version, unless it is
+    /// identical to the newest one already stored.
+    @discardableResult
+    func saveVersionNow(sessionID: UUID? = nil, force: Bool = false) -> SessionVersion? {
+        let targetID = sessionID ?? activeSessionID
+        guard let session = sessions.first(where: { $0.id == targetID }) else { return nil }
+
+        let latest = storedVersions
+            .filter { $0.sessionID == targetID }
+            .max(by: { $0.createdAt < $1.createdAt })
+        if !force, let latest, isSameArrangement(latest.session, session) {
+            return nil
+        }
+
+        let version = SessionVersion(
+            id: UUID(),
+            sessionID: targetID,
+            createdAt: Date(),
+            name: session.name,
+            trackCount: session.tracks.count,
+            duration: session.arrangementDuration,
+            tempoBPM: session.tempoBPM,
+            sectionCount: session.sections.count,
+            session: session
+        )
+        storedVersions.insert(version, at: 0)
+        pruneVersions(for: targetID)
+        SessionVersionStore.save(storedVersions)
+        if targetID == activeSessionID {
+            versions = storedVersions.filter { $0.sessionID == activeSessionID }
+        }
+        return version
+    }
+
+    /// Records the current state a couple of seconds after the last edit.
+    private func scheduleAutosave(for sessionID: UUID) {
+        autosaveTask?.cancel()
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.saveVersionNow(sessionID: sessionID)
+        }
+    }
+
+    /// Restores a snapshot into the open session, keeping the current state
+    /// as a version first so nothing is lost.
+    func restoreVersion(_ id: UUID) {
+        guard let version = storedVersions.first(where: { $0.id == id }) else { return }
+        persistActiveSession(markEdited: false)
+        saveVersionNow(force: true)
+        prepareToLeaveCurrentSession()
+        var restored = version.session
+        restored.id = activeSessionID
+        restored.name = version.name
+        restored.lastEdited = Date()
+        activateSession(restored)
+    }
+
+    /// Opens a snapshot as a new session, leaving the open one untouched.
+    @discardableResult
+    func duplicateVersion(_ id: UUID) -> UUID? {
+        guard let version = storedVersions.first(where: { $0.id == id }) else { return nil }
+        persistActiveSession(markEdited: false)
+        var copy = version.session
+        copy.id = UUID()
+        copy.name = uniqueSessionName("\(version.name) Copy")
+        copy.lastEdited = Date()
+        sessions.append(copy)
+        StudioSessionStorage.save(sessions: sessions, activeSessionID: activeSessionID)
+        activateSession(copy)
+        return copy.id
+    }
+
+    private func pruneVersions(for sessionID: UUID) {
+        let mine = storedVersions.filter { $0.sessionID == sessionID }
+        guard mine.count > SessionVersionStore.maximumPerSession else { return }
+        let keep = Set(mine.prefix(SessionVersionStore.maximumPerSession).map(\.id))
+        storedVersions.removeAll { $0.sessionID == sessionID && !keep.contains($0.id) }
+    }
+
+    private func isSameArrangement(_ left: StudioSession, _ right: StudioSession) -> Bool {
+        var a = left
+        var b = right
+        a.lastEdited = b.lastEdited
+        return a == b
     }
 
     private func persistActiveSession(markEdited: Bool = true) {
@@ -822,6 +1158,7 @@ final class MixerViewModel: ObservableObject {
             sessions[index].lastEdited = Date()
         }
         StudioSessionStorage.save(sessions: sessions, activeSessionID: activeSessionID)
+        scheduleAutosave(for: activeSessionID)
     }
 
     private func prepareToLeaveCurrentSession() {
@@ -837,6 +1174,7 @@ final class MixerViewModel: ObservableObject {
 
     private func activateSession(_ session: StudioSession) {
         activeSessionID = session.id
+        versions = storedVersions.filter { $0.sessionID == session.id }
         sessionName = session.name
         activeTemplateID = session.templateID
         tracks = session.tracks
@@ -1646,7 +1984,7 @@ final class MixerViewModel: ObservableObject {
         let clipEnd = track.playbackClips.map { clip in
             max(0, clip.startTime) + min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
         }.max() ?? 0
-        let noteEnd = track.sequencedNotes.map(\.endTime).max() ?? 0
+        let noteEnd = track.playedNotes(tempoBPM: tempoBPM).map(\.endTime).max() ?? 0
         return max(clipEnd, noteEnd)
     }
 
@@ -1683,6 +2021,7 @@ final class MixerViewModel: ObservableObject {
     private func freezeTrack(at index: Int) {
         let track = tracks[index]
         let outputURL = TrackStorage.uniqueStemURL(baseName: "\(track.name)-freeze", fileExtension: "wav")
+        let freezeTempo = tempoBPM
         let wasPlaying = isPlaying
         let resumeTime = engine.currentTime
 
@@ -1694,7 +2033,7 @@ final class MixerViewModel: ObservableObject {
         Task { [weak self] in
             do {
                 let duration = try await Task.detached(priority: .userInitiated) {
-                    try TrackFreezeRenderer.render(track: track, to: outputURL)
+                    try TrackFreezeRenderer.render(track: track, tempoBPM: freezeTempo, to: outputURL)
                 }.value
 
                 guard let self,

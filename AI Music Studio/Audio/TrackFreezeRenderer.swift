@@ -25,7 +25,7 @@ enum TrackFreezeRenderer {
         }
     }
 
-    static func render(track: Track, to outputURL: URL) throws -> TimeInterval {
+    static func render(track: Track, tempoBPM: Int = 120, to outputURL: URL) throws -> TimeInterval {
         let sampleRate = 44_100.0
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
             throw FreezeError.invalidFormat
@@ -72,7 +72,7 @@ enum TrackFreezeRenderer {
             span = max(span, clip.startTime + playableDuration)
         }
 
-        for note in track.notes {
+        for note in track.playedNotes(tempoBPM: tempoBPM) {
             let noteDuration = note.duration
                 + (track.voice == .synth ? SynthNoteVoice.release : track.voice.releaseTail)
             guard let buffer = InstrumentSoundGenerator.voicedNote(

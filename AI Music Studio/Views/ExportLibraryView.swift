@@ -9,6 +9,8 @@ struct ExportLibraryView: View {
     @ObservedObject var model: MixerViewModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var midiShareItem: ShareItem?
+
     var body: some View {
         NavigationStack {
             Group {
@@ -57,13 +59,54 @@ struct ExportLibraryView: View {
             .navigationTitle("Mix Exports")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        let noteTracks = model.tracks.filter { !$0.notes.isEmpty }
+                        if noteTracks.isEmpty {
+                            Text("No tracks with notes")
+                        } else {
+                            ForEach(noteTracks) { track in
+                                Button(track.name) {
+                                    model.exportMIDI(trackID: track.id)
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "music.note.list")
+                    }
+                    .accessibilityLabel("Export a track as MIDI")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
         }
+        .sheet(item: $midiShareItem) { item in
+            ShareSheet(items: [item.url])
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .onChange(of: model.midiExportURL) { _, url in
+            guard let url else { return }
+            midiShareItem = ShareItem(url: url)
+            model.clearMIDIExportURL()
+        }
+        .alert("MIDI Export", isPresented: midiErrorAlert) {
+            Button("OK", role: .cancel) { model.midiError = nil }
+        } message: {
+            Text(model.midiError ?? "")
+        }
         .onAppear { model.refreshExports() }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
+    }
+
+    private var midiErrorAlert: Binding<Bool> {
+        Binding(
+            get: { model.midiError != nil },
+            set: { presenting in
+                if !presenting { model.midiError = nil }
+            }
+        )
     }
 }

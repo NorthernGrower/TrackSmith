@@ -112,6 +112,14 @@
 
 <div class="modal-root" id="modalRoot"></div>
 <div class="toast" id="toast" role="status"></div>
+<div class="transfer-overlay" id="transferOverlay" hidden>
+  <div class="transfer-card">
+    <strong id="transferLabel">Packing session…</strong>
+    <div class="transfer-bar"><div class="transfer-fill" id="transferFill"></div></div>
+  </div>
+</div>
+<input type="file" id="sessionImportInput" accept=".aimsession,application/json" hidden>
+<input type="file" id="midiImportInput" accept=".mid,.midi,audio/midi,audio/x-midi" hidden>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

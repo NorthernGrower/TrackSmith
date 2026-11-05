@@ -5,6 +5,7 @@
 
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Sequencer grid where notes for the built-in synth are drawn for one track.
 struct PianoRollView: View {
@@ -17,6 +18,12 @@ struct PianoRollView: View {
     @State private var noteStep = PianoRollStep.eighth
     @State private var chordType = ChordType.single
     @State private var quantizeStrength: Double = 0.75
+    @State private var showingArpeggiator = false
+    @State private var showingMIDIImporter = false
+    @State private var showingMIDIImportChoice = false
+    @State private var pendingMIDIImport: MIDIFile.Imported?
+    @State private var midiShareItem: ShareItem?
+    @State private var midiMessage: String?
     @State private var dragOrigin: SynthNote?
     @State private var resizeOrigin: SynthNote?
     @State private var velocityOrigin: Float?
@@ -51,6 +58,35 @@ struct PianoRollView: View {
                     Button("Done") { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingArpeggiator = true
+                    } label: {
+                        Image(systemName: (track?.arpeggiator.isEnabled ?? false)
+                            ? "arrow.up.arrow.down.circle.fill"
+                            : "arrow.up.arrow.down.circle")
+                    }
+                    .accessibilityLabel("Arpeggiator")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            showingMIDIImporter = true
+                        } label: {
+                            Label("Import MIDI…", systemImage: "square.and.arrow.down")
+                        }
+
+                        Button {
+                            model.exportMIDI(trackID: trackID)
+                        } label: {
+                            Label("Export MIDI", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(track?.notes.isEmpty ?? true)
+                    } label: {
+                        Image(systemName: "music.note.list")
+                    }
+                    .accessibilityLabel("MIDI import and export")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button(role: .destructive) {
                         model.deleteSynthNotes(trackID: trackID, noteIDs: selectedNoteIDs)
                         selectedNoteIDs.removeAll()
@@ -62,6 +98,44 @@ struct PianoRollView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) { transportFooter }
+            .sheet(isPresented: $showingArpeggiator) {
+                ArpeggiatorView(model: model, trackID: trackID)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
+            .fileImporter(
+                isPresented: $showingMIDIImporter,
+                allowedContentTypes: [.midi],
+                allowsMultipleSelection: false
+            ) { result in
+                handleMIDISelection(result)
+            }
+            .confirmationDialog(
+                "Import MIDI",
+                isPresented: $showingMIDIImportChoice,
+                titleVisibility: .visible
+            ) {
+                Button("New Instrument Track") { importMIDIAsNewTrack() }
+                Button("Replace These Notes", role: .destructive) { importMIDIReplacingNotes() }
+                Button("Cancel", role: .cancel) { pendingMIDIImport = nil }
+            } message: {
+                Text(midiImportMessage)
+            }
+            .alert("MIDI", isPresented: midiAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(model.midiError ?? midiMessage ?? "")
+            }
+            .sheet(item: $midiShareItem) { item in
+                ShareSheet(items: [item.url])
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
+            .onChange(of: model.midiExportURL) { _, url in
+                guard let url else { return }
+                midiShareItem = ShareItem(url: url)
+                model.clearMIDIExportURL()
+            }
         }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
@@ -83,6 +157,7 @@ struct PianoRollView: View {
                     }
                 }
             }
+            .defaultScrollAnchor(.center)
         }
     }
 
@@ -447,6 +522,63 @@ struct PianoRollView: View {
                 .fill(Color.white.opacity(0.09))
                 .frame(height: 1)
         }
+    }
+
+    // MARK: - MIDI
+
+    private var midiImportMessage: String {
+        guard let imported = pendingMIDIImport else { return "" }
+        let count = imported.notes.count
+        let notesText = count == 1 ? "1 note" : "\(count) notes"
+        let name = imported.name ?? "This file"
+        return "“\(name)” has \(notesText). Add it as a new instrument track, or replace the notes on this track?"
+    }
+
+    private var midiAlert: Binding<Bool> {
+        Binding(
+            get: { midiMessage != nil || model.midiError != nil },
+            set: { presenting in
+                if !presenting {
+                    midiMessage = nil
+                    model.midiError = nil
+                }
+            }
+        )
+    }
+
+    private func handleMIDISelection(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            do {
+                let imported = try MIDIFile.importFile(at: url)
+                pendingMIDIImport = imported
+                showingMIDIImportChoice = true
+            } catch {
+                midiMessage = (error as? LocalizedError)?.errorDescription
+                    ?? "That MIDI file could not be read."
+            }
+        case .failure:
+            midiMessage = "That file could not be opened."
+        }
+    }
+
+    private func importMIDIAsNewTrack() {
+        guard let imported = pendingMIDIImport else { return }
+        pendingMIDIImport = nil
+        model.addMIDITrack(imported)
+        midiMessage = "Imported \(midiNoteCount(imported.notes.count)) as a new track."
+    }
+
+    private func importMIDIReplacingNotes() {
+        guard let imported = pendingMIDIImport else { return }
+        pendingMIDIImport = nil
+        model.replaceSynthNotes(trackID: trackID, with: imported.notes, tempoBPM: imported.tempoBPM)
+        midiMessage = "Replaced this track's notes with \(midiNoteCount(imported.notes.count))."
+    }
+
+    private func midiNoteCount(_ count: Int) -> String {
+        count == 1 ? "1 note" : "\(count) notes"
     }
 
     // MARK: - Geometry helpers

@@ -102,6 +102,7 @@ final class MixerEngine {
     private var auxBusBSettings = AuxBusSettings.busB
     private var masterEffectsSettings = MasterEffectsSettings()
     private var mixTracks: [Track] = []
+    private var mixNotes: [UUID: [SynthNote]] = [:]
     private var mixGroups: [TrackGroup] = []
     private var automationTime: TimeInterval = 0
     private var activeLoop: ClosedRange<TimeInterval>?
@@ -404,12 +405,13 @@ final class MixerEngine {
 
     func updateMix(tracks: [Track]) {
         mixTracks = tracks
+        mixNotes = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0.playedNotes(tempoBPM: songTempoBPM)) })
         let clipEnd = tracks.flatMap { track in
             track.playbackClips.map { clip in
                 max(0, clip.startTime) + min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
             }
         }.max() ?? 0
-        let noteEnd = tracks.flatMap { $0.sequencedNotes.map(\.endTime) }.max() ?? 0
+        let noteEnd = mixNotes.values.flatMap { $0.map(\.endTime) }.max() ?? 0
         duration = max(clipEnd, noteEnd)
         applyMix()
     }
@@ -467,6 +469,7 @@ final class MixerEngine {
     func setTempo(_ bpm: Int) {
         songTempoBPM = min(200, max(60, bpm))
         applyMasterEffects()
+        updateMix(tracks: mixTracks)
     }
 
     /// Turns the click track on or off and sets its level.
@@ -729,14 +732,17 @@ final class MixerEngine {
                 )
             }
 
-            if let track = mixTracks.first(where: { $0.id == id }), !track.sequencedNotes.isEmpty {
-                scheduleNotes(
-                    track.sequencedNotes,
-                    track: track,
-                    start: start,
-                    end: end,
-                    timeOffset: timeOffset
-                )
+            if let track = mixTracks.first(where: { $0.id == id }) {
+                let notes = mixNotes[id] ?? []
+                if !notes.isEmpty {
+                    scheduleNotes(
+                        notes,
+                        track: track,
+                        start: start,
+                        end: end,
+                        timeOffset: timeOffset
+                    )
+                }
             }
         }
     }

@@ -63,9 +63,10 @@ struct SynthNote: Identifiable, Codable, Equatable {
         [1, 3, 6, 8, 10].contains(((pitch % 12) + 12) % 12)
     }
 
-    /// Two octaves shown by the piano roll, C3 to B4.
-    static let lowestPitch = 48
-    static let highestPitch = 71
+    /// Four octaves shown by the piano roll, C2 to B5, so imported MIDI keeps
+    /// its pitches.
+    static let lowestPitch = 36
+    static let highestPitch = 83
 }
 
 /// The synth voice the piano roll plays notes with.

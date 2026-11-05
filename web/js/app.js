@@ -153,7 +153,12 @@ const el = {
   tempoDown: document.getElementById('tempoDown'),
   tempoUp: document.getElementById('tempoUp'),
   modalRoot: document.getElementById('modalRoot'),
-  toast: document.getElementById('toast')
+  toast: document.getElementById('toast'),
+  transferOverlay: document.getElementById('transferOverlay'),
+  transferLabel: document.getElementById('transferLabel'),
+  transferFill: document.getElementById('transferFill'),
+  sessionImportInput: document.getElementById('sessionImportInput'),
+  midiImportInput: document.getElementById('midiImportInput')
 };
 
 let toastTimer = null;
@@ -336,9 +341,13 @@ function persist() {
   const index = state.store.sessions.findIndex((session) => session.id === state.session.id);
   if (index >= 0) state.store.sessions[index] = state.session;
   scheduleSave();
+  scheduleVersionSave();
 }
 
 let saveTimer = null;
+let versionTimer = null;
+let lastVersionSignature = '';
+const SESSION_VERSION_LIMIT = 30;
 
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -346,6 +355,108 @@ function scheduleSave() {
     model.saveStore(state.store);
     saveTimer = null;
   }, 250);
+}
+
+function versionSignature(session) {
+  const copy = { ...session };
+  delete copy.editedAt;
+  return JSON.stringify(copy);
+}
+
+function versionTimeLabel(timestamp) {
+  try {
+    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch (error) {
+    return '';
+  }
+}
+
+function versionDateLabel(timestamp) {
+  try {
+    return new Date(timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  } catch (error) {
+    return '';
+  }
+}
+
+/// Records the open session a couple of seconds after the last change.
+function scheduleVersionSave() {
+  if (versionTimer) clearTimeout(versionTimer);
+  versionTimer = setTimeout(() => {
+    versionTimer = null;
+    void recordVersion();
+  }, 1800);
+}
+
+async function recordVersion({ force = false } = {}) {
+  if (!state.session) return null;
+  const signature = versionSignature(state.session);
+  if (!force && signature === lastVersionSignature) return null;
+  lastVersionSignature = signature;
+
+  try {
+    await model.saveVersion({
+      sessionId: state.session.id,
+      createdAt: Date.now(),
+      name: state.session.name,
+      trackCount: state.session.tracks.length,
+      duration: model.sessionDuration(state.session),
+      tempo: state.session.tempo,
+      sectionCount: state.session.sections.length,
+      session: JSON.parse(JSON.stringify(state.session))
+    });
+    await pruneVersions(state.session.id);
+  } catch (error) {
+    console.warn('Could not save a session version', error);
+  }
+  return true;
+}
+
+async function pruneVersions(sessionId) {
+  try {
+    const all = await model.listVersions();
+    const mine = all.filter((entry) => entry.sessionId === sessionId);
+    const excess = mine.slice(SESSION_VERSION_LIMIT);
+    await Promise.all(excess.map((entry) => model.removeVersion(entry.id)));
+  } catch (error) {
+    console.warn('Could not trim session versions', error);
+  }
+}
+
+async function ensureInitialVersion() {
+  try {
+    const versions = await model.listVersions();
+    if (!versions.some((version) => version.sessionId === state.session.id)) {
+      await recordVersion({ force: true });
+    }
+  } catch (error) {
+    console.warn('Could not check session versions', error);
+  }
+}
+
+async function restoreVersion(version) {
+  if (!version || !state.session) return;
+  await recordVersion({ force: true });
+  const restored = JSON.parse(JSON.stringify(version.session));
+  restored.id = state.session.id;
+  restored.name = version.name;
+  restored.editedAt = Date.now();
+  adoptSession(restored);
+}
+
+async function duplicateVersion(version) {
+  if (!version) return;
+  await recordVersion({ force: true });
+  const copy = JSON.parse(JSON.stringify(version.session));
+  copy.id = model.uid();
+  copy.name = uniqueSessionName(`${version.name} Copy`);
+  copy.editedAt = Date.now();
+  state.store.sessions.push(copy);
+  state.store.activeId = copy.id;
+  model.saveStore(state.store);
+  closeModal();
+  adoptSession(copy);
+  toast('Version opened as a new session');
 }
 
 function snapshot() {
@@ -363,6 +474,7 @@ function adoptSession(session) {
   engine.pause();
   cancelCountIn();
   state.session = model.normalizeSession(session);
+  lastVersionSignature = versionSignature(state.session);
   const index = state.store.sessions.findIndex((item) => item.id === state.session.id);
   if (index >= 0) state.store.sessions[index] = state.session;
   state.store.activeId = state.session.id;
@@ -1821,6 +1933,7 @@ function openRoll(trackId) {
     toast('Unfreeze the track to edit its notes');
     return;
   }
+  const arp = { ...model.defaultArpeggiator(), ...(track.arpeggiator || {}) };
   state.modal = 'roll';
   state.rollTrackId = trackId;
   state.selectedNote = null;
@@ -1885,11 +1998,38 @@ function renderRollModal() {
             ${[['single', 'SINGLE'], ['major', 'MAJOR'], ['minor', 'MINOR'], ['seventh', '7TH']].map(([id, label]) => `<button class="pill ${state.rollChord === id ? 'on' : ''}" data-roll-chord="${id}">${label}</button>`).join('')}
           </div>
         </div>
+        <div class="roll-toolbar">
+          <button class="pill ${arp.enabled ? 'on' : ''}" id="rollArpToggle">ARP</button>
+          <div style="display:flex;gap:4px">
+            ${model.ARPEGGIATOR_PATTERNS.map((pattern) => `<button class="pill ${arp.pattern === pattern.id ? 'on' : ''}" data-arp-pattern="${pattern.id}">${pattern.name}</button>`).join('')}
+          </div>
+          <span class="range-label">RATE</span>
+          <div style="display:flex;gap:4px">
+            ${model.ARPEGGIATOR_RATES.map((rate) => `<button class="pill ${arp.rate === rate.id ? 'on' : ''}" data-arp-rate="${rate.id}">${rate.name}</button>`).join('')}
+          </div>
+        </div>
+        <div class="roll-toolbar">
+          <label class="range-label" for="rollArpOctaves">OCT</label>
+          <select id="rollArpOctaves" style="height:26px;border-radius:7px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 6px;font-family:'SF Mono',ui-monospace,monospace;font-size:10px">
+            ${[1, 2, 3, 4].map((value) => `<option value="${value}" ${arp.octaves === value ? 'selected' : ''}>${value}</option>`).join('')}
+          </select>
+          <label class="range-label" for="rollArpGate">GATE</label>
+          <input type="range" id="rollArpGate" min="0.05" max="1" step="0.05" value="${arp.gate}">
+          <span class="range-label" id="rollArpGateValue">${Math.round(arp.gate * 100)}%</span>
+          <label class="range-label" for="rollArpSwing">SWING</label>
+          <input type="range" id="rollArpSwing" min="0" max="0.4" step="0.01" value="${arp.swing}">
+          <span class="range-label" id="rollArpSwingValue">${Math.round(arp.swing * 100)}%</span>
+        </div>
         <div class="roll-toolbar quantize-toolbar">
           <button class="pill" id="rollQuantizeBtn" ${state.selectedNotes.length ? '' : 'disabled'}>QUANTIZE SELECTED</button>
           <label class="range-label" for="rollQuantizeStrength">STRENGTH</label>
           <input type="range" id="rollQuantizeStrength" min="0" max="1" step="0.05" value="${state.rollQuantizeStrength}">
           <span class="range-label" id="rollQuantizeValue">${Math.round(state.rollQuantizeStrength * 100)}%</span>
+        </div>
+        <div class="roll-toolbar">
+          <button class="pill" id="rollMidiImport">IMPORT MIDI</button>
+          <button class="pill" id="rollMidiExport">EXPORT MIDI</button>
+          <span class="range-label">Named after the track · ${state.session.tempo} BPM</span>
         </div>
         <div class="roll-grid-wrap"><div class="roll-keys">${keys.join('')}</div>
           <div class="roll-scroll" id="rollScroll">
@@ -1933,6 +2073,13 @@ function renderRollModal() {
     document.getElementById('rollQuantizeValue').textContent = `${Math.round(state.rollQuantizeStrength * 100)}%`;
   });
 
+  document.getElementById('rollMidiImport').addEventListener('click', () => {
+    el.midiImportInput.click();
+  });
+  document.getElementById('rollMidiExport').addEventListener('click', () => {
+    exportTrackMidi(track);
+  });
+
   document.querySelectorAll('[data-roll-div]').forEach((button) => {
     button.addEventListener('click', () => {
       state.rollDivision = Number(button.dataset.rollDiv);
@@ -1945,6 +2092,39 @@ function renderRollModal() {
       renderRollModal();
     });
   });
+
+  document.getElementById('rollArpToggle').addEventListener('click', () => {
+    updateArpeggiator(track, { enabled: !arp.enabled });
+  });
+  document.querySelectorAll('[data-arp-pattern]').forEach((button) => {
+    button.addEventListener('click', () => {
+      updateArpeggiator(track, { pattern: button.dataset.arpPattern });
+    });
+  });
+  document.querySelectorAll('[data-arp-rate]').forEach((button) => {
+    button.addEventListener('click', () => {
+      updateArpeggiator(track, { rate: button.dataset.arpRate });
+    });
+  });
+
+  const arpOctaves = document.getElementById('rollArpOctaves');
+  arpOctaves.addEventListener('change', () => {
+    updateArpeggiator(track, { octaves: Number(arpOctaves.value) });
+  });
+
+  const arpGate = document.getElementById('rollArpGate');
+  arpGate.addEventListener('input', () => {
+    updateArpeggiator(track, { gate: Number(arpGate.value) }, { rerender: false, reschedule: false });
+    document.getElementById('rollArpGateValue').textContent = `${Math.round(Number(arpGate.value) * 100)}%`;
+  });
+  arpGate.addEventListener('change', () => engine.rebuild());
+
+  const arpSwing = document.getElementById('rollArpSwing');
+  arpSwing.addEventListener('input', () => {
+    updateArpeggiator(track, { swing: Number(arpSwing.value) }, { rerender: false, reschedule: false });
+    document.getElementById('rollArpSwingValue').textContent = `${Math.round(Number(arpSwing.value) * 100)}%`;
+  });
+  arpSwing.addEventListener('change', () => engine.rebuild());
 
   grid.addEventListener('pointerdown', (event) => {
     const noteEl = event.target.closest('.roll-note');
@@ -2032,6 +2212,17 @@ function renderRollModal() {
   });
 }
 
+function updateArpeggiator(track, patch, { rerender = true, reschedule = true } = {}) {
+  track.arpeggiator = {
+    ...model.defaultArpeggiator(),
+    ...(track.arpeggiator || {}),
+    ...patch
+  };
+  persist();
+  if (reschedule) engine.rebuild();
+  if (rerender) renderRollModal();
+}
+
 function originVelocity(value) {
   return model.clamp(Number(value ?? 0.8), 0.05, 1);
 }
@@ -2052,6 +2243,60 @@ function quantizeSelectedNotes(track) {
   engine.rebuild();
   renderRollModal();
   toast('Selected notes quantized');
+}
+
+function exportTrackMidi(track) {
+  if (!track || !track.notes || !track.notes.length) {
+    toast('This track has no notes to export yet');
+    return;
+  }
+  const data = model.encodeMidi(track, state.session.tempo);
+  download(new Blob([data], { type: 'audio/midi' }), model.midiFileName(track.name));
+  toast('MIDI file exported');
+}
+
+async function importMidiFile(file) {
+  try {
+    const parsed = model.parseMidi(await file.arrayBuffer());
+    const track = state.rollTrackId ? trackById(state.rollTrackId) : null;
+    const notesLabel = parsed.notes.length === 1 ? '1 note' : `${parsed.notes.length} notes`;
+    const replaceNotes = track
+      ? window.confirm(`“${file.name}” has ${notesLabel}. Press OK to replace the notes on “${track.name}”, or Cancel to add them as a new track.`)
+      : true;
+
+    snapshot();
+    if (replaceNotes && track) {
+      track.notes = parsed.notes;
+      state.selectedNote = null;
+      state.selectedNotes = [];
+    } else {
+      const newTrack = model.createTrack({
+        name: parsed.name || file.name.replace(/\.[^.]+$/, '') || 'MIDI Track',
+        index: state.session.tracks.length
+      });
+      newTrack.notes = parsed.notes;
+      state.session.tracks.push(newTrack);
+      state.rollTrackId = newTrack.id;
+      state.selectedNote = null;
+      state.selectedNotes = [];
+    }
+
+    if (parsed.tempo) {
+      state.session.tempo = model.clamp(parsed.tempo, 60, 200);
+    }
+
+    persist();
+    engine.rebuild();
+    if (state.modal === 'roll') {
+      renderRollModal();
+    } else {
+      render();
+    }
+    toast(`${notesLabel} imported from ${file.name}`);
+  } catch (error) {
+    console.warn('MIDI import failed', error);
+    toast(error && error.message ? error.message : 'That MIDI file could not be read');
+  }
 }
 
 function drawRollGrid(grid, width, height, beatPx) {
@@ -2928,6 +3173,185 @@ function openMastering() {
   });
 
   updateMasteringMeters();
+}
+
+// ---------- Session backup and import ----------
+
+function sessionFileIds(session) {
+  const ids = new Set();
+  for (const track of session.tracks || []) {
+    for (const clip of track.clips || []) {
+      if (clip.fileId) ids.add(clip.fileId);
+    }
+    for (const take of track.takes || []) {
+      if (take.fileId) ids.add(take.fileId);
+    }
+    if (track.frozen?.fileId) ids.add(track.frozen.fileId);
+  }
+  return [...ids];
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function base64ToBlob(base64, type) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: type || 'audio/wav' });
+}
+
+function showTransfer(label) {
+  if (!el.transferOverlay) return;
+  if (el.transferLabel) el.transferLabel.textContent = label;
+  if (el.transferFill) el.transferFill.style.width = '0%';
+  el.transferOverlay.hidden = false;
+}
+
+function updateTransfer(fraction) {
+  if (!el.transferFill) return;
+  const value = Math.max(0, Math.min(1, fraction));
+  el.transferFill.style.width = `${Math.round(value * 100)}%`;
+}
+
+function hideTransfer() {
+  if (el.transferOverlay) el.transferOverlay.hidden = true;
+}
+
+function safeSessionFileName(name) {
+  const cleaned = String(name || 'Session')
+    .replace(/[^a-z0-9-_]+/gi, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || 'Session';
+}
+
+async function exportSessionBundle(sessionId) {
+  const session = state.store.sessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  if (state.transferBusy) {
+    toast('Wait for the current transfer to finish');
+    return;
+  }
+  state.transferBusy = true;
+  showTransfer('Packing session…');
+
+  try {
+    const ids = sessionFileIds(session);
+    const files = [];
+    for (let index = 0; index < ids.length; index += 1) {
+      const id = ids[index];
+      const entry = await model.loadFile(id);
+      if (!entry || !entry.blob) continue;
+      files.push({
+        id,
+        name: entry.name || `audio-${index}.wav`,
+        type: entry.blob.type || 'audio/wav',
+        data: await blobToBase64(entry.blob)
+      });
+      updateTransfer((index + 1) / Math.max(1, ids.length));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    const payload = {
+      format: 'ai-studio-session',
+      version: 1,
+      exportedAt: Date.now(),
+      session: JSON.parse(JSON.stringify(session)),
+      files
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    download(blob, `${safeSessionFileName(session.name)}.aimsession`);
+    toast(`Session backup downloaded (${files.length} audio ${files.length === 1 ? 'file' : 'files'})`);
+  } catch (error) {
+    console.warn('Could not export the session', error);
+    toast('Could not pack this session');
+  } finally {
+    state.transferBusy = false;
+    hideTransfer();
+  }
+}
+
+async function importSessionBundle(file) {
+  if (!file) return;
+  if (state.transferBusy) {
+    toast('Wait for the current transfer to finish');
+    return;
+  }
+  state.transferBusy = true;
+  showTransfer('Reading backup…');
+
+  try {
+    const payload = JSON.parse(await file.text());
+    if (!payload || payload.format !== 'ai-studio-session' || !payload.session) {
+      throw new Error('Not a session backup');
+    }
+
+    const imported = model.normalizeSession(JSON.parse(JSON.stringify(payload.session)));
+    const existing = state.store.sessions.find(
+      (item) => item.name.toLowerCase() === imported.name.toLowerCase()
+    );
+    let replaceExisting = false;
+    if (existing) {
+      replaceExisting = window.confirm(
+        `A session called “${imported.name}” already exists. Press OK to replace it, or Cancel to import it as a copy.`
+      );
+      if (!replaceExisting) imported.name = uniqueSessionName(imported.name);
+    }
+
+    const files = Array.isArray(payload.files) ? payload.files : [];
+    const mapping = new Map();
+    showTransfer('Unpacking audio…');
+    for (let index = 0; index < files.length; index += 1) {
+      const entry = files[index];
+      if (entry && entry.id && entry.data) {
+        const blob = base64ToBlob(entry.data, entry.type || 'audio/wav');
+        const newId = await model.saveFile(blob, entry.name || `audio-${index}.wav`);
+        mapping.set(entry.id, newId);
+      }
+      updateTransfer((index + 1) / Math.max(1, files.length));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    for (const track of imported.tracks) {
+      for (const clip of track.clips) {
+        if (clip.fileId && mapping.has(clip.fileId)) clip.fileId = mapping.get(clip.fileId);
+      }
+      for (const take of track.takes || []) {
+        if (take.fileId && mapping.has(take.fileId)) take.fileId = mapping.get(take.fileId);
+      }
+      if (track.frozen?.fileId && mapping.has(track.frozen.fileId)) {
+        track.frozen.fileId = mapping.get(track.frozen.fileId);
+      }
+    }
+
+    if (replaceExisting && existing) {
+      state.store.sessions = state.store.sessions.filter((item) => item.id !== existing.id);
+      void model.removeVersionsForSession(existing.id);
+    }
+
+    imported.id = model.uid();
+    imported.editedAt = Date.now();
+    state.store.sessions.push(imported);
+    state.store.activeId = imported.id;
+    model.saveStore(state.store);
+    closeModal();
+    adoptSession(imported);
+    toast('Session imported');
+  } catch (error) {
+    console.warn('Could not import the session', error);
+    toast('That file is not a readable session backup');
+  } finally {
+    state.transferBusy = false;
+    hideTransfer();
+  }
 }
 
 // ---------- Channel presets ----------
@@ -4085,7 +4509,46 @@ async function openSessions() {
   } catch (error) {
     console.warn('Could not load the export library', error);
   }
+
+  let versions = [];
+  try {
+    versions = await model.listVersions();
+  } catch (error) {
+    console.warn('Could not load session versions', error);
+  }
+  const sessionVersions = versions
+    .filter((version) => version.sessionId === state.session.id)
+    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(0, SESSION_VERSION_LIMIT);
+
   if (state.sessionsRequestID !== requestID || state.modal !== 'sessions') return;
+
+  const versionLookup = new Map(sessionVersions.map((version) => [version.id, version]));
+
+  const versionRowsMarkup = () => {
+    if (!sessionVersions.length) {
+      return '<p class="export-empty">No versions yet. Change the session and a snapshot appears here a couple of seconds later.</p>';
+    }
+    return sessionVersions.map((version, index) => `
+      <article class="version-row">
+        <div class="version-main">
+          <div class="version-head">
+            <strong>${escapeHtml(versionTimeLabel(version.createdAt))}</strong>
+            <span class="version-date">${escapeHtml(versionDateLabel(version.createdAt))}</span>
+            ${index === 0 ? '<span class="tpl-tag">LATEST</span>' : ''}
+          </div>
+          <span class="version-meta">${version.trackCount} ${version.trackCount === 1 ? 'track' : 'tracks'} · ${model.formatTime(version.duration)}</span>
+          <div class="version-tracks" data-version-tracks="${escapeHtml(version.id)}" hidden>
+            ${(version.session.tracks || []).map((track, trackIndex) => `<span class="version-track" style="--track-color:${model.trackColor(track.colorIndex ?? trackIndex)}">${escapeHtml(track.name)}</span>`).join('') || '<span class="version-track">No tracks</span>'}
+          </div>
+        </div>
+        <div class="version-actions">
+          <button class="icon-btn" data-version-preview="${escapeHtml(version.id)}" title="Preview" aria-label="Preview version">◉</button>
+          <button class="icon-btn" data-version-restore="${escapeHtml(version.id)}" title="Restore">↺</button>
+          <button class="icon-btn" data-version-duplicate="${escapeHtml(version.id)}" title="Open as a copy">⧉</button>
+        </div>
+      </article>`).join('');
+  };
 
   const rows = state.store.sessions.map((session) => {
     const count = session.tracks.length;
@@ -4099,6 +4562,7 @@ async function openSessions() {
         <button class="icon-btn" data-session-open="${session.id}" title="Open">▶</button>
         <button class="icon-btn" data-session-rename="${session.id}" title="Rename">✎</button>
         <button class="icon-btn" data-session-duplicate="${session.id}" title="Duplicate">⧉</button>
+        <button class="icon-btn" data-session-export="${session.id}" title="Export session">⤓</button>
         <button class="icon-btn" data-session-delete="${session.id}" title="Delete">🗑</button>
       </div>
     </div>`;
@@ -4253,6 +4717,11 @@ async function openSessions() {
     </header>
     <div class="modal-body">
       <div class="list">${rows}</div>
+      <section class="versions-section">
+        <div class="exports-heading"><h3>Versions</h3><span id="versionCount">${sessionVersions.length} SAVED</span></div>
+        <p class="version-hint">Autosaved a couple of seconds after each change. The open session is kept when you restore.</p>
+        <div class="version-list" id="versionList">${versionRowsMarkup()}</div>
+      </section>
       <section class="exports-section">
         <div class="exports-heading"><h3>Exports</h3><span id="exportCount">${exportCountText()}</span></div>
         <div class="export-toolbar">
@@ -4274,6 +4743,7 @@ async function openSessions() {
       </section>
     </div>
     <footer class="modal-footer">
+      <button class="tool" id="importSessionBtn">Import Session</button>
       <button class="tool" id="saveSessionTemplateBtn" ${state.session.tracks.length ? '' : 'disabled'}>Save as Template</button>
       <button class="tool primary" id="newSessionBtn">+ New Session</button>
     </footer>`);
@@ -4286,6 +4756,16 @@ async function openSessions() {
     closeModal();
     adoptSession(session);
     toast('New session created');
+  });
+
+  document.getElementById('importSessionBtn').addEventListener('click', () => {
+    el.sessionImportInput.click();
+  });
+
+  el.modalRoot.querySelectorAll('[data-session-export]').forEach((button) => {
+    button.addEventListener('click', () => {
+      void exportSessionBundle(button.dataset.sessionExport);
+    });
   });
 
   document.getElementById('saveSessionTemplateBtn').addEventListener('click', () => {
@@ -4388,6 +4868,7 @@ async function openSessions() {
       if (!session) return;
       if (!window.confirm(`Delete "${session.name}"?`)) return;
       state.store.sessions = state.store.sessions.filter((item) => item.id !== id);
+      void model.removeVersionsForSession(id);
       if (state.store.activeId === id) {
         state.store.activeId = state.store.sessions[0].id;
         model.saveStore(state.store);
@@ -4397,6 +4878,32 @@ async function openSessions() {
       }
       model.saveStore(state.store);
       openSessions();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-version-preview]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const detail = el.modalRoot.querySelector(`[data-version-tracks="${button.dataset.versionPreview}"]`);
+      if (detail) detail.hidden = !detail.hidden;
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-version-restore]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const version = versionLookup.get(button.dataset.versionRestore);
+      if (!version) return;
+      if (!window.confirm('Restore this version? Your current session is saved as a version first.')) return;
+      await restoreVersion(version);
+      closeModal();
+      toast('Version restored');
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-version-duplicate]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const version = versionLookup.get(button.dataset.versionDuplicate);
+      if (!version) return;
+      await duplicateVersion(version);
     });
   });
 }
@@ -4412,6 +4919,16 @@ function uniqueSessionName(base) {
 // ---------- Event wiring ----------
 
 function bindEvents() {
+  el.sessionImportInput.addEventListener('change', () => {
+    const file = el.sessionImportInput.files && el.sessionImportInput.files[0];
+    el.sessionImportInput.value = '';
+    if (file) void importSessionBundle(file);
+  });
+  el.midiImportInput.addEventListener('change', () => {
+    const file = el.midiImportInput.files && el.midiImportInput.files[0];
+    el.midiImportInput.value = '';
+    if (file) void importMidiFile(file);
+  });
   window.addEventListener('resize', handleViewportChange);
   window.addEventListener('orientationchange', () => {
     handleViewportChange();
@@ -5068,6 +5585,8 @@ async function boot() {
   }
   bindEvents();
   render();
+  lastVersionSignature = versionSignature(state.session);
+  void ensureInitialVersion();
   requestAnimationFrame(frame);
 
   preloadAudio().then(() => {

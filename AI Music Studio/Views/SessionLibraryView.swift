@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct SessionLibraryView: View {
     @ObservedObject var model: MixerViewModel
@@ -16,6 +17,15 @@ struct SessionLibraryView: View {
     @State private var showingDeleteConfirmation = false
     @State private var isSavingTemplate = false
     @State private var templateName = ""
+    @State private var isChoosingImport = false
+    @State private var pendingImport: PendingSessionImport?
+    @State private var showingNameCollision = false
+    @State private var shareItem: SessionShareItem?
+
+    private struct PendingSessionImport {
+        let url: URL
+        let summary: SessionArchiveSummary
+    }
 
     var body: some View {
         NavigationStack {
@@ -36,6 +46,13 @@ struct SessionLibraryView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        isChoosingImport = true
+                    } label: {
+                        Label("Import Session", systemImage: "square.and.arrow.down")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         templateName = model.sessionName
                         isSavingTemplate = true
                     } label: {
@@ -50,6 +67,18 @@ struct SessionLibraryView: View {
                     } label: {
                         Label("New", systemImage: "plus")
                     }
+                }
+            }
+            .fileImporter(
+                isPresented: $isChoosingImport,
+                allowedContentTypes: [.data],
+                allowsMultipleSelection: false
+            ) { result in
+                handleImportSelection(result)
+            }
+            .overlay {
+                if let progress = model.sessionTransferProgress {
+                    transferOverlay(progress: progress)
                 }
             }
         }
@@ -74,6 +103,31 @@ struct SessionLibraryView: View {
         } message: {
             Text("Keeps this session's tracks, colours and mixer settings so you can start new sessions from them.")
         }
+        .alert("Session Transfer", isPresented: transferError) {
+            Button("OK") { model.sessionTransferError = nil }
+        } message: {
+            Text(model.sessionTransferError ?? "")
+        }
+        .confirmationDialog(
+            collisionTitle,
+            isPresented: $showingNameCollision,
+            titleVisibility: .visible,
+            presenting: pendingImport
+        ) { pending in
+            Button("Keep Both") {
+                model.importSessionArchive(from: pending.url, keepBoth: true)
+                pendingImport = nil
+            }
+            Button("Replace Existing", role: .destructive) {
+                model.importSessionArchive(from: pending.url, keepBoth: false)
+                pendingImport = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingImport = nil
+            }
+        } message: { _ in
+            Text("Keep Both adds a copy alongside it. Replacing deletes the session with that name and puts the backup in its place.")
+        }
         .confirmationDialog("Delete this session?", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
             Button("Delete Session", role: .destructive) {
                 if let deleteSessionID {
@@ -85,8 +139,79 @@ struct SessionLibraryView: View {
         } message: {
             Text("The session and its track arrangement will be removed.")
         }
+        .sheet(item: $shareItem) { item in
+            ActivityView(items: [item.url])
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
+        .onChange(of: model.sessionExportURL) { _, url in
+            guard let url else { return }
+            shareItem = SessionShareItem(url: url)
+            model.clearSessionExportURL()
+        }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
+    }
+
+    private var collisionTitle: String {
+        let name = pendingImport?.summary.sessionName ?? "This session"
+        return "A session named “\(name)” already exists"
+    }
+
+    private var transferError: Binding<Bool> {
+        Binding(
+            get: { model.sessionTransferError != nil },
+            set: { if !$0 { model.sessionTransferError = nil } }
+        )
+    }
+
+    private func transferOverlay(progress: Double) -> some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+
+            VStack(spacing: 10) {
+                Text(model.sessionTransferTitle.isEmpty ? "Working…" : model.sessionTransferTitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .multilineTextAlignment(.center)
+
+                ProgressView(value: min(1, max(0, progress)))
+                    .tint(Color.studioAccent)
+
+                Text("\(Int(min(1, max(0, progress)) * 100))%")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(18)
+            .frame(maxWidth: 260)
+            .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    private func handleFileImport(_ url: URL) {
+        do {
+            let summary = try model.inspectSessionArchive(at: url)
+            let pending = (url: url, summary: summary)
+            if model.sessionExists(named: summary.sessionName) {
+                pendingImport = PendingSessionImport(url: pending.url, summary: pending.summary)
+                showingNameCollision = true
+            } else {
+                model.importSessionArchive(from: url, keepBoth: true)
+            }
+        } catch {
+            model.sessionTransferError = (error as? LocalizedError)?.errorDescription
+                ?? "That file could not be read."
+        }
+    }
+
+    private func handleImportSelection(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            handleFileImport(url)
+        case .failure:
+            break
+        }
     }
 
     private func sessionRow(_ session: StudioSession) -> some View {
@@ -135,6 +260,12 @@ struct SessionLibraryView: View {
                 }
 
                 Button {
+                    model.exportSession(session.id)
+                } label: {
+                    Label("Export Session", systemImage: "square.and.arrow.up")
+                }
+
+                Button {
                     renameSessionID = session.id
                     renameDraft = session.name
                     showingRename = true
@@ -167,4 +298,20 @@ struct SessionLibraryView: View {
         }
         .padding(.vertical, 5)
     }
+}
+
+private struct SessionShareItem: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
+/// The system share sheet, used to send a session backup out of the app.
+private struct ActivityView: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

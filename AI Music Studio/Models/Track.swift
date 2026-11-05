@@ -78,6 +78,8 @@ struct Track: Identifiable, Codable, Equatable {
     /// Rendered audio of this track while it is frozen.
     var frozenFileName: String?
     var frozenDuration: TimeInterval
+    /// Arpeggiator applied to this track's arrangement notes.
+    var arpeggiator = ArpeggiatorSettings()
     private var clipLayoutInitialized: Bool
 
     init(
@@ -100,7 +102,8 @@ struct Track: Identifiable, Codable, Equatable {
         sendA: Float = 0,
         sendB: Float = 0,
         frozenFileName: String? = nil,
-        frozenDuration: TimeInterval = 0
+        frozenDuration: TimeInterval = 0,
+        arpeggiator: ArpeggiatorSettings = ArpeggiatorSettings()
     ) {
         self.id = id
         self.name = name
@@ -131,6 +134,7 @@ struct Track: Identifiable, Codable, Equatable {
         self.sendB = min(1, max(0, sendB))
         self.frozenFileName = frozenFileName
         self.frozenDuration = frozenDuration
+        self.arpeggiator = arpeggiator
         clipLayoutInitialized = true
     }
 
@@ -155,6 +159,7 @@ struct Track: Identifiable, Codable, Equatable {
         case sendB
         case frozenFileName
         case frozenDuration
+        case arpeggiator
         case clipLayoutInitialized
     }
 
@@ -197,6 +202,7 @@ struct Track: Identifiable, Codable, Equatable {
         sendB = min(1, max(0, try values.decodeIfPresent(Float.self, forKey: .sendB) ?? 0))
         frozenFileName = try values.decodeIfPresent(String.self, forKey: .frozenFileName)
         frozenDuration = try values.decodeIfPresent(TimeInterval.self, forKey: .frozenDuration) ?? 0
+        arpeggiator = try values.decodeIfPresent(ArpeggiatorSettings.self, forKey: .arpeggiator) ?? ArpeggiatorSettings()
         clipLayoutInitialized = true
     }
 
@@ -225,6 +231,11 @@ struct Track: Identifiable, Codable, Equatable {
     /// Arrangement notes stay silent while the track is frozen.
     var sequencedNotes: [SynthNote] {
         isFrozen ? [] : notes
+    }
+
+    /// The notes as they actually play, after the track's arpeggiator.
+    func playedNotes(tempoBPM: Int) -> [SynthNote] {
+        Arpeggiator.expanded(notes: sequencedNotes, settings: arpeggiator, tempoBPM: tempoBPM)
     }
 
     func automationGain(at time: TimeInterval) -> Float {

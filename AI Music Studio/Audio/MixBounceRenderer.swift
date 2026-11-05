@@ -182,7 +182,7 @@ enum MixBounceRenderer {
                 duration = max(duration, clip.startTime + playableSourceDuration)
             }
 
-            for note in track.sequencedNotes {
+            for note in track.playedNotes(tempoBPM: tempoBPM) {
                 let noteDuration = note.duration
                     + (track.voice == .synth ? SynthNoteVoice.release : track.voice.releaseTail)
                 guard let buffer = InstrumentSoundGenerator.voicedNote(

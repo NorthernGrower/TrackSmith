@@ -211,6 +211,8 @@ export class StudioEngine {
 
   rebuild() {
     if (!this.ctx || !this.session) return;
+    if (!this.noteCache) this.noteCache = new Map();
+    this.noteCache.clear();
     const wanted = new Set(this.session.tracks.map((track) => track.id));
 
     for (const [id, nodes] of this.trackNodes) {
@@ -276,6 +278,15 @@ export class StudioEngine {
     }
 
     return { input, pan, low, mid, high, comp, analyser, sendA, sendB, meterData: new Float32Array(analyser.fftSize) };
+  }
+
+  notesForTrack(track) {
+    if (!this.session) return [];
+    if (!this.noteCache) this.noteCache = new Map();
+    if (this.noteCache.has(track.id)) return this.noteCache.get(track.id);
+    const notes = model.playedNotes(track, this.session.tempo ?? 120);
+    this.noteCache.set(track.id, notes);
+    return notes;
   }
 
   disposeTrackNodes(nodes) {
@@ -504,7 +515,7 @@ export class StudioEngine {
         source.onended = () => this.sources.delete(source);
       }
 
-      for (const note of model.sequencedNotes(track)) {
+      for (const note of this.notesForTrack(track)) {
         if (note.start < fromPos || note.start >= toPos) continue;
         const when = atCtx + (note.start - fromPos);
         this.scheduleNote(this.ctx, nodes.input, note, when);
@@ -812,7 +823,8 @@ export class StudioEngine {
 
   scheduleOfflineTrack(ctx, track, input, duration, forceSource) {
     const clips = forceSource ? track.clips : model.playbackClips(track);
-    const notes = forceSource ? track.notes : model.sequencedNotes(track);
+    const sourceNotes = forceSource ? track.notes : model.sequencedNotes(track);
+    const notes = model.arpeggiate(sourceNotes, track.arpeggiator, this.session?.tempo ?? 120);
 
     for (const clip of clips) {
       const buffer = this.buffers.get(clip.fileId);

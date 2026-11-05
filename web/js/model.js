@@ -189,6 +189,7 @@ export function createTrack({ name, fileId = null, duration = 0, index = 0 }) {
     soloed: false,
     sendA: 0,
     sendB: 0,
+    arpeggiator: defaultArpeggiator(),
     eq: defaultEQ(),
     comp: defaultCompressor(),
     automation: [],
@@ -366,6 +367,130 @@ export function playbackClips(track) {
   return track.clips;
 }
 
+export const ARPEGGIATOR_PATTERNS = [
+  { id: 'up', name: 'UP' },
+  { id: 'down', name: 'DOWN' },
+  { id: 'upDown', name: 'UP-DOWN' },
+  { id: 'random', name: 'RND' }
+];
+
+export const ARPEGGIATOR_RATES = [
+  { id: '1/8', name: '1/8' },
+  { id: '1/16', name: '1/16' },
+  { id: '1/32', name: '1/32' }
+];
+
+export function defaultArpeggiator() {
+  return { enabled: false, pattern: 'up', rate: '1/16', octaves: 1, gate: 0.7, swing: 0 };
+}
+
+function normalizeArpeggiator(arpeggiator) {
+  const defaults = defaultArpeggiator();
+  const value = arpeggiator && typeof arpeggiator === 'object' ? arpeggiator : {};
+  return {
+    enabled: value.enabled === true,
+    pattern: ARPEGGIATOR_PATTERNS.some((item) => item.id === value.pattern) ? value.pattern : defaults.pattern,
+    rate: ARPEGGIATOR_RATES.some((item) => item.id === value.rate) ? value.rate : defaults.rate,
+    octaves: Math.round(clamp(Number(value.octaves ?? defaults.octaves), 1, 4)),
+    gate: clamp(Number(value.gate ?? defaults.gate), 0.05, 1),
+    swing: clamp(Number(value.swing ?? defaults.swing), 0, 0.4)
+  };
+}
+
+export function arpeggiatorStepDuration(settings, tempo) {
+  const tempoSafe = clamp(Number(tempo) || 120, 60, 200);
+  const rate = normalizeArpeggiator(settings).rate;
+  const beats = rate === '1/8' ? 0.5 : rate === '1/32' ? 0.125 : 0.25;
+  return 60 / tempoSafe * beats;
+}
+
+function shuffledPitches(pitches, seed) {
+  const values = [...pitches];
+  let state = (seed + 1) >>> 0;
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+    const target = state % (index + 1);
+    [values[index], values[target]] = [values[target], values[index]];
+  }
+  return values;
+}
+
+/// Turns held chord notes into arpeggios for playback and offline rendering.
+export function arpeggiate(notes, arpeggiator, tempo) {
+  const arp = normalizeArpeggiator(arpeggiator);
+  if (!arp.enabled || !Array.isArray(notes) || !notes.length) return notes;
+
+  const step = Math.max(0.01, arpeggiatorStepDuration(arp, tempo));
+  const tolerance = step / 2;
+  const sorted = [...notes].sort((left, right) => left.start - right.start);
+
+  const clusters = [];
+  for (const note of sorted) {
+    const last = clusters[clusters.length - 1];
+    if (last) {
+      const clusterStart = Math.min(...last.map((item) => item.start));
+      if (Math.abs(note.start - clusterStart) <= tolerance) {
+        last.push(note);
+        continue;
+      }
+    }
+    clusters.push([note]);
+  }
+
+  const result = [];
+  clusters.forEach((cluster, clusterIndex) => {
+    const start = Math.min(...cluster.map((item) => item.start));
+    const end = Math.max(...cluster.map((item) => item.start + item.duration));
+    const velocity = Math.max(...cluster.map((item) => Number(item.velocity ?? 0.8)));
+    const base = [...new Set(cluster.map((item) => item.pitch))].sort((a, b) => a - b);
+    if (!base.length) return;
+
+    const pitches = [];
+    for (let octave = 0; octave < arp.octaves; octave += 1) {
+      base.forEach((pitch) => pitches.push(pitch + 12 * octave));
+    }
+
+    let order;
+    switch (arp.pattern) {
+      case 'down':
+        order = [...pitches].reverse();
+        break;
+      case 'upDown':
+        order = pitches.length > 2 ? [...pitches, ...pitches.slice(1, -1).reverse()] : pitches;
+        break;
+      case 'random':
+        order = shuffledPitches(pitches, clusterIndex);
+        break;
+      default:
+        order = pitches;
+    }
+
+    let stepIndex = 0;
+    for (let time = start; time < end - 0.001; time += step) {
+      const swingOffset = stepIndex % 2 === 1 ? arp.swing * step : 0;
+      const noteStart = time + swingOffset;
+      const duration = Math.min(step * arp.gate, end - noteStart);
+      if (duration >= 0.02) {
+        result.push({
+          id: `${cluster[0].id || 'arp'}-${clusterIndex}-${stepIndex}`,
+          pitch: order[stepIndex % order.length],
+          start: Math.max(0, noteStart),
+          duration,
+          velocity
+        });
+      }
+      stepIndex += 1;
+    }
+  });
+
+  return result.sort((left, right) => left.start - right.start);
+}
+
+/// The notes as they actually play, after the track's arpeggiator.
+export function playedNotes(track, tempo) {
+  return arpeggiate(sequencedNotes(track), track.arpeggiator, tempo);
+}
+
 export function sequencedNotes(track) {
   return track.frozen && track.frozen.fileId ? [] : track.notes;
 }
@@ -526,6 +651,7 @@ export function normalizeSession(session) {
     track.soloed = Boolean(track.soloed);
     track.sendA = clamp(Number(track.sendA ?? 0), 0, 1);
     track.sendB = clamp(Number(track.sendB ?? 0), 0, 1);
+    track.arpeggiator = normalizeArpeggiator(track.arpeggiator);
     track.eq = track.eq || defaultEQ();
     track.eq.bypassed = Boolean(track.eq.bypassed);
     track.eq.low = track.eq.low || { frequency: 120, gain: 0 };
@@ -610,14 +736,16 @@ export function saveStore(store) {
 // ---------- Audio file storage (IndexedDB) ----------
 
 const DB_NAME = 'ai-studio.web.audio';
+const DB_VERSION = 3;
 const DB_STORE = 'files';
 const DB_EXPORT_STORE = 'exports';
+const DB_VERSION_STORE = 'versions';
 let dbPromise = null;
 
 function openDb() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 2);
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(DB_STORE)) {
@@ -625,6 +753,9 @@ function openDb() {
         }
         if (!db.objectStoreNames.contains(DB_EXPORT_STORE)) {
           db.createObjectStore(DB_EXPORT_STORE);
+        }
+        if (!db.objectStoreNames.contains(DB_VERSION_STORE)) {
+          db.createObjectStore(DB_VERSION_STORE);
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -696,3 +827,274 @@ export async function renameExport(id, name) {
     transaction.onabort = () => reject(transaction.error || new Error('IndexedDB transaction was aborted'));
   });
 }
+
+// ---------- Session versions (IndexedDB) ----------
+
+export function saveVersion(version) {
+  const id = uid();
+  const entry = { ...version, id };
+  return withStore('readwrite', (store) => store.put(entry, id), DB_VERSION_STORE).then(() => id);
+}
+
+export function listVersions() {
+  return withStore('readonly', (store) => store.getAll(), DB_VERSION_STORE)
+    .then((entries) => entries.sort((left, right) => right.createdAt - left.createdAt));
+}
+
+export function removeVersion(id) {
+  return withStore('readwrite', (store) => store.delete(id), DB_VERSION_STORE);
+}
+
+export async function removeVersionsForSession(sessionId) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(DB_VERSION_STORE, 'readwrite');
+    const store = transaction.objectStore(DB_VERSION_STORE);
+    const request = store.openCursor();
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (cursor.value && cursor.value.sessionId === sessionId) cursor.delete();
+      cursor.continue();
+    };
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || request.error);
+    transaction.onabort = () => reject(transaction.error || new Error('IndexedDB transaction was aborted'));
+  });
+}
+
+
+// ---------- Standard MIDI files ----------
+
+export const MIDI_TICKS_PER_QUARTER = 480;
+
+function encodeVariableLength(value) {
+  let remaining = Math.max(0, Math.floor(Number(value) || 0));
+  const bytes = [remaining & 0x7f];
+  remaining >>= 7;
+  while (remaining > 0) {
+    bytes.unshift((remaining & 0x7f) | 0x80);
+    remaining >>= 7;
+  }
+  return bytes;
+}
+
+function midiBytes(text, limit) {
+  const encoded = [...new TextEncoder().encode(String(text || ''))];
+  return encoded.slice(0, Math.max(0, limit));
+}
+
+function midiFileName(name) {
+  const base = String(name || 'Track').replace(/[^\w\-. ]+/g, '').trim().slice(0, 60) || 'Track';
+  return `${base}.mid`;
+}
+
+/// Writes a track's sequenced notes as a format 0 MIDI file at the session tempo.
+export function encodeMidi(track, tempo) {
+  const bpm = clamp(Math.round(Number(tempo) || 120), 60, 200);
+  const secondsPerBeat = 60 / bpm;
+  const toTick = (seconds) => Math.max(0, Math.round((Math.max(0, Number(seconds) || 0) / secondsPerBeat) * MIDI_TICKS_PER_QUARTER));
+
+  const events = [];
+  const microseconds = Math.round(60000000 / bpm);
+  events.push({
+    tick: 0,
+    order: 0,
+    bytes: [0xff, 0x51, 0x03, (microseconds >> 16) & 0xff, (microseconds >> 8) & 0xff, microseconds & 0xff]
+  });
+
+  const nameBytes = midiBytes(track?.name || 'Track', 127);
+  if (nameBytes.length) {
+    events.push({ tick: 0, order: 1, bytes: [0xff, 0x03, nameBytes.length, ...nameBytes] });
+  }
+
+  (track?.notes || []).forEach((note) => {
+    const pitch = clamp(Math.round(Number(note.pitch) || 0), 0, 127);
+    const velocity = clamp(Math.round((Number(note.velocity) || 0.8) * 127), 1, 127);
+    const start = toTick(note.start);
+    const end = Math.max(start + 1, toTick((Number(note.start) || 0) + (Number(note.duration) || 0)));
+    events.push({ tick: start, order: 2, bytes: [0x90, pitch, velocity] });
+    events.push({ tick: end, order: 0, bytes: [0x80, pitch, 0] });
+  });
+
+  events.sort((left, right) => (left.tick - right.tick) || (left.order - right.order));
+
+  const trackData = [];
+  let lastTick = 0;
+  events.forEach((event) => {
+    trackData.push(...encodeVariableLength(event.tick - lastTick), ...event.bytes);
+    lastTick = event.tick;
+  });
+  trackData.push(0x00, 0xff, 0x2f, 0x00);
+
+  const header = [
+    0x4d, 0x54, 0x68, 0x64, // MThd
+    0x00, 0x00, 0x00, 0x06,
+    0x00, 0x00, // format 0
+    0x00, 0x01, // one track
+    (MIDI_TICKS_PER_QUARTER >> 8) & 0xff, MIDI_TICKS_PER_QUARTER & 0xff
+  ];
+  const chunk = [
+    0x4d, 0x54, 0x72, 0x6b, // MTrk
+    (trackData.length >>> 24) & 0xff,
+    (trackData.length >>> 16) & 0xff,
+    (trackData.length >>> 8) & 0xff,
+    trackData.length & 0xff
+  ];
+
+  return new Uint8Array([...header, ...chunk, ...trackData]);
+}
+
+/// Reads a standard MIDI file into notes, its track name and its tempo.
+export function parseMidi(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let index = 0;
+
+  const readU8 = () => {
+    if (index >= bytes.length) throw new Error('That MIDI file is incomplete');
+    const value = bytes[index];
+    index += 1;
+    return value;
+  };
+  const readU16 = () => (readU8() << 8) | readU8();
+  const readU32 = () => ((readU8() << 24) | (readU8() << 16) | (readU8() << 8) | readU8()) >>> 0;
+  const readVar = () => {
+    let value = 0;
+    for (let count = 0; count < 4; count += 1) {
+      const byte = readU8();
+      value = (value << 7) | (byte & 0x7f);
+      if ((byte & 0x80) === 0) return value;
+    }
+    return value;
+  };
+  const match = (text) => {
+    const expected = [...text].map((char) => char.charCodeAt(0));
+    if (index + expected.length > bytes.length) return false;
+    for (let offset = 0; offset < expected.length; offset += 1) {
+      if (bytes[index + offset] !== expected[offset]) return false;
+    }
+    index += expected.length;
+    return true;
+  };
+
+  if (!match('MThd')) throw new Error('That file is not a MIDI file');
+
+  const headerLength = readU32();
+  readU16(); // format
+  const trackCount = readU16();
+  const division = readU16();
+  if (!division || (division & 0x8000)) throw new Error('That MIDI file uses an unsupported time division');
+  index = Math.min(bytes.length, 8 + headerLength);
+
+  let tempo = 120;
+  let tempoFound = false;
+  let name = null;
+  const rawNotes = [];
+
+  for (let chunk = 0; chunk < trackCount; chunk += 1) {
+    if (index + 8 > bytes.length) break;
+    if (!match('MTrk')) throw new Error('That MIDI file has an unreadable track');
+
+    const length = readU32();
+    const end = Math.min(bytes.length, index + length);
+    let tickTime = 0;
+    let running = 0;
+    const open = new Map();
+
+    while (index < end) {
+      tickTime += readVar();
+      if (index >= end) break;
+
+      const status = bytes[index];
+      let kind;
+      if (status >= 0x80) {
+        index += 1;
+        kind = status;
+        if (kind < 0xf0) running = kind;
+      } else {
+        kind = running;
+      }
+      if (kind < 0x80) break;
+
+      if (kind === 0xff) {
+        const type = readU8();
+        const metaLength = readVar();
+        const payloadStart = index;
+        index = Math.min(end, index + metaLength);
+        const payload = bytes.subarray(payloadStart, index);
+
+        if (type === 0x51 && payload.length >= 3 && !tempoFound) {
+          const value = (payload[0] << 16) | (payload[1] << 8) | payload[2];
+          if (value > 0) {
+            tempo = 60000000 / value;
+            tempoFound = true;
+          }
+        } else if (type === 0x03 && !name) {
+          const text = new TextDecoder().decode(payload).trim();
+          if (text) name = text;
+        } else if (type === 0x2f) {
+          break;
+        }
+        continue;
+      }
+
+      if (kind === 0xf0 || kind === 0xf7) {
+        const sysexLength = readVar();
+        index = Math.min(end, index + sysexLength);
+        continue;
+      }
+
+      const command = kind & 0xf0;
+      if (command === 0x80 || command === 0x90) {
+        const pitch = readU8();
+        const velocity = readU8();
+        if (command === 0x90 && velocity > 0) {
+          const stack = open.get(pitch) || [];
+          stack.push({ start: tickTime, velocity });
+          open.set(pitch, stack);
+        } else {
+          const stack = open.get(pitch);
+          const started = stack && stack.pop();
+          if (started) rawNotes.push({ pitch, start: started.start, end: tickTime, velocity: started.velocity });
+        }
+      } else if (command === 0xa0 || command === 0xb0 || command === 0xe0) {
+        readU8();
+        readU8();
+      } else if (command === 0xc0 || command === 0xd0) {
+        readU8();
+      } else {
+        break;
+      }
+    }
+
+    open.forEach((stack, pitch) => {
+      stack.forEach((started) => {
+        rawNotes.push({ pitch, start: started.start, end: tickTime, velocity: started.velocity });
+      });
+    });
+
+    index = end;
+  }
+
+  if (!rawNotes.length) throw new Error('That MIDI file has no notes in it');
+
+  const secondsPerTick = (60 / tempo) / division;
+  const notes = rawNotes
+    .map((note) => ({
+      id: uid(),
+      pitch: clamp(note.pitch, 0, 127),
+      start: Math.max(0, note.start * secondsPerTick),
+      duration: Math.max(0.05, (note.end - note.start) * secondsPerTick),
+      velocity: clamp(note.velocity / 127, 0.05, 1)
+    }))
+    .sort((left, right) => left.start - right.start);
+
+  return {
+    notes,
+    name: name || null,
+    tempo: clamp(Math.round(tempo), 60, 200)
+  };
+}
+
+export { midiFileName };

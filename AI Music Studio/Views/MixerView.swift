@@ -130,6 +130,10 @@ struct MixerView: View {
                 SessionLibraryView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
+            case .sessionVersions:
+                SessionVersionsView(model: model)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
             case .templates:
                 TemplatesView(model: model)
                     .presentationDetents([.large])
@@ -297,6 +301,11 @@ struct MixerView: View {
                         activeSheet = .sessions
                     } label: {
                         Label("Sessions", systemImage: "folder")
+                    }
+                    Button {
+                        activeSheet = .sessionVersions
+                    } label: {
+                        Label("Session Versions", systemImage: "clock.arrow.circlepath")
                     }
                     Button {
                         model.refreshExports()
@@ -592,6 +601,7 @@ private enum StudioSheet: String, Identifiable {
     case exports
     case trackEQ
     case sessions
+    case sessionVersions
     case templates
     case mixer
     case masterEffects

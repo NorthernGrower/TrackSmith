@@ -1621,3 +1621,115 @@ button { cursor: pointer; }
   .play-btn { width: 40px; height: 40px; }
   .modal.tall { top: 0; inset: 0 0 0 0; border-radius: 0; }
 }
+
+
+/* Session versions */
+
+.versions-section { margin-top: 16px; }
+
+.version-hint {
+  margin: 0 0 8px;
+  font-size: 10px;
+  color: var(--secondary);
+  line-height: 1.4;
+}
+
+.version-list { display: flex; flex-direction: column; gap: 8px; }
+
+.version-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.version-main { flex: 1 1 170px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+
+.version-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; }
+
+.version-head strong {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.version-date {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 9px;
+  color: var(--secondary);
+}
+
+.version-meta {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 9px;
+  color: var(--secondary);
+}
+
+.version-tracks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.version-track {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  border-left: 2px solid var(--track-color, var(--accent));
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.version-actions { display: flex; align-items: center; gap: 5px; }
+.version-actions .icon-btn { width: 30px; height: 30px; font-size: 13px; }
+
+
+/* Session backup transfer */
+
+.transfer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.transfer-overlay[hidden] { display: none; }
+
+.transfer-card {
+  width: min(320px, 100%);
+  padding: 18px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.transfer-card strong { font-size: 12px; }
+
+.transfer-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.transfer-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.15s linear;
+}
