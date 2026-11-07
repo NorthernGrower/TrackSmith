@@ -99,6 +99,7 @@ struct TrackEQView: View {
         }
         .sheet(isPresented: $showingPresets) {
             ChannelPresetsView(model: model, initialTrackID: trackID)
+                .studioAgentAccess(context: "Channel Presets")
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }

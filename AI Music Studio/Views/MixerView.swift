@@ -26,32 +26,35 @@ extension Color {
 }
 
 struct MixerView: View {
-    @State private var model = MixerViewModel()
+    @StateObject private var model = MixerViewModel()
     @State private var showImporter = false
     @State private var showSplitPicker = false
     @StateObject private var chat = AgentChatViewModel()
     @State private var activeSheet: StudioSheet?
     @State private var selectedEQTrackID: UUID?
+    @State private var selectedEffectsTrackID: UUID?
     @State private var selectedPianoRollTrackID: UUID?
     @State private var instrumentDestinationTrackID: UUID?
     @State private var bounceMode: BounceSettingsView.Mode = .mix
 
     var body: some View {
-        ZStack {
-            Color.studioBackground.ignoresSafeArea()
-
+        ScrollView(.vertical) {
             VStack(spacing: 0) {
                 header
 
                 if model.tracks.isEmpty {
                     emptyState
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(maxWidth: .infinity, minHeight: 360)
                 } else {
                     WaveformTimeline(
                         model: model,
                         onOpenTrackEQ: { trackID in
                             selectedEQTrackID = trackID
                             activeSheet = .trackEQ
+                        },
+                        onOpenTrackEffects: { trackID in
+                            selectedEffectsTrackID = trackID
+                            activeSheet = .trackEffects
                         },
                         onOpenPianoRoll: { trackID in
                             selectedPianoRollTrackID = trackID
@@ -63,11 +66,14 @@ struct MixerView: View {
                         },
                         onAddInstrumentTrack: createInstrumentLayerAndOpen
                     )
+                    .frame(minHeight: 420)
                 }
 
                 TransportBarView(model: model)
             }
         }
+        .scrollIndicators(.hidden)
+        .background(Color.studioBackground.ignoresSafeArea())
         .overlay {
             if model.isSeparating {
                 separationProgressCard
@@ -86,6 +92,8 @@ struct MixerView: View {
         .onAppear {
             chat.mixer = model
         }
+        .studioAgentAccess(context: "Studio Mixer")
+        .environmentObject(chat)
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
         .fileImporter(
@@ -107,7 +115,8 @@ struct MixerView: View {
             }
         }
         .sheet(item: $activeSheet) { destination in
-            switch destination {
+            Group {
+                switch destination {
             case .settings:
                 SettingsView()
             case .instruments:
@@ -121,6 +130,14 @@ struct MixerView: View {
             case .trackEQ:
                 if let selectedEQTrackID {
                     TrackEQView(model: model, trackID: selectedEQTrackID)
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                } else {
+                    Color.clear
+                }
+            case .trackEffects:
+                if let selectedEffectsTrackID {
+                    TrackEffectsView(model: model, trackID: selectedEffectsTrackID)
                         .presentationDetents([.medium, .large])
                         .presentationDragIndicator(.visible)
                 } else {
@@ -142,11 +159,6 @@ struct MixerView: View {
                 SongwriterView(model: model)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
-            case .agent:
-                AgentChatDrawer(chat: chat, onClose: { activeSheet = nil })
-                    .presentationDetents([.medium, .large])
-                    .presentationDragIndicator(.visible)
-                    .presentationBackground(Color.studioPanel)
             case .mixer:
                 ChannelMixerView(model: model)
                     .presentationDetents([.large])
@@ -166,16 +178,19 @@ struct MixerView: View {
             case .bounce:
                 BounceSettingsView(
                     mode: bounceMode,
+                    model: model,
                     sessionName: model.sessionName,
                     duration: model.duration,
-                    trackCount: model.tracks.count,
+                    loopStart: model.loopStart,
+                    loopEnd: model.loopEnd,
+                    hasLoopRange: model.hasLoopRange,
                     settings: model.bounceSettings
-                ) { settings in
+                ) { settings, selectedTrackIDs in
                     switch bounceMode {
                     case .mix:
                         model.bounceMix(settings: settings)
                     case .stems:
-                        model.bounceStems(settings: settings)
+                        model.bounceStems(settings: settings, selectedTrackIDs: selectedTrackIDs)
                     }
                 }
                 .presentationDetents([.large])
@@ -188,7 +203,9 @@ struct MixerView: View {
                 } else {
                     Color.clear
                 }
+                }
             }
+            .studioAgentAccess(context: destination.assistantContext)
         }
         .onChange(of: model.lastExportURL) { _, exportURL in
             if exportURL != nil {
@@ -355,14 +372,6 @@ struct MixerView: View {
                     activeSheet = .instruments
                 } label: {
                     StudioToolbarButton(title: "Instruments", systemImage: "pianokeys")
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    chat.mixer = model
-                    activeSheet = .agent
-                } label: {
-                    StudioToolbarButton(title: "Agent", systemImage: "text.bubble")
                 }
                 .buttonStyle(.plain)
 
@@ -600,6 +609,7 @@ private enum StudioSheet: String, Identifiable {
     case instruments
     case exports
     case trackEQ
+    case trackEffects
     case sessions
     case sessionVersions
     case templates
@@ -610,7 +620,26 @@ private enum StudioSheet: String, Identifiable {
     case pianoRoll
     case bounce
     case songwriter
-    case agent
 
     var id: String { rawValue }
+
+    var assistantContext: String {
+        switch self {
+        case .settings: return "Studio Settings"
+        case .instruments: return "Instruments"
+        case .exports: return "Mix Exports"
+        case .trackEQ: return "Track EQ"
+        case .trackEffects: return "Track Effects"
+        case .sessions: return "Sessions"
+        case .sessionVersions: return "Session Versions"
+        case .templates: return "Templates"
+        case .mixer: return "Channel Mixer"
+        case .masterEffects: return "Master Effects"
+        case .mastering: return "Mastering"
+        case .channelPresets: return "Channel Presets"
+        case .pianoRoll: return "Piano Roll"
+        case .bounce: return "Bounce Settings"
+        case .songwriter: return "AI Songwriter"
+        }
+    }
 }

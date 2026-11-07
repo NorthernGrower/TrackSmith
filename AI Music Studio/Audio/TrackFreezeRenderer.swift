@@ -35,19 +35,35 @@ enum TrackFreezeRenderer {
         let mixer = AVAudioMixerNode()
         let equalizer = AVAudioUnitEQ(numberOfBands: 3)
         let compressor = TrackCompressorUnit.make()
+        let chorus = AVAudioUnitDelay()
+        let distortion = TrackEffectsUnit.makeDistortion()
+        let stereoDelay = AVAudioUnitDelay()
 
         engine.attach(mixer)
         engine.attach(equalizer)
         engine.attach(compressor)
+        engine.attach(chorus)
+        engine.attach(distortion)
+        engine.attach(stereoDelay)
         engine.connect(mixer, to: equalizer, format: format)
         engine.connect(equalizer, to: compressor, format: format)
-        engine.connect(compressor, to: engine.mainMixerNode, format: format)
+        engine.connect(compressor, to: chorus, format: format)
+        engine.connect(chorus, to: distortion, format: format)
+        engine.connect(distortion, to: stereoDelay, format: format)
+        engine.connect(stereoDelay, to: engine.mainMixerNode, format: format)
         mixer.outputVolume = 1
         mixer.pan = 0
         configure(equalizer, settings: track.eqSettings)
         TrackCompressorUnit.configure(compressor, settings: track.compressorSettings)
+        TrackEffectsUnit.configure(
+            chorus: chorus,
+            distortion: distortion,
+            stereoDelay: stereoDelay,
+            settings: track.effectsRack,
+            tempoBPM: tempoBPM
+        )
 
-        var queuedClips: [(file: AVAudioFile, player: AVAudioPlayerNode, mixer: AVAudioMixerNode, clip: AudioClip)] = []
+        var queuedClips: [(file: AVAudioFile, player: AVAudioPlayerNode, timePitch: AVAudioUnitTimePitch, mixer: AVAudioMixerNode, clip: AudioClip)] = []
         var queuedNotes: [(buffer: AVAudioPCMBuffer, player: AVAudioPlayerNode, start: TimeInterval)] = []
         var span: TimeInterval = 0
 
@@ -56,28 +72,36 @@ enum TrackFreezeRenderer {
             guard let file = try? AVAudioFile(forReading: sourceURL),
                   file.processingFormat.sampleRate > 0 else { continue }
 
-            let playableDuration = min(
+            let playableSourceDuration = min(
                 clip.duration,
                 max(0, clip.sourceDuration - clip.sourceStartTime)
             )
+            let playbackRate = clip.playbackRate(tempoBPM: tempoBPM)
+            let playableDuration = playableSourceDuration / playbackRate
             guard playableDuration > 0 else { continue }
 
             let player = AVAudioPlayerNode()
+            let timePitch = AVAudioUnitTimePitch()
+            timePitch.rate = Float(playbackRate)
+            timePitch.pitch = Float(clip.transposeSemitones * 100)
             let clipMixer = AVAudioMixerNode()
             engine.attach(player)
+            engine.attach(timePitch)
             engine.attach(clipMixer)
-            engine.connect(player, to: clipMixer, format: file.processingFormat)
+            engine.connect(player, to: timePitch, format: file.processingFormat)
+            engine.connect(timePitch, to: clipMixer, format: file.processingFormat)
             engine.connect(clipMixer, to: mixer, format: file.processingFormat)
-            queuedClips.append((file, player, clipMixer, clip))
+            queuedClips.append((file, player, timePitch, clipMixer, clip))
             span = max(span, clip.startTime + playableDuration)
         }
 
         for note in track.playedNotes(tempoBPM: tempoBPM) {
-            let noteDuration = note.duration
-                + (track.voice == .synth ? SynthNoteVoice.release : track.voice.releaseTail)
+            let noteDuration = note.duration + max(track.voice.releaseTail, track.renderPreset.release)
             guard let buffer = InstrumentSoundGenerator.voicedNote(
                 frequency: SynthNote.frequency(for: note.pitch),
                 voice: track.voice,
+                preset: track.renderPreset,
+                tone: track.guitarTone,
                 duration: noteDuration,
                 velocity: note.velocity,
                 format: format
@@ -87,12 +111,13 @@ enum TrackFreezeRenderer {
             engine.attach(player)
             engine.connect(player, to: mixer, format: format)
             queuedNotes.append((buffer, player, note.startTime))
-            span = max(span, note.endTime)
+            span = max(span, note.endTime + max(track.voice.releaseTail, track.renderPreset.release))
         }
 
         guard span > 0, !queuedClips.isEmpty || !queuedNotes.isEmpty else {
             throw FreezeError.noMaterial
         }
+        span += TrackEffectsUnit.tailDuration(settings: track.effectsRack, tempoBPM: tempoBPM)
 
         for queued in queuedClips {
             let sourceRate = queued.file.processingFormat.sampleRate
@@ -141,8 +166,9 @@ enum TrackFreezeRenderer {
             let framesToRender = AVAudioFrameCount(min(Int64(maximumFrameCount), totalFrames - framesRendered))
             let renderTime = Double(framesRendered) / sampleRate
             for queued in queuedClips {
-                queued.mixer.outputVolume = queued.clip.gain(at: renderTime, in: track)
+                queued.mixer.outputVolume = queued.clip.gain(at: renderTime, in: track, tempoBPM: tempoBPM)
             }
+            TrackEffectsUnit.updateChorusDelay(chorus, settings: track.effectsRack.chorus, time: renderTime)
             let status = try engine.renderOffline(framesToRender, to: buffer)
 
             switch status {

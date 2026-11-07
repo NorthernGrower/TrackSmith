@@ -184,13 +184,13 @@ enum LocalAgentParser {
 
 /// Sends a chat message to the remote agent endpoint when one is configured.
 ///
-/// Contract: POST JSON {"message": "…", "tracks": [{"name": "Vocals", "volume": 0.8,
+/// Contract: POST JSON {"message": "…", "context": "Piano Roll", "tracks": [{"name": "Vocals", "volume": 0.8,
 /// "muted": false, "soloed": false}]} with an `Authorization: Bearer <key>` header
 /// when a key is entered. The reply is {"reply": "…", "commands": [AgentCommand…]}.
 @MainActor
 final class AgentClient {
 
-    func send(message: String, tracks: [Track]) async throws -> AgentReply {
+    func send(message: String, context: String, tracks: [Track]) async throws -> AgentReply {
         guard let endpoint = AgentSettings.baseURL else {
             throw AgentError.invalidResponse
         }
@@ -204,6 +204,7 @@ final class AgentClient {
 
         let payload: [String: Any] = [
             "message": message,
+            "context": context,
             "tracks": tracks.map { track in
                 [
                     "name": track.name,

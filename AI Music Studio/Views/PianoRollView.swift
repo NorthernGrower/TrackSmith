@@ -18,6 +18,8 @@ struct PianoRollView: View {
     @State private var noteStep = PianoRollStep.eighth
     @State private var chordType = ChordType.single
     @State private var quantizeStrength: Double = 0.75
+    @State private var showingSounds = false
+    @State private var showingGuitarTone = false
     @State private var showingArpeggiator = false
     @State private var showingMIDIImporter = false
     @State private var showingMIDIImportChoice = false
@@ -98,8 +100,21 @@ struct PianoRollView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) { transportFooter }
+            .sheet(isPresented: $showingSounds) {
+                InstrumentSoundView(model: model, trackID: trackID)
+                    .studioAgentAccess(context: "Instrument Sound")
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showingGuitarTone) {
+                GuitarToneView(model: model, trackID: trackID)
+                    .studioAgentAccess(context: "Guitar Tone")
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
             .sheet(isPresented: $showingArpeggiator) {
                 ArpeggiatorView(model: model, trackID: trackID)
+                    .studioAgentAccess(context: "Arpeggiator")
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
             }
@@ -201,6 +216,60 @@ struct PianoRollView: View {
                 }
                 .pickerStyle(.segmented)
                 .accessibilityLabel("Chord type")
+            }
+
+            HStack(spacing: 10) {
+                Text("SOUND")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    showingSounds = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: track.voice.systemImage)
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(track.soundPreset.name)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .foregroundStyle(Color.studioAccent)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Color.studioAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Sound: \(track.soundPreset.name)")
+
+                if track.voice.isGuitar {
+                    Button {
+                        showingGuitarTone = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "guitars")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text(track.guitarTone.matchedPreset?.name ?? "Custom")
+                                .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(Color.studioPanelHighlight, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Guitar tone")
+                }
+
+                Spacer(minLength: 4)
+
+                Text(track.voice.title.uppercased())
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             HStack(spacing: 10) {

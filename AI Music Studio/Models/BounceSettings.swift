@@ -5,6 +5,18 @@
 
 import Foundation
 
+enum BounceRange: String, CaseIterable, Codable {
+    case entireSession
+    case loopRange
+
+    var title: String {
+        switch self {
+        case .entireSession: return "Entire Session"
+        case .loopRange: return "Loop Range"
+        }
+    }
+}
+
 enum BounceFormat: String, CaseIterable, Codable {
     case wav
     case m4a
@@ -40,6 +52,7 @@ enum BounceBitDepth: Int, CaseIterable, Codable {
 
 /// How a mix or stem render is written to disk.
 struct BounceSettings: Codable, Equatable {
+    var range: BounceRange = .entireSession
     var format: BounceFormat = .wav
     var sampleRate: BounceSampleRate = .hz44100
     /// Only used by WAV files; M4A is always encoded as AAC.
@@ -48,6 +61,36 @@ struct BounceSettings: Codable, Equatable {
     var normalize = false
     /// Base name of the exported file, without the extension.
     var fileName = "Mix"
+
+    private enum CodingKeys: String, CodingKey {
+        case range, format, sampleRate, bitDepth, normalize, fileName
+    }
+
+    init(
+        range: BounceRange = .entireSession,
+        format: BounceFormat = .wav,
+        sampleRate: BounceSampleRate = .hz44100,
+        bitDepth: BounceBitDepth = .bit24,
+        normalize: Bool = false,
+        fileName: String = "Mix"
+    ) {
+        self.range = range
+        self.format = format
+        self.sampleRate = sampleRate
+        self.bitDepth = bitDepth
+        self.normalize = normalize
+        self.fileName = fileName
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        range = try values.decodeIfPresent(BounceRange.self, forKey: .range) ?? .entireSession
+        format = try values.decodeIfPresent(BounceFormat.self, forKey: .format) ?? .wav
+        sampleRate = try values.decodeIfPresent(BounceSampleRate.self, forKey: .sampleRate) ?? .hz44100
+        bitDepth = try values.decodeIfPresent(BounceBitDepth.self, forKey: .bitDepth) ?? .bit24
+        normalize = try values.decodeIfPresent(Bool.self, forKey: .normalize) ?? false
+        fileName = try values.decodeIfPresent(String.self, forKey: .fileName) ?? "Mix"
+    }
 
     var fileExtension: String { format.fileExtension }
 
@@ -79,6 +122,57 @@ enum BounceSettingsStorage {
 
     static func save(_ settings: BounceSettings) {
         guard let data = try? JSONEncoder().encode(settings) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+
+
+/// A reusable set of render options, independent of the last-used bounce settings.
+struct BouncePreset: Codable, Identifiable, Equatable {
+    var id: UUID
+    var name: String
+    var range: BounceRange
+    var format: BounceFormat
+    var sampleRate: BounceSampleRate
+    var bitDepth: BounceBitDepth
+    var normalize: Bool
+
+    init(id: UUID = UUID(), name: String, settings: BounceSettings) {
+        self.id = id
+        self.name = name
+        range = settings.range
+        format = settings.format
+        sampleRate = settings.sampleRate
+        bitDepth = settings.bitDepth
+        normalize = settings.normalize
+    }
+
+    func applying(to current: BounceSettings, hasLoopRange: Bool) -> BounceSettings {
+        var result = current
+        result.range = range == .loopRange && !hasLoopRange ? .entireSession : range
+        result.format = format
+        result.sampleRate = sampleRate
+        result.bitDepth = bitDepth
+        result.normalize = normalize
+        return result
+    }
+}
+
+/// Presets are stored separately so saving or choosing one never changes the last-used settings.
+enum BouncePresetStorage {
+    private static let key = "studio.bouncePresets"
+
+    static func load() -> [BouncePreset] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let presets = try? JSONDecoder().decode([BouncePreset].self, from: data) else {
+            return []
+        }
+        return presets
+    }
+
+    static func save(_ presets: [BouncePreset]) {
+        guard let data = try? JSONEncoder().encode(presets) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
 }

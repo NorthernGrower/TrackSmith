@@ -89,6 +89,30 @@ enum LyricsDraftStorage {
         if drafts.count > maximumDrafts {
             drafts = Array(drafts.prefix(maximumDrafts))
         }
+        persist(drafts)
+    }
+
+    static func delete(_ id: UUID) {
+        persist(loadDrafts().filter { $0.id != id })
+    }
+
+    static func copy(_ draft: LyricsDraft) -> LyricsDraft {
+        var duplicate = draft
+        duplicate.id = UUID()
+        duplicate.title += " Copy"
+        duplicate.createdAt = Date()
+        save(duplicate)
+        return duplicate
+    }
+
+    static func rename(_ draft: LyricsDraft, to title: String) -> LyricsDraft {
+        var renamed = draft
+        renamed.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        save(renamed)
+        return renamed
+    }
+
+    private static func persist(_ drafts: [LyricsDraft]) {
         guard let data = try? JSONEncoder().encode(drafts) else { return }
         UserDefaults.standard.set(data, forKey: draftsKey)
     }

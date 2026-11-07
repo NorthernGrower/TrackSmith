@@ -3,6 +3,7 @@
 import * as model from './model.js';
 import { StudioEngine, encodeWav } from './audio-engine.js';
 import { InstrumentEngine, DRUM_PADS, STARTER_SOUNDS } from './instruments.js';
+import { createZipBlob } from './zip.js';
 
 const ROW_HEIGHT = 92;
 const RULER_HEIGHT = 62;
@@ -20,6 +21,7 @@ const state = {
   zoom: 70,
   playhead: 0,
   selectedClip: null,
+  clipPreviewTimer: null,
   automationTrack: null,
   automationParam: 'volume',
   selectedAutomationPoint: null,
@@ -78,6 +80,13 @@ const state = {
   instrumentRecordTimer: null,
   instrumentRecording: false,
   instrumentRecordDuration: 0,
+  midiAccess: null,
+  midiRequestID: 0,
+  midiInput: null,
+  midiInputId: '',
+  midiMessageHandler: null,
+  midiStatus: '',
+  midiNoteHandles: new Map(),
   microphoneStream: null,
   microphoneRecorder: null,
   microphoneRecordTimer: null,
@@ -188,7 +197,7 @@ function sessionDuration() {
 }
 
 function durationOfTrack(track) {
-  return model.trackDuration(track);
+  return model.trackDuration(track, state.session?.tempo ?? 120);
 }
 
 function trackById(id) {
@@ -220,7 +229,8 @@ function trimClipsForPunch(track, punchIn, punchOut, crossFade) {
   const kept = [];
   for (const clip of track.clips) {
     const start = Math.max(0, clip.start);
-    const playable = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+    const playbackRate = model.clipPlaybackRate(clip, state.session.tempo);
+    const playable = model.clipTimelineDuration(clip, state.session.tempo);
     const end = start + playable;
     const cutStart = punchIn + crossFade;
     const cutEnd = punchOut - crossFade;
@@ -230,15 +240,15 @@ function trimClipsForPunch(track, punchIn, punchOut, crossFade) {
       continue;
     }
     if (start < cutStart) {
-      kept.push({ ...clip, duration: cutStart - start });
+      kept.push({ ...clip, duration: (cutStart - start) * playbackRate });
     }
     if (end > cutEnd) {
       kept.push({
         ...clip,
         id: model.uid(),
         start: cutEnd,
-        duration: end - cutEnd,
-        sourceStart: clip.sourceStart + (cutEnd - start)
+        duration: (end - cutEnd) * playbackRate,
+        sourceStart: clip.sourceStart + (cutEnd - start) * playbackRate
       });
     }
   }
@@ -471,6 +481,7 @@ function cloneSession() {
 }
 
 function adoptSession(session) {
+  cancelClipPreviewTimer();
   engine.pause();
   cancelCountIn();
   state.session = model.normalizeSession(session);
@@ -880,6 +891,7 @@ function renderHeads() {
           <span class="track-name">${escapeHtml(track.name)}</span>
           ${takes.length ? `<button class="take-badge" data-act="takes" data-track="${track.id}" title="Take lane">T${activeTakeNumber} · ${takes.length}</button>` : ''}
           <button class="icon-btn" data-act="eq" data-track="${track.id}" title="Equalizer">≡</button>
+          <button class="icon-btn" data-act="effects" data-track="${track.id}" title="Track effects rack">FX</button>
           <button class="icon-btn ${frozen ? 'off' : ''}" data-act="roll" data-track="${track.id}" title="Piano roll" ${frozen ? 'disabled' : ''}>♫</button>
           ${state.mode === 'pro' ? `
             <button class="icon-btn ${state.automationTrack === track.id && state.automationParam === 'volume' ? '' : 'off'}" data-act="automation" data-track="${track.id}" title="Volume automation">⋀</button>
@@ -968,7 +980,7 @@ function renderRuler(width, beatPx) {
 }
 
 function fadePath(clip) {
-  const duration = Math.max(0.01, clip.duration);
+  const duration = Math.max(0.01, model.clipTimelineDuration(clip, state.session?.tempo ?? 120));
   const inPercent = Math.min(50, ((Number(clip.fadeIn) || 0) / duration) * 100);
   const outPercent = Math.min(50, ((Number(clip.fadeOut) || 0) / duration) * 100);
   const startY = inPercent > 0 ? 100 : 0;
@@ -986,14 +998,15 @@ function renderLanes(contentWidth, pps, beatPx) {
     const clips = model.playbackClips(track);
 
     const clipHtml = clips.map((clip) => {
-      const width = Math.max(18, clip.duration * pps);
+      const duration = model.clipTimelineDuration(clip, session.tempo);
+      const width = Math.max(18, duration * pps);
       const selected = state.selectedClip === clip.id;
       return `<div class="clip ${selected ? 'selected' : ''} ${frozen ? 'frozen' : ''}" data-clip="${clip.id}" data-track="${track.id}" style="left:${Math.max(0, clip.start) * pps}px;width:${width}px">
         <span class="clip-label">${escapeHtml(clip.name.toUpperCase())}</span>
         <canvas class="clip-wave" data-file="${clip.fileId}"></canvas>
         ${selected && state.mode === 'pro' ? `<svg class="clip-fades" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="${fadePath(clip)}"></path></svg>
-        <button class="fade-handle fade-in" data-fade-edge="in" data-clip="${clip.id}" data-track="${track.id}" style="left:${Math.min(50, ((clip.fadeIn || 0) / Math.max(0.01, clip.duration)) * 100)}%" aria-label="Fade in"></button>
-        <button class="fade-handle fade-out" data-fade-edge="out" data-clip="${clip.id}" data-track="${track.id}" style="left:${100 - Math.min(50, ((clip.fadeOut || 0) / Math.max(0.01, clip.duration)) * 100)}%" aria-label="Fade out"></button>` : ''}
+        <button class="fade-handle fade-in" data-fade-edge="in" data-clip="${clip.id}" data-track="${track.id}" style="left:${Math.min(50, ((clip.fadeIn || 0) / Math.max(0.01, duration)) * 100)}%" aria-label="Fade in"></button>
+        <button class="fade-handle fade-out" data-fade-edge="out" data-clip="${clip.id}" data-track="${track.id}" style="left:${100 - Math.min(50, ((clip.fadeOut || 0) / Math.max(0.01, duration)) * 100)}%" aria-label="Fade out"></button>` : ''}
         <span class="trim trim-left" data-edge="left"></span>
         <span class="trim trim-right" data-edge="right"></span>
       </div>`;
@@ -1041,11 +1054,12 @@ function renderLanes(contentWidth, pps, beatPx) {
 
       const onMove = (moveEvent) => {
         const delta = (moveEvent.clientX - startX) / state.zoom;
-        const value = Math.max(0, Math.min(clip.duration, edge === 'in' ? origin + delta : origin - delta));
+        const duration = model.clipTimelineDuration(clip, state.session.tempo);
+        const value = Math.max(0, Math.min(duration, edge === 'in' ? origin + delta : origin - delta));
         if (edge === 'in') clip.fadeIn = value;
         else clip.fadeOut = value;
         if (path) path.setAttribute('d', fadePath(clip));
-        const percent = Math.min(50, (value / Math.max(0.01, clip.duration)) * 100);
+        const percent = Math.min(50, (value / Math.max(0.01, duration)) * 100);
         handle.style.left = `${edge === 'in' ? percent : 100 - percent}%`;
       };
 
@@ -1460,21 +1474,28 @@ async function encodeM4A(buffer, context = null) {
   });
 }
 
+function currentBounceLoop() {
+  const loop = state.session?.loop;
+  return loop && Number.isFinite(loop.start) && Number.isFinite(loop.end) && loop.end - loop.start > 0.2
+    ? { start: loop.start, end: loop.end }
+    : null;
+}
+
 function bounceSettingsSize(settings, mode) {
-  const tracks = state.session.tracks.filter((track) => model.trackDuration(track) > 0);
-  const duration = mode === 'stems'
-    ? tracks.reduce((sum, track) => sum + model.trackDuration(track), 0)
-    : sessionDuration();
-  const bytes = settings.format === 'm4a'
+  const loop = currentBounceLoop();
+  const duration = settings.range === 'loop' && loop ? loop.end - loop.start : sessionDuration();
+  const tracks = state.session.tracks.filter((track) => model.trackDuration(track, state.session.tempo) > 0);
+  const fileCount = mode === 'stems' ? tracks.length : 1;
+  const bytes = (settings.format === 'm4a'
     ? duration * 32_000
-    : duration * settings.sampleRate * 2 * (settings.bitDepth / 8);
+    : duration * settings.sampleRate * 2 * (settings.bitDepth / 8)) * fileCount;
   const size = bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`;
   return mode === 'stems' ? `ESTIMATED ${tracks.length} FILES · ${size}` : `ESTIMATED SIZE · ${size}`;
 }
 
 function openBounceSettings(mode) {
   if (state.bouncing) return;
-  if (mode === 'stems' && !state.session.tracks.some((track) => model.trackDuration(track) > 0)) {
+  if (mode === 'stems' && !state.session.tracks.some((track) => model.trackDuration(track, state.session.tempo) > 0)) {
     toast('There are no tracks with audio to export');
     return;
   }
@@ -1485,6 +1506,8 @@ function openBounceSettings(mode) {
   if (!settings.sampleRate) settings.sampleRate = 44100;
   if (!settings.bitDepth) settings.bitDepth = 24;
   settings.normalize = Boolean(settings.normalize);
+  const loopRange = currentBounceLoop();
+  if (!loopRange || !['session', 'loop'].includes(settings.range)) settings.range = 'session';
 
   openModal(`
     <header class="modal-header">
@@ -1492,6 +1515,15 @@ function openBounceSettings(mode) {
       <button class="modal-close" data-close>Cancel</button>
     </header>
     <div class="modal-body">
+      <div class="panel">
+        <h3>RENDER RANGE</h3>
+        <div class="field">
+          <select id="bounceRange">
+            <option value="session" ${settings.range === 'session' ? 'selected' : ''}>Entire Session</option>
+            <option value="loop" ${settings.range === 'loop' ? 'selected' : ''} ${loopRange ? '' : 'disabled'}>Loop Range${loopRange ? '' : ' · set a loop first'}</option>
+          </select>
+        </div>
+      </div>
       <div class="panel">
         <h3>FORMAT</h3>
         <div class="field">
@@ -1529,6 +1561,7 @@ function openBounceSettings(mode) {
       <button class="tool primary" id="renderBounceBtn">${mode === 'stems' ? 'Render Stems' : 'Render Mix'}</button>
     </footer>`, { tall: true });
 
+  const range = document.getElementById('bounceRange');
   const format = document.getElementById('bounceFormat');
   const rate = document.getElementById('bounceSampleRate');
   const depth = document.getElementById('bounceBitDepth');
@@ -1537,6 +1570,7 @@ function openBounceSettings(mode) {
   const estimate = document.getElementById('bounceEstimate');
   const refresh = () => {
     const current = {
+      range: range.value,
       format: format.value,
       sampleRate: Number(rate.value),
       bitDepth: Number(depth.value),
@@ -1546,11 +1580,12 @@ function openBounceSettings(mode) {
     depth.disabled = current.format === 'm4a';
     estimate.textContent = bounceSettingsSize(current, mode);
   };
-  [format, rate, depth, normalize, name].forEach((input) => input.addEventListener('input', refresh));
-  format.addEventListener('change', refresh);
+  [range, format, rate, depth, normalize, name].forEach((input) => input.addEventListener('input', refresh));
+  [range, format].forEach((input) => input.addEventListener('change', refresh));
 
   document.getElementById('renderBounceBtn').addEventListener('click', () => {
     const final = {
+      range: range.value,
       format: format.value,
       sampleRate: Number(rate.value),
       bitDepth: Number(depth.value),
@@ -1578,6 +1613,9 @@ async function renderBounce(mode, settings, exportContext = null) {
   const extension = settings.format === 'm4a' ? 'm4a' : 'wav';
   const sessionID = state.session.id;
   const sessionName = state.session.name;
+  const sessionTempoBPM = state.session.tempo;
+  const loopRange = settings.range === 'loop' ? currentBounceLoop() : null;
+  const renderRange = loopRange ? { start: loopRange.start, end: loopRange.end } : null;
   let librarySaveFailed = false;
   const makeBlob = async (buffer) => settings.format === 'm4a'
     ? encodeM4A(buffer, exportContext)
@@ -1603,20 +1641,56 @@ async function renderBounce(mode, settings, exportContext = null) {
 
   try {
     if (mode === 'stems') {
-      const tracks = state.session.tracks.filter((track) => model.trackDuration(track) > 0);
+      const tracks = state.session.tracks.filter((track) => model.trackDuration(track, sessionTempoBPM) > 0);
+      const archiveStems = [];
       for (const track of tracks) {
-        const buffer = await engine.renderStem(track, { sampleRate: settings.sampleRate, normalize: settings.normalize });
+        const buffer = await engine.renderStem(track, {
+          sampleRate: settings.sampleRate,
+          normalize: settings.normalize,
+          rangeStart: renderRange?.start ?? 0,
+          rangeEnd: renderRange?.end ?? null
+        });
         const blob = await makeBlob(buffer);
         const name = `${safeName(settings.fileName)} - ${safeName(track.name)}.${extension}`;
         await saveAndDownload(blob, name, 'stem', buffer.duration);
+        archiveStems.push({ trackName: track.name, fileName: name, duration: buffer.duration, format: extension.toUpperCase(), blob });
         await new Promise((resolve) => setTimeout(resolve, 350));
       }
-      toast(librarySaveFailed ? `${tracks.length} stems exported; library save failed` : `${tracks.length} stems exported`);
+      const manifest = {
+        sessionName,
+        sessionTempoBPM,
+        stems: archiveStems.map(({ trackName, fileName, duration, format }) => ({ trackName, fileName, duration, format }))
+      };
+      const manifestBlob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+      const archiveBlob = await createZipBlob([
+        ...archiveStems.map((stem) => ({ name: stem.fileName, blob: stem.blob })),
+        { name: 'manifest.json', blob: manifestBlob }
+      ]);
+      const archiveName = `${safeName(settings.fileName)} - Stems.zip`;
+      try {
+        await model.saveExport({
+          name: archiveName,
+          kind: 'archive',
+          format: 'ZIP',
+          duration: 0,
+          sessionID,
+          sessionName,
+          createdAt: Date.now(),
+          blob: archiveBlob
+        });
+      } catch (error) {
+        console.warn('Could not save stem archive to the export library', error);
+        librarySaveFailed = true;
+      }
+      download(archiveBlob, archiveName);
+      toast(librarySaveFailed ? `${tracks.length} stems and archive exported; library save failed` : `${tracks.length} stems and archive exported`);
     } else {
       const buffer = await engine.renderMix({
         masterVolume: state.session.masterVolume,
         sampleRate: settings.sampleRate,
-        normalize: settings.normalize
+        normalize: settings.normalize,
+        rangeStart: renderRange?.start ?? 0,
+        rangeEnd: renderRange?.end ?? null
       });
       const blob = await makeBlob(buffer);
       await saveAndDownload(blob, `${safeName(settings.fileName)}.${extension}`, 'mix', buffer.duration);
@@ -1765,6 +1839,38 @@ function addSectionAtPlayhead() {
 
 // ---------- Clip editing ----------
 
+function rebuildPlaybackAtCurrentPosition() {
+  const wasPlaying = engine.isPlaying;
+  const position = wasPlaying ? engine.getPosition() : engine.position;
+  if (wasPlaying) engine.pause();
+  engine.rebuild();
+  if (wasPlaying) engine.play(position);
+}
+
+function cancelClipPreviewTimer() {
+  if (state.clipPreviewTimer) window.clearTimeout(state.clipPreviewTimer);
+  state.clipPreviewTimer = null;
+}
+
+function previewClip(clip) {
+  if (!clip) return;
+  cancelClipPreviewTimer();
+  const wasPlaying = engine.isPlaying;
+  if (wasPlaying) engine.pause();
+  engine.play(clip.start);
+  state.playhead = clip.start;
+  const length = model.clipTimelineDuration(clip, state.session.tempo);
+  state.clipPreviewTimer = window.setTimeout(() => {
+    state.clipPreviewTimer = null;
+    engine.pause();
+    state.playhead = engine.position;
+    renderTransport();
+    updatePlayhead();
+  }, Math.max(100, length * 1000));
+  renderTransport();
+  updatePlayhead();
+}
+
 function selectedClipInfo() {
   if (!state.selectedClip) return null;
   for (const track of state.session.tracks) {
@@ -1780,13 +1886,28 @@ function updateClipToolbar() {
   const show = Boolean(info) && !info.track.frozen?.fileId;
   clipToolbar.style.display = show ? 'flex' : 'none';
   if (show) {
-    clipToolbar.querySelector('[data-clip-name]').textContent = info.clip.name;
+    const clip = info.clip;
+    const pitch = Number(clip.transposeSemitones) || 0;
+    clipToolbar.querySelector('[data-clip-name]').textContent = clip.name;
+    clipToolbar.querySelector('[data-clip-pitch]').textContent = `${pitch >= 0 ? '+' : ''}${pitch} st`;
+    const synced = clip.sourceTempoBPM != null;
+    const syncButton = clipToolbar.querySelector('[data-clip-act="sync"]');
+    syncButton.classList.toggle('on', synced);
+    syncButton.textContent = synced ? 'SYNC ON' : 'SYNC OFF';
+    const bpmInput = clipToolbar.querySelector('[data-clip-bpm]');
+    bpmInput.value = String(Math.round(clip.sourceTempoBPM ?? state.session.tempo));
+    bpmInput.disabled = !synced;
+    clipToolbar.querySelector('[data-clip-act="tempo-down"]').disabled = !synced || clip.sourceTempoBPM <= 60;
+    clipToolbar.querySelector('[data-clip-act="tempo-up"]').disabled = !synced || clip.sourceTempoBPM >= 200;
+    clipToolbar.querySelector('[data-clip-act="pitch-down"]').disabled = pitch <= -12;
+    clipToolbar.querySelector('[data-clip-act="pitch-up"]').disabled = pitch >= 12;
   }
 }
 
 function ensureClipToolbar() {
   if (clipToolbar) return;
   clipToolbar = document.createElement('div');
+  clipToolbar.className = 'clip-toolbar';
   clipToolbar.style.cssText = [
     'position:absolute', 'left:10px', 'right:10px', 'bottom:10px',
     'display:none', 'align-items:center', 'gap:6px', 'padding:7px 8px',
@@ -1795,6 +1916,9 @@ function ensureClipToolbar() {
   ].join(';');
   clipToolbar.innerHTML = `
     <span data-clip-name style="flex:1;min-width:60px;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    <button class="pill" data-clip-act="preview" aria-label="Preview clip">PREVIEW</button>
+    <span class="clip-edit-group"><span class="clip-edit-label">PITCH</span><button class="pill" data-clip-act="pitch-down" aria-label="Transpose down one semitone">−</button><span data-clip-pitch class="clip-edit-value"></span><button class="pill" data-clip-act="pitch-up" aria-label="Transpose up one semitone">+</button></span>
+    <span class="clip-edit-group"><button class="pill" data-clip-act="sync">SYNC OFF</button><button class="pill" data-clip-act="tempo-down" aria-label="Decrease source BPM">−</button><input data-clip-bpm type="number" min="60" max="200" step="1" aria-label="Clip source tempo in BPM"><button class="pill" data-clip-act="tempo-up" aria-label="Increase source BPM">+</button><span class="clip-edit-label">BPM</span></span>
     <button class="pill" data-clip-act="split">SPLIT</button>
     <button class="pill" data-clip-act="duplicate">DUPLICATE</button>
     <button class="pill" data-clip-act="delete">DELETE</button>
@@ -1818,20 +1942,41 @@ function ensureClipToolbar() {
       renderTimeline();
       return;
     }
+    if (action === 'preview') {
+      previewClip(clip);
+      return;
+    }
+    if (['pitch-down', 'pitch-up', 'sync', 'tempo-down', 'tempo-up'].includes(action)) {
+      snapshot();
+      const pitch = Number(clip.transposeSemitones) || 0;
+      const sourceTempo = Number(clip.sourceTempoBPM) || state.session.tempo;
+      if (action === 'pitch-down') clip.transposeSemitones = model.clamp(pitch - 1, -12, 12);
+      if (action === 'pitch-up') clip.transposeSemitones = model.clamp(pitch + 1, -12, 12);
+      if (action === 'sync') clip.sourceTempoBPM = clip.sourceTempoBPM == null ? state.session.tempo : null;
+      if (action === 'tempo-down') clip.sourceTempoBPM = model.clamp(sourceTempo - 1, 60, 200);
+      if (action === 'tempo-up') clip.sourceTempoBPM = model.clamp(sourceTempo + 1, 60, 200);
+      persist();
+      rebuildPlaybackAtCurrentPosition();
+      renderTimeline();
+      updateClipToolbar();
+      return;
+    }
 
     snapshot();
     if (action === 'split') {
-      const at = engine.position;
-      if (at > clip.start + 0.05 && at < clip.start + clip.duration - 0.05) {
+      const at = engine.isPlaying ? engine.getPosition() : engine.position;
+      const timelineDuration = model.clipTimelineDuration(clip, state.session.tempo);
+      if (at > clip.start + 0.05 && at < clip.start + timelineDuration - 0.05) {
         const offset = at - clip.start;
+        const sourceOffset = model.clipSourceOffset(clip, offset, state.session.tempo);
         const second = {
           ...clip,
           id: model.uid(),
           start: at,
-          duration: clip.duration - offset,
-          sourceStart: clip.sourceStart + offset
+          duration: clip.duration - sourceOffset,
+          sourceStart: clip.sourceStart + sourceOffset
         };
-        clip.duration = offset;
+        clip.duration = sourceOffset;
         track.clips.push(second);
         track.clips.sort((a, b) => a.start - b.start);
         state.selectedClip = second.id;
@@ -1843,7 +1988,7 @@ function ensureClipToolbar() {
       const copy = {
         ...clip,
         id: model.uid(),
-        start: clip.start + clip.duration
+        start: clip.start + model.clipTimelineDuration(clip, state.session.tempo)
       };
       track.clips.push(copy);
       track.clips.sort((a, b) => a.start - b.start);
@@ -1856,7 +2001,21 @@ function ensureClipToolbar() {
     }
 
     persist();
-    engine.rebuild();
+    rebuildPlaybackAtCurrentPosition();
+    renderTimeline();
+    updateClipToolbar();
+  });
+
+  clipToolbar.addEventListener('change', (event) => {
+    if (!event.target.matches('[data-clip-bpm]')) return;
+    const info = selectedClipInfo();
+    if (!info) return;
+    const bpm = Number(event.target.value);
+    if (!Number.isFinite(bpm)) return;
+    snapshot();
+    info.clip.sourceTempoBPM = model.clamp(Math.round(bpm), 60, 200);
+    persist();
+    rebuildPlaybackAtCurrentPosition();
     renderTimeline();
     updateClipToolbar();
   });
@@ -1962,6 +2121,10 @@ function renderRollModal() {
   }
 
   const beatPx = ROLL_BEAT_WIDTH;
+  const soundPreset = model.presetForTrack(track);
+  const guitarTrack = model.isGuitarVoice(track.voice);
+  const guitarTone = model.normalizeGuitarTone(track.guitarTone);
+  const guitarTonePreset = model.guitarTonePresetFor(guitarTone);
   const duration = Math.max(sessionDuration(), beatDuration() * 16);
   const contentWidth = Math.max(16, Math.ceil(duration / beatDuration()) + 4) * beatPx;
   const gridHeight = (model.NOTE_HIGH - model.NOTE_LOW + 1) * NOTE_HEIGHT;
@@ -2027,6 +2190,30 @@ function renderRollModal() {
           <span class="range-label" id="rollQuantizeValue">${Math.round(state.rollQuantizeStrength * 100)}%</span>
         </div>
         <div class="roll-toolbar">
+          <label class="range-label" for="rollSound">SOUND</label>
+          <select id="rollSound" style="height:26px;border-radius:7px;border:1px solid var(--line);background:var(--panel-highlight);color:var(--text);padding:0 6px;font-family:'SF Mono',ui-monospace,monospace;font-size:10px;max-width:180px">
+            ${model.VOICES.map((voice) => `<optgroup label="${voice.name}">${model.presetsForVoice(voice.id).map((preset) => `<option value="${preset.id}" ${preset.id === soundPreset.id ? 'selected' : ''}>${preset.name}</option>`).join('')}</optgroup>`).join('')}
+          </select>
+          <span class="range-label">${escapeHtml(model.voiceName(soundPreset.voice).toUpperCase())}</span>
+        </div>
+        ${guitarTrack ? `
+        <div class="roll-toolbar">
+          <span class="range-label">TONE</span>
+          ${model.GUITAR_TONES.map((preset) => `<button class="pill ${guitarTonePreset && guitarTonePreset.id === preset.id ? 'on' : ''}" data-guitar-tone="${preset.id}">${preset.name.toUpperCase()}</button>`).join('')}
+          <span class="range-label">${guitarTonePreset ? escapeHtml(guitarTonePreset.name) : 'CUSTOM'}</span>
+        </div>
+        <div class="roll-toolbar">
+          <label class="range-label" for="rollToneGain">GAIN</label>
+          <input type="range" id="rollToneGain" min="0" max="1" step="0.01" value="${guitarTone.gain}">
+          <span class="range-label" id="rollToneGainValue">${Math.round(guitarTone.gain * 100)}%</span>
+          <label class="range-label" for="rollToneBrightness">BRIGHT</label>
+          <input type="range" id="rollToneBrightness" min="0" max="1" step="0.01" value="${guitarTone.brightness}">
+          <span class="range-label" id="rollToneBrightnessValue">${Math.round(guitarTone.brightness * 100)}%</span>
+          <label class="range-label" for="rollTonePickup">NECK–BRIDGE</label>
+          <input type="range" id="rollTonePickup" min="0" max="1" step="0.01" value="${guitarTone.pickup}">
+          <span class="range-label" id="rollTonePickupValue">${Math.round(guitarTone.pickup * 100)}%</span>
+        </div>` : ''}
+        <div class="roll-toolbar">
           <button class="pill" id="rollMidiImport">IMPORT MIDI</button>
           <button class="pill" id="rollMidiExport">EXPORT MIDI</button>
           <span class="range-label">Named after the track · ${state.session.tempo} BPM</span>
@@ -2079,6 +2266,36 @@ function renderRollModal() {
   document.getElementById('rollMidiExport').addEventListener('click', () => {
     exportTrackMidi(track);
   });
+
+  const soundSelect = document.getElementById('rollSound');
+  soundSelect.addEventListener('change', () => {
+    updateTrackSound(track, soundSelect.value);
+  });
+
+  if (guitarTrack) {
+    document.querySelectorAll('[data-guitar-tone]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const preset = model.guitarTonePresetById(button.dataset.guitarTone);
+        if (!preset) return;
+        snapshot();
+        updateGuitarTone(track, preset.tone);
+      });
+    });
+
+    const bindToneSlider = (id, key, labelId) => {
+      const input = document.getElementById(id);
+      if (!input) return;
+      input.addEventListener('input', () => {
+        const label = document.getElementById(labelId);
+        if (label) label.textContent = `${Math.round(Number(input.value) * 100)}%`;
+        updateGuitarTone(track, { [key]: Number(input.value) }, { rerender: false, reschedule: false });
+      });
+      input.addEventListener('change', () => updateGuitarTone(track, {}));
+    };
+    bindToneSlider('rollToneGain', 'gain', 'rollToneGainValue');
+    bindToneSlider('rollToneBrightness', 'brightness', 'rollToneBrightnessValue');
+    bindToneSlider('rollTonePickup', 'pickup', 'rollTonePickupValue');
+  }
 
   document.querySelectorAll('[data-roll-div]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -2227,6 +2444,27 @@ function originVelocity(value) {
   return model.clamp(Number(value ?? 0.8), 0.05, 1);
 }
 
+function updateTrackSound(track, presetId) {
+  const preset = model.presetById(presetId);
+  if (!preset || !track) return;
+  if (track.voice === preset.voice && track.presetId === preset.id) return;
+  snapshot();
+  track.voice = preset.voice;
+  track.presetId = preset.id;
+  persist();
+  engine.rebuild();
+  renderRollModal();
+  toast(`${preset.name} loaded`);
+}
+
+function updateGuitarTone(track, patch, { rerender = true, reschedule = true } = {}) {
+  if (!track) return;
+  track.guitarTone = model.normalizeGuitarTone({ ...model.normalizeGuitarTone(track.guitarTone), ...patch });
+  persist();
+  if (reschedule) engine.rebuild();
+  if (rerender) renderRollModal();
+}
+
 function quantizeSelectedNotes(track) {
   const selected = new Set(state.selectedNotes);
   if (!selected.size) return;
@@ -2371,6 +2609,10 @@ function openModal(html, { tall = false } = {}) {
 }
 
 function closeModal() {
+  if (state.modal === 'instruments') {
+    state.midiRequestID += 1;
+    disconnectWebMIDIInput('MIDI controller disconnected.');
+  }
   if (state.instrumentRecording) stopInstrumentRecording(false);
   if (state.microphoneRequesting) {
     state.microphoneRequesting = false;
@@ -2844,6 +3086,87 @@ function openEQ(trackId) {
       persist();
     });
   }
+}
+
+function openTrackEffects(trackId) {
+  const track = trackById(trackId);
+  if (!track) return;
+  state.modal = 'track-effects';
+  track.effectsRack = model.normalizeTrackEffectsRack(track.effectsRack);
+  const rack = track.effectsRack;
+
+  const control = (effect, key, title, min, max, step, value) => `
+    <div class="field">
+      <div class="label-row"><span>${title}</span><span data-fx-value="${effect}.${key}">${formatTrackEffectValue(key, value)}</span></div>
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-fx="${effect}.${key}" data-track="${track.id}">
+    </div>`;
+  const panel = (effect, title, settings, controls) => `
+    <div class="panel">
+      <div class="switch-row" style="margin-bottom:12px">
+        <h3 style="margin:0">${title}</h3>
+        <button class="switch ${settings.bypassed ? '' : 'on'}" data-fx-bypass="${effect}" data-track="${track.id}" aria-label="Toggle ${title.toLowerCase()}"></button>
+      </div>
+      ${controls}
+    </div>`;
+
+  openModal(`
+    <header class="modal-header">
+      <div style="flex:1;min-width:0">
+        <h2>Track Effects</h2>
+        <div class="sub">${escapeHtml(track.name.toUpperCase())}</div>
+      </div>
+      <button class="modal-close" data-close>Done</button>
+    </header>
+    <div class="modal-body">
+      ${panel('chorus', 'CHORUS', rack.chorus,
+        control('chorus', 'rateHz', 'Rate', 0.1, 5, 0.1, rack.chorus.rateHz)
+        + control('chorus', 'depthMs', 'Depth', 0, 12, 0.5, rack.chorus.depthMs)
+        + control('chorus', 'mix', 'Mix', 0, 1, 0.01, rack.chorus.mix))}
+      ${panel('distortion', 'DISTORTION', rack.distortion,
+        control('distortion', 'driveDB', 'Drive', 0, 20, 0.5, rack.distortion.driveDB)
+        + control('distortion', 'mix', 'Mix', 0, 1, 0.01, rack.distortion.mix))}
+      ${panel('stereoDelay', 'STEREO DELAY', rack.stereoDelay,
+        control('stereoDelay', 'timeBeats', 'Time (beats)', 0.25, 2, 0.25, rack.stereoDelay.timeBeats)
+        + control('stereoDelay', 'feedback', 'Feedback', 0, 0.9, 0.01, rack.stereoDelay.feedback)
+        + control('stereoDelay', 'mix', 'Mix', 0, 1, 0.01, rack.stereoDelay.mix))}
+    </div>`, { tall: true });
+
+  el.modalRoot.querySelectorAll('[data-fx]').forEach((input) => {
+    input.addEventListener('pointerdown', () => snapshot());
+    input.addEventListener('input', () => {
+      const current = trackById(input.dataset.track);
+      if (!current) return;
+      const [effect, key] = input.dataset.fx.split('.');
+      current.effectsRack[effect][key] = Number(input.value);
+      const label = el.modalRoot.querySelector(`[data-fx-value="${effect}.${key}"]`);
+      if (label) label.textContent = formatTrackEffectValue(key, Number(input.value));
+      const nodes = engine.trackNodes.get(current.id);
+      if (nodes) engine.applyTrackSettings(current, nodes);
+      persist();
+    });
+  });
+
+  el.modalRoot.querySelectorAll('[data-fx-bypass]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const current = trackById(button.dataset.track);
+      if (!current) return;
+      const effect = button.dataset.fxBypass;
+      snapshot();
+      current.effectsRack[effect].bypassed = !current.effectsRack[effect].bypassed;
+      button.classList.toggle('on', !current.effectsRack[effect].bypassed);
+      const nodes = engine.trackNodes.get(current.id);
+      if (nodes) engine.applyTrackSettings(current, nodes);
+      persist();
+    });
+  });
+}
+
+function formatTrackEffectValue(key, value) {
+  if (key === 'rateHz') return `${Number(value).toFixed(1)} Hz`;
+  if (key === 'depthMs') return `${Number(value).toFixed(1)} ms`;
+  if (key === 'driveDB') return `${Number(value).toFixed(1)} dB`;
+  if (key === 'timeBeats') return `${Number(value).toFixed(2)} beats`;
+  return `${Math.round(Number(value) * 100)}%`;
 }
 
 // ---------- Master effects ----------
@@ -3557,6 +3880,143 @@ function instrumentEngineInstance() {
   return instrumentVoice;
 }
 
+function webMIDISupportError() {
+  if (!window.isSecureContext) {
+    return 'Web MIDI requires a secure page (HTTPS or localhost).';
+  }
+  if (typeof navigator.requestMIDIAccess !== 'function') {
+    return 'Web MIDI is unavailable in this browser.';
+  }
+  return null;
+}
+
+function webMIDIInputs() {
+  if (!state.midiAccess?.inputs) return [];
+  return Array.from(state.midiAccess.inputs.values()).filter((input) => input.state !== 'disconnected');
+}
+
+function releaseWebMIDINotes() {
+  for (const handle of state.midiNoteHandles.values()) {
+    engine.releaseMIDINote(handle);
+  }
+  state.midiNoteHandles.clear();
+}
+
+function disconnectWebMIDIInput(status = 'MIDI controller disconnected.') {
+  if (state.midiInput && state.midiInput.onmidimessage === state.midiMessageHandler) {
+    state.midiInput.onmidimessage = null;
+  }
+  state.midiInput = null;
+  state.midiMessageHandler = null;
+  releaseWebMIDINotes();
+  if (status) state.midiStatus = status;
+}
+
+function handleWebMIDIMessage(event) {
+  const bytes = event.data;
+  if (!bytes || bytes.length < 3) return;
+
+  const status = bytes[0] & 0xf0;
+  const channel = bytes[0] & 0x0f;
+  const pitch = bytes[1] & 0x7f;
+  const velocity = bytes[2] & 0x7f;
+  const key = `${channel}:${pitch}`;
+
+  if (status === 0x90 && velocity > 0) {
+    const previous = state.midiNoteHandles.get(key);
+    if (previous) engine.releaseMIDINote(previous);
+    state.midiNoteHandles.delete(key);
+    if (!state.instrumentTrackId) return;
+    const handle = engine.startMIDINote(
+      state.instrumentTrackId,
+      pitch,
+      velocity / 127,
+      instrumentDestination()
+    );
+    if (handle) state.midiNoteHandles.set(key, handle);
+    return;
+  }
+
+  if (status === 0x80 || (status === 0x90 && velocity === 0)) {
+    const handle = state.midiNoteHandles.get(key);
+    if (handle) engine.releaseMIDINote(handle);
+    state.midiNoteHandles.delete(key);
+  }
+}
+
+function connectWebMIDIInput(inputId) {
+  const input = state.midiAccess?.inputs.get(inputId);
+  if (!input) {
+    disconnectWebMIDIInput('MIDI input is unavailable. Connect a device and try again.');
+    return false;
+  }
+  if (state.midiInput === input) return true;
+
+  disconnectWebMIDIInput('');
+  state.midiInputId = input.id;
+  state.midiInput = input;
+  state.midiMessageHandler = handleWebMIDIMessage;
+  input.onmidimessage = state.midiMessageHandler;
+  state.midiStatus = `Receiving from ${input.name || 'MIDI controller'}.`;
+  return true;
+}
+
+function handleMIDIAccessStateChange(event) {
+  const port = event.port;
+  if (port?.type === 'input' && port.id === state.midiInputId && port.state === 'disconnected') {
+    disconnectWebMIDIInput('MIDI controller disconnected.');
+  } else if (port?.type === 'input' && port.state === 'connected' && !state.midiInput) {
+    state.midiStatus = port.id === state.midiInputId
+      ? 'MIDI device reconnected. Tap Connect to resume.'
+      : 'MIDI device available. Tap Connect to begin.';
+  }
+  if (state.modal === 'instruments') openInstruments();
+}
+
+async function connectWebMIDI() {
+  if (state.modal !== 'instruments') return;
+  const requestID = state.midiRequestID + 1;
+  state.midiRequestID = requestID;
+  const unsupported = webMIDISupportError();
+  if (unsupported) {
+    state.midiStatus = unsupported;
+    if (state.modal === 'instruments') openInstruments();
+    return;
+  }
+
+  // Resume audio from the same user gesture that grants MIDI access.
+  engine.ensureContext();
+  try {
+    if (!state.midiAccess) {
+      const access = await navigator.requestMIDIAccess({ sysex: false });
+      if (requestID !== state.midiRequestID || state.modal !== 'instruments') return;
+      state.midiAccess = access;
+      state.midiAccess.onstatechange = handleMIDIAccessStateChange;
+    }
+  } catch (error) {
+    if (requestID !== state.midiRequestID || state.modal !== 'instruments') return;
+    const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
+    state.midiStatus = denied
+      ? 'MIDI access was denied. Allow it in your browser settings to connect.'
+      : 'Could not open Web MIDI access.';
+    if (state.modal === 'instruments') openInstruments();
+    return;
+  }
+
+  if (requestID !== state.midiRequestID || state.modal !== 'instruments') return;
+  const inputs = webMIDIInputs();
+  if (!inputs.length) {
+    state.midiStatus = 'No MIDI input found. Connect a device and try again.';
+    if (state.modal === 'instruments') openInstruments();
+    return;
+  }
+
+  const input = inputs.find((item) => item.id === state.midiInputId) || inputs[0];
+  state.midiInputId = input.id;
+  connectWebMIDIInput(input.id);
+  if (state.modal === 'instruments') openInstruments();
+}
+
 function instrumentDestination() {
   const context = engine.ensureContext();
   if (!state.instrumentBus || state.instrumentBusContext !== context) {
@@ -3590,7 +4050,7 @@ function startInstrumentRecording() {
     toast('Choose a session track as the recording destination');
     return;
   }
-  if (state.instrumentTab === 'sampler' && !state.samplerBuffer) {
+  if (state.instrumentTab === 'sampler' && !state.samplerBuffer && !state.midiInput) {
     toast('Load a sample before recording');
     return;
   }
@@ -3622,7 +4082,9 @@ function startInstrumentRecording() {
   const startPosition = engine.isPlaying ? engine.getPosition() : engine.position;
   const position = engine.duration() > 0 && startPosition >= engine.duration() ? 0 : startPosition;
   const instrumentNames = { synth: 'Synth', drums: 'Drums', tb303: 'TB-303', sampler: state.samplerName || 'Sampler' };
-  const takeName = `${instrumentNames[state.instrumentTab] || 'Instrument'} Take`;
+  const takeName = state.midiInput
+    ? 'MIDI Performance Take'
+    : `${instrumentNames[state.instrumentTab] || 'Instrument'} Take`;
   const chunks = [];
 
   recorder.ondataavailable = (event) => {
@@ -4162,9 +4624,31 @@ function openInstruments(destinationTrackID = null) {
   const tabs = [['synth', 'SYNTH'], ['drums', 'DRUMS'], ['tb303', '303'], ['sampler', 'SAMPLER']]
     .map(([id, label]) => `<button class="pill ${state.instrumentTab === id ? 'on' : ''}" data-instrument-tab="${id}">${label}</button>`)
     .join('');
+  const midiInputs = webMIDIInputs();
+  const midiUnavailable = webMIDISupportError();
+  const selectedMIDIInputID = state.midiInput?.id
+    || (midiInputs.find((input) => input.id === state.midiInputId)?.id ?? midiInputs[0]?.id ?? '');
+  const midiStatus = state.midiStatus || midiUnavailable || 'Connect a MIDI controller to begin.';
+  const midiPanel = `<div class="panel midi-controller-panel">
+    <h3>MIDI CONTROLLER</h3>
+    ${midiInputs.length ? `<div class="field">
+      <div class="label-row"><span>MIDI input</span></div>
+      <select id="midiInputSelect" ${state.midiInput ? '' : 'disabled'}>
+        ${midiInputs.map((input) => `<option value="${escapeHtml(input.id)}" ${input.id === selectedMIDIInputID ? 'selected' : ''}>${escapeHtml(input.name || 'MIDI Controller')}</option>`).join('')}
+      </select>
+    </div>` : ''}
+    <div class="midi-status ${midiUnavailable ? 'unavailable' : state.midiInput ? 'connected' : ''}">
+      <span class="midi-status-light"></span>
+      <span>${escapeHtml(midiStatus)}</span>
+    </div>
+    <button class="tool midi-connect-button" id="midiConnectButton" ${midiUnavailable || !state.instrumentTrackId ? 'disabled' : ''}>
+      ${state.midiInput ? 'Disconnect MIDI' : 'Connect MIDI'}
+    </button>
+    <p class="midi-hint">Play through the selected track's instrument preset and mixer. Record a synchronized take with the button above.</p>
+  </div>`;
   const recordTrack = trackById(state.instrumentTrackId);
   const canRecord = Boolean(recordTrack)
-    && (state.instrumentTab !== 'sampler' || Boolean(state.samplerBuffer))
+    && (Boolean(state.midiInput) || state.instrumentTab !== 'sampler' || Boolean(state.samplerBuffer))
     && !state.microphoneRecording
     && !state.microphoneFinalizing
     && !state.microphoneRequesting;
@@ -4198,6 +4682,7 @@ function openInstruments(destinationTrackID = null) {
           ${destinationOptions}
         </select>
       </div>
+      ${midiPanel}
       <div class="instrument-record-bar ${state.instrumentRecording ? 'recording' : ''}">
         <span class="record-light"></span>
         <div class="instrument-record-meta">
@@ -4229,7 +4714,30 @@ function bindInstrumentControls() {
   const destination = document.getElementById('instrumentDestination');
   if (destination) {
     destination.addEventListener('change', () => {
+      releaseWebMIDINotes();
       state.instrumentTrackId = destination.value || null;
+      if (state.modal === 'instruments') openInstruments();
+    });
+  }
+
+  const midiInputSelect = document.getElementById('midiInputSelect');
+  if (midiInputSelect) {
+    midiInputSelect.addEventListener('change', () => {
+      releaseWebMIDINotes();
+      connectWebMIDIInput(midiInputSelect.value);
+      openInstruments();
+    });
+  }
+
+  const midiConnectButton = document.getElementById('midiConnectButton');
+  if (midiConnectButton) {
+    midiConnectButton.addEventListener('click', () => {
+      if (state.midiInput) {
+        disconnectWebMIDIInput('MIDI controller disconnected.');
+        openInstruments();
+      } else {
+        void connectWebMIDI();
+      }
     });
   }
 
@@ -4569,6 +5077,7 @@ async function openSessions() {
   }).join('');
   const previewURLs = new Map();
   exports.forEach((item) => {
+    if (item.kind === 'archive' || !item.blob) return;
     const previewURL = URL.createObjectURL(item.blob);
     previewURLs.set(item.id, previewURL);
     state.exportPreviewURLs.push(previewURL);
@@ -4579,9 +5088,13 @@ async function openSessions() {
 
   const exportTerm = () => exportQuery.trim().toLowerCase();
 
-  const matchesExportFilter = (item) => exportFilter === 'all'
-    || (exportFilter === 'mix' && item.kind !== 'stem')
-    || (exportFilter === 'stem' && item.kind === 'stem');
+  const matchesExportFilter = (item) => {
+    if (exportFilter === 'all') return true;
+    if (exportFilter === 'mix') return item.kind === 'mix';
+    if (exportFilter === 'stem') return item.kind === 'stem';
+    if (exportFilter === 'archive') return item.kind === 'archive';
+    return false;
+  };
 
   const visibleExports = () => exports
     .filter((item) => {
@@ -4601,7 +5114,7 @@ async function openSessions() {
       return `<p class="export-empty">No exports match “${escapeHtml(exportQuery.trim())}”. Try another name or switch the filter.</p>`;
     }
     if (exportFilter !== 'all') {
-      const label = exportFilter === 'stem' ? 'stems' : 'mixes';
+      const label = exportFilter === 'stem' ? 'individual stems' : exportFilter === 'archive' ? 'stem archives' : 'mixes';
       return `<p class="export-empty">No ${label} saved yet. Switch the filter to see the rest of your library.</p>`;
     }
     return '<p class="export-empty">Nothing to show right now.</p>';
@@ -4616,17 +5129,27 @@ async function openSessions() {
   const exportBaseName = (item) => (item.name || 'export').replace(/\.[a-z0-9]+$/i, '');
 
   const exportRowsMarkup = () => visibleExports().map((item) => {
+    const isArchive = item.kind === 'archive';
     const previewURL = previewURLs.get(item.id) || '';
-    const kind = item.kind === 'stem' ? 'STEM' : 'MIX';
+    const kind = isArchive
+      ? 'ARCHIVE'
+      : item.kind === 'stem'
+        ? 'STEM'
+        : item.kind === 'mix'
+          ? 'MIX'
+          : 'AUDIO EXPORT';
     const name = item.name || `${kind.toLowerCase()} export`;
+    const details = isArchive
+      ? 'ZIP STEM ARCHIVE'
+      : `${kind} · ${escapeHtml(item.format || 'AUDIO')} · ${model.formatTime(item.duration)}`;
     return `<article class="export-row">
-      <div class="export-icon" aria-hidden="true">♫</div>
+      <div class="export-icon" aria-hidden="true">${isArchive ? '▣' : '♫'}</div>
       <div class="export-meta">
         <strong title="${escapeHtml(name)}">${escapeHtml(name)}</strong>
-        <span>${kind} · ${escapeHtml(item.format || 'AUDIO')} · ${model.formatTime(item.duration)}</span>
-        <span class="export-session">${escapeHtml(item.sessionName || 'Untitled Session')}</span>
+        <span>${details}</span>
+        <span class="export-session">${escapeHtml(item.sessionName || 'Session name unavailable for older export')}</span>
       </div>
-      <audio class="export-preview" controls preload="none" src="${escapeHtml(previewURL)}" aria-label="Preview ${escapeHtml(name)}"></audio>
+      ${isArchive ? '' : `<audio class="export-preview" controls preload="none" src="${escapeHtml(previewURL)}" aria-label="Preview ${escapeHtml(name)}"></audio>`}
       <div class="export-actions">
         <button class="icon-btn export-rename" data-export-rename="${escapeHtml(item.id)}" title="Rename" aria-label="Rename ${escapeHtml(name)}">✎</button>
         <button class="tool" data-export-download="${escapeHtml(item.id)}">Download</button>
@@ -4737,6 +5260,7 @@ async function openSessions() {
             <button class="pill on" data-export-filter="all" aria-pressed="true">All</button>
             <button class="pill" data-export-filter="mix" aria-pressed="false">Mixes</button>
             <button class="pill" data-export-filter="stem" aria-pressed="false">Stems</button>
+            <button class="pill" data-export-filter="archive" aria-pressed="false">Archives</button>
           </div>
         </div>
         <div class="export-list" id="exportList">${exportRowsMarkup() || exportEmptyMarkup()}</div>
@@ -4962,9 +5486,16 @@ function bindEvents() {
   el.presetBtn.addEventListener('click', openChannelPresets);
   el.sessionsBtn.addEventListener('click', openSessions);
 
-  el.playBtn.addEventListener('click', togglePlay);
-  el.stopBtn.addEventListener('click', stopPlayback);
+  el.playBtn.addEventListener('click', () => {
+    cancelClipPreviewTimer();
+    togglePlay();
+  });
+  el.stopBtn.addEventListener('click', () => {
+    cancelClipPreviewTimer();
+    stopPlayback();
+  });
   el.rewindBtn.addEventListener('click', () => {
+    cancelClipPreviewTimer();
     engine.seek(0);
     state.playhead = 0;
     renderTransport();
@@ -5113,6 +5644,7 @@ function bindEvents() {
     snapshot();
     state.session.tempo = model.clamp(Math.round(bpm), 60, 200);
     engine.applyMasterEffects();
+    rebuildPlaybackAtCurrentPosition();
     persist();
     render();
   });
@@ -5131,6 +5663,7 @@ function bindEvents() {
       case 'solo': toggleSolo(trackId); break;
       case 'freeze': toggleFreeze(trackId); break;
       case 'eq': openEQ(trackId); break;
+      case 'effects': openTrackEffects(trackId); break;
       case 'roll': openRoll(trackId); break;
       case 'instrument': openInstruments(trackId); break;
       case 'automation': toggleAutomation(trackId); break;
@@ -5250,21 +5783,27 @@ function bindEvents() {
     startDrag((moveEvent) => {
       const delta = (moveEvent.clientX - startX) / state.zoom;
       if (isTrim && edge === 'left') {
-        const change = Math.min(origin.duration - minimum, Math.max(-origin.sourceStart, delta));
+        const rate = model.clipPlaybackRate(origin, state.session.tempo);
+        const minChange = Math.max(-origin.sourceStart / rate, -origin.start);
+        const maxChange = Math.max(minChange, origin.duration / rate - minimum);
+        const change = model.clamp(delta, minChange, maxChange);
         clip.start = origin.start + change;
-        clip.sourceStart = origin.sourceStart + change;
-        clip.duration = origin.duration - change;
+        clip.sourceStart = origin.sourceStart + change * rate;
+        clip.duration = origin.duration - change * rate;
       } else if (isTrim && edge === 'right') {
-        clip.duration = model.clamp(
-          Math.round((origin.duration + delta) / minimum) * minimum,
+        const rate = model.clipPlaybackRate(origin, state.session.tempo);
+        const maxDuration = Math.max(minimum, (origin.sourceDuration - origin.sourceStart) / rate);
+        const timelineDuration = model.clamp(
+          Math.round((model.clipTimelineDuration(origin, state.session.tempo) + delta) / minimum) * minimum,
           minimum,
-          origin.sourceDuration - origin.sourceStart
+          maxDuration
         );
+        clip.duration = timelineDuration * rate;
       } else {
         clip.start = snapTime(Math.max(0, origin.start + delta));
       }
       clipEl.style.left = `${Math.max(0, clip.start) * state.zoom}px`;
-      clipEl.style.width = `${Math.max(18, clip.duration * state.zoom)}px`;
+      clipEl.style.width = `${Math.max(18, model.clipTimelineDuration(clip, state.session.tempo) * state.zoom)}px`;
     }, () => {
       persist();
       renderTimeline();
@@ -5389,6 +5928,7 @@ function changeTempo(delta) {
   snapshot();
   state.session.tempo = model.clamp(state.session.tempo + delta, 60, 200);
   engine.applyMasterEffects();
+  rebuildPlaybackAtCurrentPosition();
   persist();
   render();
 }

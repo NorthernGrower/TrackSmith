@@ -70,6 +70,26 @@ enum LyricComposer {
         )
     }
 
+    static func rerollSection(_ title: String, genre: MusicGenre, topic: String, seed: UInt64) -> [String] {
+        var generator = SeededGenerator(seed: seed)
+        let bank = genre.lyrics
+        let topic = normalizedTopic(topic) ?? bank.imagery
+        switch title {
+        case "Verse 1", "Verse 2":
+            return makeVerse(bank, opening: nil, topic: topic, generator: &generator)
+        case "Chorus", "Final Chorus":
+            let hook = fill(pick(bank.hooks, &generator) ?? "This is the sound of letting go", topic: topic)
+            let second = fill(pick(bank.hooks, &generator) ?? hook, topic: topic)
+            return makeChorus(bank, hook: hook, secondHook: second, topic: topic, generator: &generator)
+        case "Bridge":
+            let first = fill(pick(bank.bridges, &generator) ?? "We find our way", topic: topic)
+            let second = fill(pick(bank.bridges, &generator) ?? first, topic: topic)
+            return makeBridge(bank, first: first, second: second, topic: topic, generator: &generator)
+        default:
+            return []
+        }
+    }
+
     // MARK: - Sections
 
     private static func makeVerse(

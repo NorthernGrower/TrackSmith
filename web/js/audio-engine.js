@@ -18,6 +18,7 @@ export class StudioEngine {
     this.buffers = new Map();
     this.session = null;
     this.groups = [];
+    this.transformedClipBuffers = new Map();
 
     this.isPlaying = false;
     this.position = 0;
@@ -28,6 +29,7 @@ export class StudioEngine {
     this.timer = null;
     this.sources = new Set();
     this.oscillators = new Set();
+    this.liveMIDINotes = new Set();
     this.sequencedDrumNodes = new Set();
     this.drumHitScheduler = null;
 
@@ -253,6 +255,7 @@ export class StudioEngine {
     const high = ctx.createBiquadFilter();
     high.type = 'highshelf';
     const comp = ctx.createDynamicsCompressor();
+    const effects = buildTrackEffects(ctx, comp);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 1024;
     const sendA = ctx.createGain();
@@ -267,17 +270,17 @@ export class StudioEngine {
     low.connect(mid);
     mid.connect(high);
     high.connect(comp);
-    comp.connect(analyser);
+    effects.output.connect(analyser);
     analyser.connect(this.masterGain);
 
     if (this.auxChain) {
-      comp.connect(sendA);
+      effects.output.connect(sendA);
       sendA.connect(this.auxChain.aInput);
-      comp.connect(sendB);
+      effects.output.connect(sendB);
       sendB.connect(this.auxChain.bInput);
     }
 
-    return { input, pan, low, mid, high, comp, analyser, sendA, sendB, meterData: new Float32Array(analyser.fftSize) };
+    return { input, pan, low, mid, high, comp, effects, analyser, sendA, sendB, meterData: new Float32Array(analyser.fftSize) };
   }
 
   notesForTrack(track) {
@@ -297,6 +300,10 @@ export class StudioEngine {
       nodes.mid.disconnect();
       nodes.high.disconnect();
       nodes.comp.disconnect();
+      Object.values(nodes.effects || {}).forEach((node) => {
+        try { node.disconnect(); } catch (error) { /* already disconnected */ }
+      });
+      try { nodes.effects?.chorusLFO?.stop(); } catch (error) { /* already stopped */ }
       nodes.analyser.disconnect();
       nodes.sendA?.disconnect();
       nodes.sendB?.disconnect();
@@ -329,6 +336,7 @@ export class StudioEngine {
     }
 
     if (nodes.pan) nodes.pan.pan.value = model.clamp(track.pan ?? 0, -1, 1);
+    applyTrackEffects(track, nodes.effects, this.session?.tempo ?? 120, this.isPlaying ? this.getPosition() : this.position, frozen);
   }
 
   updateMix(position) {
@@ -355,6 +363,7 @@ export class StudioEngine {
         const pan = automatedPan === null ? (track.pan ?? 0) : automatedPan;
         nodes.pan.pan.value = model.clamp(pan, -1, 1);
       }
+      applyTrackEffects(track, nodes.effects, this.session.tempo ?? 120, position, Boolean(track.frozen?.fileId));
     }
 
     this.masterGain.gain.value = this.session.masterVolume;
@@ -426,6 +435,8 @@ export class StudioEngine {
   }
 
   stopAll() {
+    for (const handle of this.liveMIDINotes) handle.stop();
+    this.liveMIDINotes.clear();
     for (const source of this.sources) {
       try { source.stop(); } catch (error) { /* stopped */ }
     }
@@ -468,6 +479,22 @@ export class StudioEngine {
     }
   }
 
+  clipBuffer(clip, sourceBuffer, context = this.ctx) {
+    const tempo = this.session?.tempo ?? 120;
+    const rate = model.clipPlaybackRate(clip, tempo);
+    const transpose = model.clamp(Math.round(Number(clip.transposeSemitones) || 0), -12, 12);
+    if (transpose === 0 && Math.abs(rate - 1) < 1e-6) return sourceBuffer;
+
+    const key = `${clip.fileId}:${Math.round(tempo)}:${clip.sourceTempoBPM ?? 'natural'}:${transpose}`;
+    if (this.transformedClipBuffers.has(key)) return this.transformedClipBuffers.get(key);
+    const transformed = transformClipBuffer(context, sourceBuffer, transpose, rate);
+    if (this.transformedClipBuffers.size >= 24) {
+      this.transformedClipBuffers.delete(this.transformedClipBuffers.keys().next().value);
+    }
+    this.transformedClipBuffers.set(key, transformed);
+    return transformed;
+  }
+
   scheduleRange(fromPos, toPos, atCtx) {
     if (!this.session) return;
 
@@ -476,11 +503,13 @@ export class StudioEngine {
       if (!nodes) continue;
 
       for (const clip of model.playbackClips(track)) {
-        const buffer = this.buffers.get(clip.fileId);
-        if (!buffer) continue;
+        const sourceBuffer = this.buffers.get(clip.fileId);
+        if (!sourceBuffer) continue;
+        const tempo = this.session.tempo ?? 120;
+        const buffer = this.clipBuffer(clip, sourceBuffer, this.ctx);
 
         const clipStart = Math.max(0, clip.start);
-        const playable = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+        const playable = model.clipTimelineDuration(clip, tempo);
         const clipEnd = clipStart + playable;
         const overlapStart = Math.max(fromPos, clipStart);
         const overlapEnd = Math.min(toPos, clipEnd);
@@ -490,7 +519,7 @@ export class StudioEngine {
         source.buffer = buffer;
         const fadeGain = this.ctx.createGain();
         const clipStartAbs = clipStart;
-        const gainAt = (time) => model.clipGainAt(clip, track, time);
+        const gainAt = (time) => model.clipGainAt(clip, track, time, tempo);
         const startGain = gainAt(overlapStart);
         fadeGain.gain.setValueAtTime(startGain, Math.max(this.ctx.currentTime, atCtx + (overlapStart - fromPos)));
         const fadeInEnd = clipStartAbs + Math.max(0, Number(clip.fadeIn) || 0);
@@ -504,10 +533,13 @@ export class StudioEngine {
         fadeGain.gain.linearRampToValueAtTime(gainAt(overlapEnd), Math.max(this.ctx.currentTime, atCtx + (overlapEnd - fromPos)));
         source.connect(fadeGain);
         fadeGain.connect(nodes.input);
-        const offset = clip.sourceStart + (overlapStart - clipStart);
+        const playbackRate = model.clipPlaybackRate(clip, tempo);
+        const offset = clip.sourceStart / playbackRate + (overlapStart - clipStart);
+        const segmentDuration = Math.min(overlapEnd - overlapStart, buffer.duration - offset);
         const when = Math.max(this.ctx.currentTime, atCtx + (overlapStart - fromPos));
+        if (segmentDuration <= 1e-4) continue;
         try {
-          source.start(when, offset, overlapEnd - overlapStart);
+          source.start(when, offset, segmentDuration);
         } catch (error) {
           continue;
         }
@@ -518,7 +550,7 @@ export class StudioEngine {
       for (const note of this.notesForTrack(track)) {
         if (note.start < fromPos || note.start >= toPos) continue;
         const when = atCtx + (note.start - fromPos);
-        this.scheduleNote(this.ctx, nodes.input, note, when);
+        this.scheduleNote(this.ctx, nodes.input, note, when, model.presetForTrack(track), track.guitarTone);
       }
     }
 
@@ -559,24 +591,126 @@ export class StudioEngine {
     }
   }
 
-  scheduleNote(ctx, destination, note, when) {
-    const duration = Math.max(0.08, note.duration);
+  scheduleNote(ctx, destination, note, when, preset, tone) {
+    const resolved = preset || model.defaultPresetFor('synth');
     const start = Math.max(ctx.currentTime, when);
-    const end = start + duration;
+    const duration = Math.max(0.08, note.duration);
+    const frequency = model.noteFrequency(note.pitch);
+    const velocity = model.clamp(Number(note.velocity ?? 0.8), 0.05, 1);
+
+    switch (resolved.voice) {
+      case 'piano':
+      case 'percussion':
+        return this.scheduleStruckNote(ctx, destination, frequency, start, duration, velocity, resolved);
+      case 'organ':
+        return this.scheduleOrganNote(ctx, destination, frequency, start, duration, velocity, resolved);
+      case 'strings':
+        return this.scheduleStringNote(ctx, destination, frequency, start, duration, velocity, resolved);
+      case 'acousticGuitar':
+      case 'electricGuitar':
+      case 'distortedGuitar':
+      case 'bassGuitar':
+        return this.schedulePluckedNote(ctx, destination, frequency, start, duration, velocity, resolved, tone);
+      case 'marleneVocal':
+        return this.scheduleVocalNote(ctx, destination, frequency, start, duration, velocity, resolved);
+      default:
+        return this.scheduleSynthNote(ctx, destination, frequency, start, duration, velocity, resolved);
+    }
+  }
+
+  startMIDINote(trackId, pitch, velocity, destination) {
+    const track = this.session?.tracks.find((item) => item.id === trackId);
+    if (!track || !destination) return null;
+    const preset = model.presetForTrack(track);
+    const note = {
+      pitch: Number(pitch),
+      velocity: model.clamp(Number(velocity), 0.05, 1),
+      duration: 120
+    };
+    const handle = this.scheduleNote(
+      this.ensureContext(),
+      destination,
+      note,
+      this.ctx.currentTime + 0.01,
+      preset,
+      track.guitarTone
+    );
+    if (handle) this.liveMIDINotes.add(handle);
+    return handle;
+  }
+
+  releaseMIDINote(handle) {
+    handle?.release?.();
+  }
+
+  trackOscillator(osc) {
+    this.oscillators.add(osc);
+    osc.onended = () => this.oscillators.delete(osc);
+  }
+
+  createNoteHandle(ctx, sources, envelopes, releaseSeconds) {
+    let released = false;
+    const handle = {
+      release: () => {
+        if (released) return;
+        released = true;
+        const now = ctx.currentTime;
+        const releaseTime = Math.max(0.02, Number(releaseSeconds) || 0.2);
+        const end = now + releaseTime;
+        for (const envelope of envelopes) {
+          const parameter = envelope.gain;
+          if (typeof parameter.cancelAndHoldAtTime === 'function') {
+            parameter.cancelAndHoldAtTime(now);
+          } else {
+            const current = Math.max(0.0001, parameter.value);
+            parameter.cancelScheduledValues(now);
+            parameter.setValueAtTime(current, now);
+          }
+          parameter.exponentialRampToValueAtTime(0.0001, end);
+        }
+        for (const source of sources) {
+          try { source.stop(end + 0.03); } catch (error) { /* already stopped */ }
+        }
+      },
+      stop: () => {
+        if (released) return;
+        released = true;
+        for (const source of sources) {
+          try { source.stop(); } catch (error) { /* already stopped */ }
+        }
+      }
+    };
+
+    const remaining = new Set(sources);
+    for (const source of sources) {
+      const previousOnEnded = source.onended;
+      source.onended = (event) => {
+        remaining.delete(source);
+        if (typeof previousOnEnded === 'function') previousOnEnded.call(source, event);
+        if (remaining.size === 0) this.liveMIDINotes.delete(handle);
+      };
+    }
+    return handle;
+  }
+
+  scheduleSynthNote(ctx, destination, frequency, start, duration, velocity, preset) {
+    const release = Math.max(0.02, preset.release);
+    const attack = Math.max(0.005, preset.attack);
+    const end = start + duration + release;
 
     const osc = ctx.createOscillator();
-    osc.type = SYNTH_WAVEFORM;
-    osc.frequency.value = model.noteFrequency(note.pitch);
+    osc.type = preset.waveform || 'sawtooth';
+    osc.frequency.value = frequency;
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = SYNTH_CUTOFF;
+    filter.frequency.value = model.clamp(preset.brightness, 120, ctx.sampleRate * 0.45);
 
     const env = ctx.createGain();
+    const peak = Math.max(0.0002, 0.18 * velocity * model.clamp(preset.level, 0.2, 1.4));
     env.gain.setValueAtTime(0.0001, start);
-    const peak = 0.18 * model.clamp(Number(note.velocity ?? 0.8), 0.05, 1);
-    env.gain.exponentialRampToValueAtTime(peak, start + Math.min(SYNTH_ATTACK, duration * 0.5));
-    env.gain.setValueAtTime(peak, Math.max(start + SYNTH_ATTACK + 0.001, end - SYNTH_RELEASE));
+    env.gain.exponentialRampToValueAtTime(peak, start + Math.min(attack, duration * 0.5));
+    env.gain.setValueAtTime(peak, Math.max(start + attack + 0.001, end - release));
     env.gain.exponentialRampToValueAtTime(0.0001, end);
 
     osc.connect(filter);
@@ -584,8 +718,222 @@ export class StudioEngine {
     env.connect(destination);
     osc.start(start);
     osc.stop(end + 0.02);
-    this.oscillators.add(osc);
-    osc.onended = () => this.oscillators.delete(osc);
+    this.trackOscillator(osc);
+    return this.createNoteHandle(ctx, [osc], [env], release);
+  }
+
+  /// Piano and tuned percussion: a small stack of partials, each decaying.
+  scheduleStruckNote(ctx, destination, frequency, start, duration, velocity, preset) {
+    const partials = preset.voice === 'percussion'
+      ? [[1, 1, 0.42], [4, 0.3, 0.22], [10, 0.08, 0.12]]
+      : [[1, 1, 0.9], [2, 0.42, 0.62], [3, 0.22, 0.46], [4, 0.12, 0.34], [6, 0.06, 0.24]];
+    const sustain = model.clamp(preset.sustain, 0.25, 2.5);
+    const level = model.clamp(preset.level, 0.2, 1.4) * velocity;
+    const attack = Math.max(0.002, preset.attack);
+    const release = Math.max(0.05, preset.release);
+    const gainSum = partials.reduce((sum, partial) => sum + partial[1], 0) || 1;
+    const normal = 0.34 / gainSum;
+    const sources = [];
+    const envelopes = [];
+
+    partials.forEach(([ratio, gain, decay]) => {
+      const ring = Math.max(0.12, decay * sustain + Math.min(duration, 2) * 0.3);
+      const end = start + Math.max(duration, ring) + release;
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = frequency * ratio;
+
+      const env = ctx.createGain();
+      const peak = Math.max(0.0002, normal * gain * level);
+      env.gain.setValueAtTime(0.0001, start);
+      env.gain.exponentialRampToValueAtTime(peak, start + attack);
+      env.gain.exponentialRampToValueAtTime(0.0001, start + ring);
+
+      osc.connect(env);
+      env.connect(destination);
+      osc.start(start);
+      osc.stop(end);
+      this.trackOscillator(osc);
+      sources.push(osc);
+      envelopes.push(env);
+    });
+    return this.createNoteHandle(ctx, sources, envelopes, release);
+  }
+
+  /// Drawbar organ: stacked sines held for the note, then released.
+  scheduleOrganNote(ctx, destination, frequency, start, duration, velocity, preset) {
+    const mix = model.clamp(preset.harmonic, 0, 1);
+    const drawbars = [[1, 1], [2, 0.5 + 0.5 * mix], [3, 0.28 * mix], [4, 0.2 * mix], [6, 0.12 * mix]];
+    const gainSum = drawbars.reduce((sum, bar) => sum + bar[1], 0) || 1;
+    const normal = 0.5 / gainSum;
+    const level = model.clamp(preset.level, 0.2, 1.4) * velocity;
+    const attack = Math.max(0.004, preset.attack);
+    const release = Math.max(0.02, preset.release);
+    const end = start + duration;
+    const holdEnd = Math.max(start + attack + 0.001, end - release);
+    const sources = [];
+    const envelopes = [];
+
+    drawbars.forEach(([ratio, gain]) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = frequency * ratio;
+
+      const env = ctx.createGain();
+      const peak = Math.max(0.0002, normal * gain * level);
+      env.gain.setValueAtTime(0.0001, start);
+      env.gain.exponentialRampToValueAtTime(peak, start + attack);
+      env.gain.setValueAtTime(peak, holdEnd);
+      env.gain.exponentialRampToValueAtTime(0.0001, end + release);
+
+      osc.connect(env);
+      env.connect(destination);
+      osc.start(start);
+      osc.stop(end + release + 0.02);
+      this.trackOscillator(osc);
+      sources.push(osc);
+      envelopes.push(env);
+    });
+    return this.createNoteHandle(ctx, sources, envelopes, release);
+  }
+
+  /// Bowed strings: three detuned saws through a low-pass with a slow attack.
+  scheduleStringNote(ctx, destination, frequency, start, duration, velocity, preset) {
+    const level = model.clamp(preset.level, 0.2, 1.4) * velocity;
+    const attack = Math.max(0.01, Math.min(preset.attack, duration * 0.6));
+    const release = Math.max(0.02, Math.min(preset.release, 0.9));
+    const end = start + duration;
+    const holdEnd = Math.max(start + attack + 0.001, end - release);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = model.clamp(preset.brightness, 200, ctx.sampleRate * 0.4);
+
+    const env = ctx.createGain();
+    const peak = Math.max(0.0002, 0.16 * level);
+    env.gain.setValueAtTime(0.0001, start);
+    env.gain.exponentialRampToValueAtTime(peak, start + attack);
+    env.gain.setValueAtTime(peak, holdEnd);
+    env.gain.exponentialRampToValueAtTime(0.0001, end + release);
+
+    filter.connect(env);
+    env.connect(destination);
+    const sources = [];
+
+    [-4, 0, 4].forEach((cents) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = frequency;
+      osc.detune.value = cents;
+      osc.connect(filter);
+      osc.start(start);
+      osc.stop(end + release + 0.02);
+      this.trackOscillator(osc);
+      sources.push(osc);
+    });
+    return this.createNoteHandle(ctx, sources, [env], release);
+  }
+
+  /// Plucked strings: a short filtered tone that decays like a picked string.
+  schedulePluckedNote(ctx, destination, frequency, start, duration, velocity, preset, tone) {
+    const safeTone = model.normalizeGuitarTone(tone);
+    const toneScale = (0.5 + safeTone.brightness) * (0.7 + 0.6 * safeTone.pickup);
+    const drive = 0.7 + safeTone.gain * 2.6;
+    const driveCompensation = 1 / (0.85 + safeTone.gain * 0.6);
+    const level = model.clamp(preset.level, 0.2, 1.4) * velocity;
+    const ring = model.clamp(0.5 * preset.sustain + Math.min(duration, 2) * 0.4, 0.2, 2.4);
+    const end = start + Math.max(duration, ring);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = model.clamp(preset.brightness * toneScale, 200, ctx.sampleRate * 0.4);
+
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = this.makeDriveCurve(drive);
+
+    const env = ctx.createGain();
+    const peak = Math.max(0.0002, 0.2 * level * driveCompensation);
+    env.gain.setValueAtTime(0.0001, start);
+    env.gain.exponentialRampToValueAtTime(peak, start + 0.004);
+    env.gain.exponentialRampToValueAtTime(0.0001, start + ring);
+
+    filter.connect(shaper);
+    shaper.connect(env);
+    env.connect(destination);
+
+    const sources = [];
+    [[1, 1], [2, 0.3]].forEach(([ratio, gain]) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = frequency * ratio;
+      const partialGain = ctx.createGain();
+      partialGain.gain.value = gain;
+      osc.connect(partialGain);
+      partialGain.connect(filter);
+      osc.start(start);
+      osc.stop(end + 0.05);
+      this.trackOscillator(osc);
+      sources.push(osc);
+    });
+    return this.createNoteHandle(ctx, sources, [env], Math.max(0.05, preset.release));
+  }
+
+  /// A soft saturation curve for the guitar amp's drive, 0.7 (clean) to 3.3.
+  makeDriveCurve(amount) {
+    const samples = 1024;
+    const curve = new Float32Array(samples);
+    const k = Math.max(0.001, amount);
+    for (let index = 0; index < samples; index += 1) {
+      const x = (index / (samples - 1)) * 2 - 1;
+      curve[index] = Math.tanh(k * x) / Math.tanh(k);
+    }
+    return curve;
+  }
+
+  /// Sung vowel: a saw through two formant filters.
+  scheduleVocalNote(ctx, destination, frequency, start, duration, velocity, preset) {
+    const level = model.clamp(preset.level, 0.2, 1.4) * velocity;
+    const attack = Math.max(0.01, Math.min(preset.attack, duration * 0.3));
+    const release = Math.max(0.02, Math.min(preset.release, 0.6));
+    const end = start + duration;
+    const holdEnd = Math.max(start + attack + 0.001, end - release);
+    const tilt = model.clamp(preset.brightness / 2600, 0.6, 1.4);
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = frequency;
+
+    const formantOne = ctx.createBiquadFilter();
+    formantOne.type = 'bandpass';
+    formantOne.frequency.value = 880 * tilt;
+    formantOne.Q.value = 6;
+
+    const formantTwo = ctx.createBiquadFilter();
+    formantTwo.type = 'bandpass';
+    formantTwo.frequency.value = 1260 * tilt;
+    formantTwo.Q.value = 8;
+
+    const formantGain = ctx.createGain();
+    formantGain.gain.value = 0.6;
+
+    const env = ctx.createGain();
+    const peak = Math.max(0.0002, 0.34 * level);
+    env.gain.setValueAtTime(0.0001, start);
+    env.gain.exponentialRampToValueAtTime(peak, start + attack);
+    env.gain.setValueAtTime(peak, holdEnd);
+    env.gain.exponentialRampToValueAtTime(0.0001, end + release);
+
+    osc.connect(formantOne);
+    osc.connect(formantTwo);
+    formantOne.connect(env);
+    formantTwo.connect(formantGain);
+    formantGain.connect(env);
+    env.connect(destination);
+
+    osc.start(start);
+    osc.stop(end + release + 0.02);
+    this.trackOscillator(osc);
+    return this.createNoteHandle(ctx, [osc], [env], release);
   }
 
   scheduleClicks(fromPos, toPos, atCtx) {
@@ -659,16 +1007,24 @@ export class StudioEngine {
 
   // ---------- Offline rendering ----------
 
-  async renderMix({ masterVolume = 1, singleTrackId = null, sampleRate = 44100, normalize = false } = {}) {
+  async renderMix({ masterVolume = 1, singleTrackId = null, sampleRate = 44100, normalize = false, rangeStart = 0, rangeEnd = null } = {}) {
     if (!this.session) throw new Error('There is no session to render.');
-    const duration = this.duration();
-    if (duration <= 0) throw new Error('There is nothing to render yet.');
+    const offset = Math.max(0, Number(rangeStart) || 0);
+    const sourceDuration = rangeEnd == null ? this.duration() : Math.max(0, Number(rangeEnd) - offset);
+    const tracks = singleTrackId
+      ? this.session.tracks.filter((track) => track.id === singleTrackId)
+      : this.session.tracks;
+    const tempo = this.session.tempo ?? 120;
+    const releaseTail = Math.max(0, ...tracks.map((track) => trackNoteReleaseTail(track, false, tempo)));
+    const effectsTail = trackEffectsTailDuration(tracks, tempo);
+    const duration = sourceDuration + releaseTail + effectsTail;
+    if (sourceDuration <= 0) throw new Error('There is nothing to render yet.');
 
     const buffer = await this.renderOffline({
       duration,
-      tracks: singleTrackId
-        ? this.session.tracks.filter((track) => track.id === singleTrackId)
-        : this.session.tracks,
+      sourceDuration,
+      offset,
+      tracks,
       masterVolume,
       sampleRate,
       includeMixer: true,
@@ -678,10 +1034,15 @@ export class StudioEngine {
   }
 
   async renderTrackFreeze(track) {
-    const duration = model.trackDuration(track);
-    if (duration <= 0) throw new Error('This track has nothing to freeze yet.');
+    const tempo = this.session?.tempo ?? 120;
+    const sourceDuration = model.trackDuration(track, tempo);
+    const releaseTail = trackNoteReleaseTail(track, true, tempo);
+    const effectsTail = trackEffectsTailDuration([track], tempo, true);
+    const duration = sourceDuration + releaseTail + effectsTail;
+    if (sourceDuration <= 0) throw new Error('This track has nothing to freeze yet.');
     return this.renderOffline({
       duration,
+      sourceDuration,
       tracks: [track],
       masterVolume: 1,
       includeMixer: false,
@@ -689,11 +1050,18 @@ export class StudioEngine {
     });
   }
 
-  async renderStem(track, { sampleRate = 44100, normalize = false } = {}) {
-    const duration = model.trackDuration(track);
-    if (duration <= 0) throw new Error('This track has nothing to render.');
+  async renderStem(track, { sampleRate = 44100, normalize = false, rangeStart = 0, rangeEnd = null } = {}) {
+    const offset = Math.max(0, Number(rangeStart) || 0);
+    const tempo = this.session?.tempo ?? 120;
+    const sourceDuration = rangeEnd == null ? model.trackDuration(track, tempo) : Math.max(0, Number(rangeEnd) - offset);
+    const releaseTail = trackNoteReleaseTail(track, false, tempo);
+    const effectsTail = trackEffectsTailDuration([track], tempo);
+    const duration = sourceDuration + releaseTail + effectsTail;
+    if (sourceDuration <= 0) throw new Error('This track has nothing to render.');
     const buffer = await this.renderOffline({
       duration,
+      sourceDuration,
+      offset,
       tracks: [track],
       masterVolume: this.session?.masterVolume ?? 1,
       sampleRate,
@@ -703,7 +1071,7 @@ export class StudioEngine {
     return normalize ? normalizeBuffer(buffer) : buffer;
   }
 
-  async renderOffline({ duration, tracks, masterVolume = 1, sampleRate = 44100, includeMixer = true, forceSource = false, frozenSource = null, applyMuteSolo = true }) {
+  async renderOffline({ duration, sourceDuration = duration, offset = 0, tracks, masterVolume = 1, sampleRate = 44100, includeMixer = true, forceSource = false, frozenSource = null, applyMuteSolo = true }) {
     const offline = new OfflineAudioContext(2, Math.ceil(duration * sampleRate) + 1024, sampleRate);
 
     const masterChain = buildMasterChain(offline, offline.destination, {
@@ -730,18 +1098,19 @@ export class StudioEngine {
         includeMixer,
         anySolo,
         duration,
+        offset,
         applyMuteSolo,
         groups: this.session?.groups || [],
         auxChain,
         forceSource
       });
-      this.scheduleOfflineTrack(offline, track, input, duration, forceSource);
+      this.scheduleOfflineTrack(offline, track, input, sourceDuration, forceSource, offset);
     }
 
     return offline.startRendering();
   }
 
-  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration, applyMuteSolo = true, groups = [], auxChain = null, forceSource = false }) {
+  buildOfflineTrack(ctx, track, destination, { includeMixer, anySolo, duration, offset = 0, applyMuteSolo = true, groups = [], auxChain = null, forceSource = false }) {
     const input = ctx.createGain();
     const group = groups.find((item) => item.trackIDs.includes(track.id));
     const mutedByGroup = group?.muted ?? false;
@@ -751,10 +1120,10 @@ export class StudioEngine {
 
     if (includeMixer) {
       const volume = audible ? track.volume * (group ? group.volume : 1) : 0;
-      input.gain.setValueAtTime(volume * model.automationGain(track, 0), 0);
+      input.gain.setValueAtTime(volume * model.automationGain(track, offset), 0);
       const step = 0.05;
       for (let time = step; time <= duration; time += step) {
-        const value = volume * model.automationGain(track, time);
+        const value = volume * model.automationGain(track, offset + time);
         input.gain.linearRampToValueAtTime(value, time);
       }
     } else {
@@ -794,7 +1163,7 @@ export class StudioEngine {
     let tail = input;
     if (includeMixer && typeof ctx.createStereoPanner === 'function') {
       const panner = ctx.createStereoPanner();
-      scheduleAutomatedPan(panner.pan, track, duration);
+      scheduleAutomatedPan(panner.pan, track, duration, offset);
       tail.connect(panner);
       tail = panner;
     }
@@ -803,63 +1172,188 @@ export class StudioEngine {
     low.connect(mid);
     mid.connect(high);
     high.connect(comp);
-    comp.connect(destination);
+    const effects = buildTrackEffects(ctx, comp);
+    applyTrackEffects(track, effects, this.session?.tempo ?? 120, offset, frozen);
+    effects.output.connect(destination);
 
     if (includeMixer && auxChain) {
       const sendLevel = (value) => (applyMuteSolo && !audible ? 0 : model.clamp(Number(value ?? 0), 0, 1));
       const sendA = ctx.createGain();
       sendA.gain.value = sendLevel(track.sendA);
-      comp.connect(sendA);
+      effects.output.connect(sendA);
       sendA.connect(auxChain.aInput);
 
       const sendB = ctx.createGain();
       sendB.gain.value = sendLevel(track.sendB);
-      comp.connect(sendB);
+      effects.output.connect(sendB);
       sendB.connect(auxChain.bInput);
     }
 
     return input;
   }
 
-  scheduleOfflineTrack(ctx, track, input, duration, forceSource) {
+  scheduleOfflineTrack(ctx, track, input, duration, forceSource, offset = 0) {
     const clips = forceSource ? track.clips : model.playbackClips(track);
     const sourceNotes = forceSource ? track.notes : model.sequencedNotes(track);
     const notes = model.arpeggiate(sourceNotes, track.arpeggiator, this.session?.tempo ?? 120);
+    const rangeEnd = offset + duration;
 
+    const tempo = this.session?.tempo ?? 120;
     for (const clip of clips) {
-      const buffer = this.buffers.get(clip.fileId);
-      if (!buffer) continue;
-      const playable = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+      const sourceBuffer = this.buffers.get(clip.fileId);
+      if (!sourceBuffer) continue;
+      const buffer = this.clipBuffer(clip, sourceBuffer, ctx);
+      const playable = model.clipTimelineDuration(clip, tempo);
       if (playable <= 0) continue;
+      const clipEnd = clip.start + playable;
+      const clipStart = Math.max(clip.start, offset);
+      const clippedEnd = Math.min(clipEnd, rangeEnd);
+      if (clippedEnd <= clipStart) continue;
+      const localStart = clipStart - offset;
+      const localEnd = clippedEnd - offset;
+      const playbackRate = model.clipPlaybackRate(clip, tempo);
+      const sourceOffset = clip.sourceStart / playbackRate + clipStart - clip.start;
+      const clippedDuration = Math.min(clippedEnd - clipStart, buffer.duration - sourceOffset);
+      if (clippedDuration <= 1e-4) continue;
 
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       const fadeGain = ctx.createGain();
-      const gainAt = (time) => model.clipGainAt(clip, track, time);
-      fadeGain.gain.setValueAtTime(gainAt(Math.max(0, clip.start)), Math.max(0, clip.start));
-      const fadeInEnd = Math.max(0, clip.start) + Math.max(0, Number(clip.fadeIn) || 0);
-      const fadeOutStart = Math.max(0, clip.start) + playable - Math.max(0, Number(clip.fadeOut) || 0);
-      if (fadeInEnd > clip.start) fadeGain.gain.linearRampToValueAtTime(gainAt(fadeInEnd), fadeInEnd);
-      if (fadeOutStart > clip.start) fadeGain.gain.linearRampToValueAtTime(gainAt(fadeOutStart), fadeOutStart);
-      fadeGain.gain.linearRampToValueAtTime(0, Math.max(0, clip.start) + playable);
+      const gainAt = (localTime) => model.clipGainAt(clip, track, offset + localTime, tempo);
+      fadeGain.gain.setValueAtTime(gainAt(localStart), localStart);
+      fadeGain.gain.linearRampToValueAtTime(gainAt(localEnd), localEnd);
       source.connect(fadeGain);
       fadeGain.connect(input);
       try {
-        source.start(Math.max(0, clip.start), clip.sourceStart, playable);
+        source.start(localStart, sourceOffset, clippedDuration);
       } catch (error) {
         continue;
       }
     }
 
     for (const note of notes) {
-      this.scheduleNote(ctx, input, note, Math.max(0, note.start));
+      if (note.start >= rangeEnd || note.start + note.duration <= offset) continue;
+      const clippedNote = { ...note, start: Math.max(0, note.start - offset) };
+      this.scheduleNote(ctx, input, clippedNote, clippedNote.start, model.presetForTrack(track), track.guitarTone);
     }
   }
 }
 
-function scheduleAutomatedPan(param, track, duration) {
+function transformClipBuffer(context, buffer, semitones, playbackRate) {
+  const pitchRatio = Math.pow(2, semitones / 12);
+  const pitched = Math.abs(pitchRatio - 1) < 1e-6
+    ? buffer
+    : resamplePitchBuffer(context, buffer, pitchRatio);
+  const stretchFactor = pitchRatio / playbackRate;
+  return Math.abs(stretchFactor - 1) < 1e-6
+    ? pitched
+    : stretchAudioBuffer(context, pitched, stretchFactor);
+}
+
+function resamplePitchBuffer(context, buffer, ratio) {
+  const outputLength = Math.max(1, Math.round(buffer.length / ratio));
+  const output = context.createBuffer(buffer.numberOfChannels, outputLength, buffer.sampleRate);
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const source = buffer.getChannelData(channel);
+    const destination = output.getChannelData(channel);
+    for (let index = 0; index < outputLength; index += 1) {
+      const position = Math.min(source.length - 1, index * ratio);
+      const lower = Math.floor(position);
+      const upper = Math.min(source.length - 1, lower + 1);
+      const blend = position - lower;
+      destination[index] = source[lower] * (1 - blend) + source[upper] * blend;
+    }
+  }
+  return output;
+}
+
+function stretchAudioBuffer(context, buffer, factor) {
+  const targetLength = Math.max(1, Math.round(buffer.length * factor));
+  const frameLength = Math.min(1024, buffer.length);
+  if (frameLength < 128) {
+    const output = context.createBuffer(buffer.numberOfChannels, targetLength, buffer.sampleRate);
+    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+      const source = buffer.getChannelData(channel);
+      const destination = output.getChannelData(channel);
+      for (let index = 0; index < targetLength; index += 1) {
+        const position = targetLength <= 1 ? 0 : (index / (targetLength - 1)) * Math.max(0, source.length - 1);
+        const lower = Math.floor(position);
+        const upper = Math.min(source.length - 1, lower + 1);
+        const blend = position - lower;
+        destination[index] = source[lower] * (1 - blend) + source[upper] * blend;
+      }
+    }
+    return output;
+  }
+
+  const hop = Math.floor(frameLength / 2);
+  const overlap = frameLength - hop;
+  const searchRadius = Math.min(96, Math.floor(overlap / 5));
+  const window = new Float32Array(frameLength);
+  for (let index = 0; index < frameLength; index += 1) {
+    window[index] = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / (frameLength - 1));
+  }
+
+  const sourceChannels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
+  const output = context.createBuffer(buffer.numberOfChannels, targetLength, buffer.sampleRate);
+  const accumulated = Array.from({ length: buffer.numberOfChannels }, (_, index) => output.getChannelData(index));
+  const weights = new Float32Array(targetLength);
+  let previousStart = 0;
+
+  for (let outputStart = 0; outputStart < targetLength; outputStart += hop) {
+    const maxSourceStart = Math.max(0, buffer.length - frameLength);
+    const expected = outputStart === 0 ? 0 : previousStart + hop / factor;
+    let sourceStart = Math.min(maxSourceStart, Math.max(0, Math.round(expected)));
+
+    if (outputStart > 0 && searchRadius > 0) {
+      let bestScore = -Infinity;
+      const center = sourceStart;
+      for (let delta = -searchRadius; delta <= searchRadius; delta += 4) {
+        const candidate = Math.min(maxSourceStart, Math.max(0, center + delta));
+        let score = 0;
+        for (let sample = 0; sample < overlap; sample += 16) {
+          const previousIndex = Math.min(buffer.length - 1, previousStart + hop + sample);
+          const candidateIndex = Math.min(buffer.length - 1, candidate + sample);
+          let previousValue = 0;
+          let candidateValue = 0;
+          for (let channel = 0; channel < sourceChannels.length; channel += 1) {
+            previousValue += sourceChannels[channel][previousIndex];
+            candidateValue += sourceChannels[channel][candidateIndex];
+          }
+          score += previousValue * candidateValue;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          sourceStart = candidate;
+        }
+      }
+    }
+
+    const usable = Math.min(frameLength, targetLength - outputStart);
+    for (let sample = 0; sample < usable; sample += 1) {
+      const destinationIndex = outputStart + sample;
+      const sourceIndex = Math.min(buffer.length - 1, sourceStart + sample);
+      const weight = window[sample];
+      weights[destinationIndex] += weight;
+      for (let channel = 0; channel < sourceChannels.length; channel += 1) {
+        accumulated[channel][destinationIndex] += sourceChannels[channel][sourceIndex] * weight;
+      }
+    }
+    previousStart = sourceStart;
+  }
+
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const destination = accumulated[channel];
+    for (let index = 0; index < targetLength; index += 1) {
+      destination[index] = weights[index] > 1e-5 ? accumulated[channel][index] / weights[index] : 0;
+    }
+  }
+  return output;
+}
+
+function scheduleAutomatedPan(param, track, duration, offset = 0) {
   const panAt = (time) => {
-    const automated = model.automationValue(track.panAutomation, time, 'pan');
+    const automated = model.automationValue(track.panAutomation, offset + time, 'pan');
     return model.clamp(automated === null ? (track.pan ?? 0) : automated, -1, 1);
   };
 
@@ -1158,4 +1652,147 @@ function normalizeBuffer(buffer) {
     }
   }
   return buffer;
+}
+
+
+
+function buildTrackEffects(ctx, input) {
+  const chorusDelay = ctx.createDelay(0.05);
+  chorusDelay.delayTime.value = 0.02;
+  const chorusDry = ctx.createGain();
+  const chorusWet = ctx.createGain();
+  const chorusOut = ctx.createGain();
+  const chorusLFO = ctx.createOscillator();
+  const chorusDepth = ctx.createGain();
+  chorusLFO.type = 'sine';
+  chorusLFO.frequency.value = 0.8;
+  chorusDepth.gain.value = 0.005;
+  chorusLFO.connect(chorusDepth);
+  chorusDepth.connect(chorusDelay.delayTime);
+  chorusLFO.start();
+
+  input.connect(chorusDry);
+  chorusDry.connect(chorusOut);
+  input.connect(chorusDelay);
+  chorusDelay.connect(chorusWet);
+  chorusWet.connect(chorusOut);
+
+  const distortion = ctx.createWaveShaper();
+  distortion.oversample = '4x';
+  const distortionDry = ctx.createGain();
+  const distortionWet = ctx.createGain();
+  const distortionOut = ctx.createGain();
+  distortionOut.channelCount = 2;
+  distortionOut.channelCountMode = 'explicit';
+  chorusOut.connect(distortionDry);
+  distortionDry.connect(distortionOut);
+  chorusOut.connect(distortion);
+  distortion.connect(distortionWet);
+  distortionWet.connect(distortionOut);
+
+  const stereoDelay = ctx.createDelay(4);
+  const delayFeedback = ctx.createGain();
+  const delayDry = ctx.createGain();
+  const delayWet = ctx.createGain();
+  const output = ctx.createGain();
+  distortionOut.connect(delayDry);
+  delayDry.connect(output);
+  distortionOut.connect(stereoDelay);
+  stereoDelay.connect(delayFeedback);
+  delayFeedback.connect(stereoDelay);
+  stereoDelay.connect(delayWet);
+  delayWet.connect(output);
+
+  return {
+    output,
+    chorusDelay,
+    chorusDry,
+    chorusWet,
+    chorusLFO,
+    chorusDepth,
+    chorusOut,
+    distortion,
+    distortionDry,
+    distortionWet,
+    distortionOut,
+    stereoDelay,
+    delayFeedback,
+    delayDry,
+    delayWet
+  };
+}
+
+function applyTrackEffects(track, effects, tempo, time, frozen = false) {
+  if (!effects) return;
+  const rack = model.normalizeTrackEffectsRack(track.effectsRack);
+  const chorusOn = !frozen && !rack.chorus.bypassed;
+  const chorusMix = chorusOn ? rack.chorus.mix : 0;
+  effects.chorusLFO.frequency.value = rack.chorus.rateHz;
+  effects.chorusDepth.gain.value = rack.chorus.depthMs / 1000;
+  effects.chorusDelay.delayTime.value = 0.02;
+  effects.chorusDry.gain.value = 1 - chorusMix;
+  effects.chorusWet.gain.value = chorusMix;
+
+  const distortionOn = !frozen && !rack.distortion.bypassed;
+  const distortionMix = distortionOn ? rack.distortion.mix : 0;
+  if (effects.distortionDriveDB !== rack.distortion.driveDB) {
+    effects.distortion.curve = makeTrackDistortionCurve(rack.distortion.driveDB);
+    effects.distortionDriveDB = rack.distortion.driveDB;
+  }
+  effects.distortionDry.gain.value = 1 - distortionMix;
+  effects.distortionWet.gain.value = distortionMix;
+
+  const delayOn = !frozen && !rack.stereoDelay.bypassed;
+  const delayMix = delayOn ? rack.stereoDelay.mix : 0;
+  const beatSeconds = 60 / Math.max(60, Number(tempo) || 120);
+  const delayTime = model.clamp(rack.stereoDelay.timeBeats * beatSeconds, 0.01, 2);
+  effects.stereoDelay.delayTime.value = delayTime;
+  const feedback = delayOn ? rack.stereoDelay.feedback : 0;
+  effects.delayFeedback.gain.value = feedback;
+  effects.delayDry.gain.value = 1 - delayMix;
+  effects.delayWet.gain.value = delayMix;
+}
+
+function makeTrackDistortionCurve(driveDB) {
+  const samples = 2_048;
+  const curve = new Float32Array(samples);
+  const amount = Math.pow(10, model.clamp(Number(driveDB) || 0, 0, 20) / 20);
+  const scale = 1 + amount * 0.45;
+  const normalizer = Math.tanh(scale);
+  for (let index = 0; index < samples; index += 1) {
+    const input = (index / (samples - 1)) * 2 - 1;
+    curve[index] = Math.tanh(scale * input) / normalizer;
+  }
+  return curve;
+}
+
+
+function trackNoteReleaseTail(track, forceSource = false, tempo = 120) {
+  const notes = forceSource ? (track.notes || []) : model.sequencedNotes(track);
+  if (!notes.length) return 0;
+  const preset = model.presetForTrack(track);
+  const release = Math.max(0, Number(preset.release) || 0);
+  const noteEnd = Math.max(...notes.map((note) => Number(note.start) + Number(note.duration) + release));
+  const clipEnd = (forceSource ? (track.clips || []) : model.playbackClips(track)).reduce((end, clip) => (
+    Math.max(end, Math.max(0, clip.start) + model.clipTimelineDuration(clip, tempo))
+  ), 0);
+  const sourceEnd = Math.max(clipEnd, ...notes.map((note) => Number(note.start) + Number(note.duration)));
+  return Math.max(0, noteEnd - sourceEnd);
+}
+
+function trackEffectsTailDuration(tracks, tempo, forceSource = false) {
+  return Math.max(0, ...tracks.map((track) => {
+    const frozen = !forceSource && Boolean(track.frozen?.fileId);
+    if (frozen) return 0;
+    const rack = model.normalizeTrackEffectsRack(track.effectsRack);
+    let tail = 0;
+    if (!rack.chorus.bypassed && rack.chorus.mix > 0) tail = Math.max(tail, 0.04);
+    if (!rack.stereoDelay.bypassed && rack.stereoDelay.mix > 0) {
+      const delayTime = model.clamp(rack.stereoDelay.timeBeats * 60 / Math.max(60, Number(tempo) || 120), 0.01, 2);
+      const feedback = rack.stereoDelay.feedback;
+      const repeats = feedback > 0 ? Math.max(1, Math.ceil(Math.log(0.001) / Math.log(feedback))) : 1;
+      tail = Math.max(tail, Math.min(8, delayTime * repeats));
+    }
+    return tail;
+  }));
 }

@@ -112,6 +112,7 @@ final class MixerViewModel: ObservableObject {
     nonisolated(unsafe) private var playbackTask: Task<Void, Never>?
     nonisolated(unsafe) private var drumSequencerTask: Task<Void, Never>?
     nonisolated(unsafe) private var samplePreviewTask: Task<Void, Never>?
+    nonisolated(unsafe) private var clipPreviewTask: Task<Void, Never>?
     nonisolated(unsafe) private var countInTask: Task<Void, Never>?
     private var undoStack: [[UndoTrackState]] = []
     private var redoStack: [[UndoTrackState]] = []
@@ -206,6 +207,7 @@ final class MixerViewModel: ObservableObject {
         playbackTask?.cancel()
         drumSequencerTask?.cancel()
         samplePreviewTask?.cancel()
+        clipPreviewTask?.cancel()
         countInTask?.cancel()
     }
 
@@ -762,6 +764,13 @@ final class MixerViewModel: ObservableObject {
         commitSession()
     }
 
+    func setTrackEffects(_ id: UUID, settings: TrackEffectsRack) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        tracks[index].effectsRack = settings
+        engine.updateTrackEffects(trackID: id, settings: settings)
+        commitSession()
+    }
+
     func commitSession() {
         finishUndoableEdit()
         persistActiveSession()
@@ -811,13 +820,50 @@ final class MixerViewModel: ObservableObject {
         activateSession(session)
     }
 
+    func replaceGeneratedVocalSection(_ generated: StudioSession, sectionName: String) {
+        guard let section = sections.first(where: { $0.name == sectionName }) else { return }
+        let start = section.time
+        guard let end = sections.filter({ $0.time > start }).map(\.time).min() else { return }
+        let generatedTracksByName = Dictionary(uniqueKeysWithValues: generated.tracks.filter { $0.voice == .marleneVocal }.map { ($0.name, $0) })
+        for index in tracks.indices where tracks[index].voice == .marleneVocal {
+            guard let replacement = generatedTracksByName[tracks[index].name] else { continue }
+            tracks[index].notes.removeAll { $0.startTime >= start && $0.startTime < end }
+            tracks[index].notes.append(contentsOf: replacement.notes.filter { $0.startTime >= start && $0.startTime < end })
+            tracks[index].notes.sort { $0.startTime < $1.startTime }
+        }
+        engine.updateMix(tracks: tracks)
+        commitSession()
+    }
+
     /// Captures the current session's arrangement notes with a new voice.
     func setVoice(_ trackID: UUID, voice: TrackVoiceKind) {
         guard let index = tracks.firstIndex(where: { $0.id == trackID }), tracks[index].voice != voice else {
             return
         }
         tracks[index].voice = voice
+        tracks[index].presetID = nil
         engine.load(tracks: tracks)
+        commitSession()
+    }
+
+    /// Switches a track to a named sound, changing its instrument when needed.
+    func setInstrumentPreset(_ presetID: String, for trackID: UUID) {
+        guard let preset = InstrumentPresetLibrary.preset(id: presetID),
+              let index = tracks.firstIndex(where: { $0.id == trackID }),
+              tracks[index].voice != preset.voice || tracks[index].presetID != preset.id else { return }
+        beginUndoableEdit()
+        tracks[index].voice = preset.voice
+        tracks[index].presetID = preset.id
+        engine.load(tracks: tracks)
+        commitSession()
+    }
+
+    /// Applies the amp and pickup tone a guitar track plays with.
+    func updateGuitarTone(_ tone: GuitarTone, for trackID: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }),
+              tracks[index].guitarTone != tone else { return }
+        tracks[index].guitarTone = tone
+        engine.updateMix(tracks: tracks)
         commitSession()
     }
 
@@ -1325,6 +1371,9 @@ final class MixerViewModel: ObservableObject {
         tempoBPM = clamped
         engine.setTempo(clamped)
         engine.updateMasterEffects(masterEffects, tempoBPM: clamped)
+        duration = engine.duration
+        currentTime = duration > 0 ? min(currentTime, duration) : currentTime
+        applyLoopChangeToEngine()
         persistActiveSession()
     }
 
@@ -1350,6 +1399,71 @@ final class MixerViewModel: ObservableObject {
                 format: format
               ) else { return }
         engine.playInstrumentBuffer(buffer, destinationTrackID: destinationTrackID)
+    }
+
+    /// Plays a live MIDI note through the selected track's preset and mixer path.
+    func playMIDINote(pitch: Int, velocity: Int, channel: Int, destinationTrackID: UUID?) {
+        guard let trackID = destinationTrackID,
+              let track = tracks.first(where: { $0.id == trackID }),
+              let format = engine.instrumentFormat(for: trackID) else { return }
+        let noteVelocity = Float(min(127, max(1, velocity))) / 127
+        let duration: TimeInterval
+        switch track.voice {
+        case .synth, .strings, .organ, .marleneVocal:
+            duration = 6
+        case .piano, .percussion, .acousticGuitar, .electricGuitar, .distortedGuitar, .bassGuitar:
+            duration = 2.4
+        }
+        guard let buffer = InstrumentSoundGenerator.voicedNote(
+            frequency: SynthNote.frequency(for: pitch),
+            voice: track.voice,
+            preset: track.renderPreset,
+            tone: track.guitarTone,
+            duration: duration,
+            velocity: noteVelocity,
+            format: format
+        ) else { return }
+        engine.playMIDINote(
+            buffer,
+            pitch: pitch,
+            channel: channel,
+            destinationTrackID: trackID
+        )
+    }
+
+    func stopMIDINote(pitch: Int, channel: Int, destinationTrackID: UUID?) {
+        guard let destinationTrackID else { return }
+        engine.stopMIDINote(pitch: pitch, channel: channel, trackID: destinationTrackID)
+    }
+
+    func stopAllMIDINotes() {
+        engine.stopAllMIDINotes()
+    }
+
+    /// Plays a short "aah" chord in Marlene's voice so the songwriter's
+    /// range, delivery, vibrato and harmony choices can be heard.
+    func auditionVocal(_ settings: VocalSettings) {
+        guard let format = engine.instrumentFormat(for: nil) else { return }
+        engine.stopPreviews()
+
+        var preset = settings.delivery.preset
+        preset.vibrato = settings.vibratoDepth
+
+        let basePitch = 64 + settings.range.semitoneOffset
+        let intervals = [0, 4, -5]
+
+        for partIndex in 0..<settings.partCount {
+            let pitch = basePitch + intervals[min(partIndex, intervals.count - 1)]
+            guard let buffer = InstrumentSoundGenerator.voicedNote(
+                frequency: SynthNote.frequency(for: pitch),
+                voice: .marleneVocal,
+                preset: preset,
+                duration: 1.5,
+                velocity: partIndex == 0 ? 0.8 : 0.45,
+                format: format
+            ) else { continue }
+            engine.playInstrumentBuffer(buffer, destinationTrackID: nil)
+        }
     }
 
     func playDrumPad(
@@ -1703,7 +1817,7 @@ final class MixerViewModel: ObservableObject {
     func setClipFades(trackID: UUID, clipID: UUID, fadeIn: TimeInterval, fadeOut: TimeInterval) {
         guard let trackIndex = tracks.firstIndex(where: { $0.id == trackID }),
               let clipIndex = tracks[trackIndex].clips.firstIndex(where: { $0.id == clipID }) else { return }
-        let duration = tracks[trackIndex].clips[clipIndex].duration
+        let duration = tracks[trackIndex].clips[clipIndex].timelineDuration(tempoBPM: tempoBPM)
         tracks[trackIndex].clips[clipIndex].fadeIn = min(max(0, fadeIn), max(0, duration - 0.01))
         tracks[trackIndex].clips[clipIndex].fadeOut = min(max(0, fadeOut), max(0, duration - tracks[trackIndex].clips[clipIndex].fadeIn - 0.01))
         engine.updateMix(tracks: tracks)
@@ -1713,6 +1827,47 @@ final class MixerViewModel: ObservableObject {
     // MARK: - Take lane
     @Published private(set) var auditioningTakeID: UUID?
     private var takeAuditionPlayer: AVAudioPlayer?
+
+    private func cancelClipPreview() {
+        clipPreviewTask?.cancel()
+        clipPreviewTask = nil
+    }
+
+    /// Starts playback from the selected clip and stops when that clip ends.
+    func previewClip(trackID: UUID, clipID: UUID) {
+        guard let track = tracks.first(where: { $0.id == trackID }),
+              let clip = track.clips.first(where: { $0.id == clipID }) else { return }
+        clipPreviewTask?.cancel()
+        seek(to: clip.startTime)
+        beginPlayback()
+        let length = clip.timelineDuration(tempoBPM: tempoBPM)
+        clipPreviewTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(max(0.1, length)))
+            guard let self, !Task.isCancelled else { return }
+            self.clipPreviewTask = nil
+            self.pause()
+        }
+    }
+
+    /// Changes a clip's pitch without changing its stored source audio.
+    func setClipTransposeSemitones(trackID: UUID, clipID: UUID, semitones: Int) {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
+        let bounded = min(12, max(-12, semitones))
+        guard tracks[location.track].clips[location.clip].transposeSemitones != bounded else { return }
+        beginUndoableEdit()
+        tracks[location.track].clips[location.clip].transposeSemitones = bounded
+        commitClipChanges()
+    }
+
+    /// Sets or clears the source tempo used for non-destructive session sync.
+    func setClipSourceTempo(trackID: UUID, clipID: UUID, bpm: Double?) {
+        guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
+        let bounded = bpm.map { min(200, max(60, $0)) }
+        guard tracks[location.track].clips[location.clip].sourceTempoBPM != bounded else { return }
+        beginUndoableEdit()
+        tracks[location.track].clips[location.clip].sourceTempoBPM = bounded
+        commitClipChanges()
+    }
 
     /// Adds a recorded pass to the take lane and places it on the timeline,
     /// leaving the previous active take in the lane untouched.
@@ -1867,7 +2022,9 @@ final class MixerViewModel: ObservableObject {
         let auxBusAToBounce = auxBusA
         let auxBusBToBounce = auxBusB
         let tempoToBounce = tempoBPM
+        let timeRangeToBounce: ClosedRange<TimeInterval>? = settings.range == .loopRange && hasLoopRange ? loopStart...loopEnd : nil
         let settingsToBounce = settings
+        let sessionNameToBounce = sessionName
         let progressUpdate: @Sendable (Double) -> Void = { [weak self] fraction in
             Task { @MainActor [weak self] in
                 self?.bounceProgress = fraction
@@ -1887,11 +2044,13 @@ final class MixerViewModel: ObservableObject {
                         auxBusA: auxBusAToBounce,
                         auxBusB: auxBusBToBounce,
                         tempoBPM: tempoToBounce,
+                        timeRange: timeRangeToBounce,
                         settings: settingsToBounce,
                         to: outputURL,
                         progress: progressUpdate
                     )
                 }.value
+                MixExportStorage.registerExport(at: outputURL, kind: .mix, sessionName: sessionNameToBounce)
                 refreshExports()
                 lastExportURL = outputURL
                 bounceProgress = 1
@@ -1905,15 +2064,37 @@ final class MixerViewModel: ObservableObject {
         }
     }
 
-    /// Renders every track as its own stem, through its mixer settings and the master.
-    func bounceStems(settings: BounceSettings) {
+    /// Tracks with renderable audio or notes in the selected bounce range.
+    func eligibleStemTracks(for settings: BounceSettings) -> [Track] {
+        let timeRangeToBounce: ClosedRange<TimeInterval>? = settings.range == .loopRange && hasLoopRange ? loopStart...loopEnd : nil
+        return tracks.filter { track in
+            guard audibleDuration(of: track) > 0 else { return false }
+            guard let timeRangeToBounce else { return true }
+            let hasClip = track.playbackClips.contains { clip in
+                clip.startTime < timeRangeToBounce.upperBound
+                    && clip.startTime + clip.timelineDuration(tempoBPM: tempoBPM) > timeRangeToBounce.lowerBound
+            }
+            let hasNotes = track.playedNotes(tempoBPM: tempoBPM).contains { note in
+                note.startTime < timeRangeToBounce.upperBound && note.endTime > timeRangeToBounce.lowerBound
+            }
+            return hasClip || hasNotes
+        }
+    }
+
+    /// Renders selected tracks as individual stems, through their mixer settings and the master.
+    func bounceStems(settings: BounceSettings, selectedTrackIDs: Set<UUID>? = nil) {
         guard !isBouncing else { return }
 
-        let tracksToRender = tracks.filter { audibleDuration(of: $0) > 0 }
+        let tracksToRender = eligibleStemTracks(for: settings).filter { track in
+            selectedTrackIDs?.contains(track.id) ?? true
+        }
         guard !tracksToRender.isEmpty else {
-            bounceError = "There are no tracks with audio or notes to export."
+            bounceError = eligibleStemTracks(for: settings).isEmpty
+                ? "There are no tracks with audio or notes to export."
+                : "Select at least one track to export."
             return
         }
+        let timeRangeToBounce: ClosedRange<TimeInterval>? = settings.range == .loopRange && hasLoopRange ? loopStart...loopEnd : nil
 
         bounceSettings = settings
         BounceSettingsStorage.save(settings)
@@ -1928,13 +2109,17 @@ final class MixerViewModel: ObservableObject {
         let effects = masterEffects
         let chain = mastering
         let tempo = tempoBPM
+        let sessionNameToBounce = sessionName
         let baseName = settings.fileName
         let settingsToBounce = settings
         let groupsToBounce = groups
+        let archiveURL = MixExportStorage.exportURL(name: "\(baseName)-Stems", fileExtension: "zip")
 
         Task {
+            var lastURL: URL?
+            var isCreatingArchive = false
             do {
-                var lastURL: URL?
+                var archiveStems: [StemArchiveAudio] = []
                 for (index, track) in tracksToRender.enumerated() {
                     let stemURL = MixExportStorage.exportURL(
                         name: "\(baseName)-\(track.name)",
@@ -1958,22 +2143,53 @@ final class MixerViewModel: ObservableObject {
                             masterEffects: effects,
                             mastering: chain,
                             tempoBPM: tempo,
+                            timeRange: timeRangeToBounce,
                             settings: settingsToBounce,
                             to: stemURL,
                             progress: progressUpdate
                         )
                     }.value
 
+                    let audioFile = try AVAudioFile(forReading: stemURL)
+                    let sampleRate = audioFile.processingFormat.sampleRate
+                    MixExportStorage.registerExport(at: stemURL, kind: .stem, sessionName: sessionNameToBounce)
+                    archiveStems.append(StemArchiveAudio(
+                        trackName: track.name,
+                        fileURL: stemURL,
+                        duration: sampleRate > 0 ? TimeInterval(audioFile.length) / sampleRate : 0
+                    ))
                     lastURL = stemURL
                 }
+
+                bounceProgress = 0.98
+                bounceStatus = "Bundling stems…"
+                isCreatingArchive = true
+                let stemsToArchive = archiveStems
+                try await Task.detached(priority: .utility) {
+                    try StemArchive.create(
+                        sessionName: sessionNameToBounce,
+                        tempoBPM: tempo,
+                        stems: stemsToArchive,
+                        to: archiveURL
+                    )
+                }.value
+                MixExportStorage.registerExport(at: archiveURL, kind: .stemArchive, sessionName: sessionNameToBounce)
 
                 refreshExports()
                 lastExportURL = lastURL
                 bounceProgress = 1
-                bounceStatus = "Stems complete"
+                bounceStatus = "Stems and archive complete"
             } catch {
-                bounceError = (error as? LocalizedError)?.errorDescription ?? "The stems could not be bounced."
-                bounceStatus = "Bounce failed"
+                try? FileManager.default.removeItem(at: archiveURL)
+                if lastURL != nil {
+                    refreshExports()
+                    lastExportURL = lastURL
+                }
+                let errorDescription = (error as? LocalizedError)?.errorDescription ?? "The stems could not be bounced."
+                bounceError = isCreatingArchive
+                    ? "The stems were saved, but the ZIP archive could not be created: \(errorDescription)"
+                    : errorDescription
+                bounceStatus = isCreatingArchive ? "Archive failed" : "Bounce failed"
             }
             isBouncing = false
             isStemBounce = false
@@ -1982,7 +2198,7 @@ final class MixerViewModel: ObservableObject {
 
     private func audibleDuration(of track: Track) -> TimeInterval {
         let clipEnd = track.playbackClips.map { clip in
-            max(0, clip.startTime) + min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+            max(0, clip.startTime) + clip.timelineDuration(tempoBPM: tempoBPM)
         }.max() ?? 0
         let noteEnd = track.playedNotes(tempoBPM: tempoBPM).map(\.endTime).max() ?? 0
         return max(clipEnd, noteEnd)
@@ -2079,16 +2295,18 @@ final class MixerViewModel: ObservableObject {
         snapInterval: TimeInterval
     ) {
         guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
-        let minimumStart = max(0, original.startTime - original.sourceStartTime)
-        let latestStart = original.startTime + original.duration - 0.05
+        let rate = original.playbackRate(tempoBPM: tempoBPM)
+        let minimumStart = max(0, original.startTime - original.sourceStartTime / rate)
+        let latestStart = original.startTime + original.timelineDuration(tempoBPM: tempoBPM) - 0.05
         guard latestStart >= minimumStart else { return }
 
         let newStart = min(max(minimumStart, snappedTime(proposedStartTime, interval: snapInterval)), latestStart)
-        let delta = newStart - original.startTime
+        let timelineDelta = newStart - original.startTime
+        let sourceDelta = timelineDelta * rate
         var clip = original
         clip.startTime = newStart
-        clip.sourceStartTime = max(0, original.sourceStartTime + delta)
-        clip.duration = original.duration - delta
+        clip.sourceStartTime = max(0, original.sourceStartTime + sourceDelta)
+        clip.duration = original.duration - sourceDelta
         beginUndoableEdit()
         tracks[location.track].clips[location.clip] = clip
     }
@@ -2101,14 +2319,20 @@ final class MixerViewModel: ObservableObject {
         snapInterval: TimeInterval
     ) {
         guard let location = clipLocation(trackID: trackID, clipID: clipID) else { return }
-        let minimumDuration = min(0.05, original.duration)
-        let maximumDuration = max(0, original.sourceDuration - original.sourceStartTime)
-        guard maximumDuration >= minimumDuration else { return }
+        let rate = original.playbackRate(tempoBPM: tempoBPM)
+        let currentTimelineDuration = original.timelineDuration(tempoBPM: tempoBPM)
+        let minimumDuration = min(0.05, currentTimelineDuration)
+        let maximumSourceDuration = max(0, original.sourceDuration - original.sourceStartTime)
+        let maximumTimelineDuration = maximumSourceDuration / rate
+        guard maximumTimelineDuration >= minimumDuration else { return }
 
         let snappedEnd = snappedTime(proposedEndTime, interval: snapInterval)
-        let newEnd = min(max(original.startTime + minimumDuration, snappedEnd), original.startTime + maximumDuration)
+        let newEnd = min(
+            max(original.startTime + minimumDuration, snappedEnd),
+            original.startTime + maximumTimelineDuration
+        )
         var clip = original
-        clip.duration = newEnd - original.startTime
+        clip.duration = (newEnd - original.startTime) * rate
         beginUndoableEdit()
         tracks[location.track].clips[location.clip] = clip
     }
@@ -2118,18 +2342,20 @@ final class MixerViewModel: ObservableObject {
         let clip = tracks[location.track].clips[location.clip]
         let splitTime = snappedTime(time, interval: snapInterval)
         let splitOffset = splitTime - clip.startTime
-        guard splitOffset >= 0.05, splitOffset <= clip.duration - 0.05 else { return nil }
+        let sourceSplitOffset = clip.sourceOffset(forTimelineOffset: splitOffset, tempoBPM: tempoBPM)
+        let timelineDuration = clip.timelineDuration(tempoBPM: tempoBPM)
+        guard splitOffset >= 0.05, splitOffset <= timelineDuration - 0.05 else { return nil }
 
         beginUndoableEdit()
         var left = clip
-        left.duration = splitOffset
+        left.duration = sourceSplitOffset
 
         var right = clip
         right.id = UUID()
         right.name = "\(clip.name) B"
         right.startTime = splitTime
-        right.sourceStartTime = clip.sourceStartTime + splitOffset
-        right.duration = clip.duration - splitOffset
+        right.sourceStartTime = clip.sourceStartTime + sourceSplitOffset
+        right.duration = clip.duration - sourceSplitOffset
 
         tracks[location.track].clips[location.clip] = left
         tracks[location.track].clips.insert(right, at: location.clip + 1)
@@ -2143,7 +2369,10 @@ final class MixerViewModel: ObservableObject {
         var duplicate = tracks[location.track].clips[location.clip]
         duplicate.id = UUID()
         duplicate.name = "\(duplicate.name) Copy"
-        duplicate.startTime = snappedTime(duplicate.startTime + duplicate.duration, interval: snapInterval)
+        duplicate.startTime = snappedTime(
+            duplicate.startTime + duplicate.timelineDuration(tempoBPM: tempoBPM),
+            interval: snapInterval
+        )
         tracks[location.track].clips.insert(duplicate, at: location.clip + 1)
         commitClipChanges()
         return duplicate.id
@@ -2163,6 +2392,7 @@ final class MixerViewModel: ObservableObject {
         let resumeTime = engine.currentTime
         engine.load(tracks: tracks)
         duration = engine.duration
+        applyLoopChangeToEngine()
         currentTime = min(max(0, resumeTime), duration)
         engine.seek(to: currentTime)
         if wasPlaying {
@@ -2358,6 +2588,7 @@ final class MixerViewModel: ObservableObject {
     }
 
     func pause() {
+        cancelClipPreview()
         cancelCountIn()
         stopDrumSequencer()
         if isRecordingInstrument {
@@ -2369,6 +2600,7 @@ final class MixerViewModel: ObservableObject {
     }
 
     func stop() {
+        cancelClipPreview()
         cancelCountIn()
         stopDrumSequencer()
         if isRecordingInstrument {
@@ -2468,7 +2700,8 @@ final class MixerViewModel: ObservableObject {
         var keptClips: [AudioClip] = []
         for clip in track.clips {
             let start = max(0, clip.startTime)
-            let playable = min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+            let rate = clip.playbackRate(tempoBPM: tempoBPM)
+            let playable = clip.timelineDuration(tempoBPM: tempoBPM)
             let end = start + playable
             let cutStart = punchIn + crossFade
             let cutEnd = punchOut - crossFade
@@ -2478,14 +2711,15 @@ final class MixerViewModel: ObservableObject {
             }
             if start < cutStart {
                 var left = clip
-                left.duration = cutStart - start
+                left.duration = (cutStart - start) * rate
                 keptClips.append(left)
             }
             if end > cutEnd {
                 var right = clip
                 right.startTime = cutEnd
-                right.duration = end - cutEnd
-                right.sourceStartTime += (cutEnd - start)
+                let sourceOffset = (cutEnd - start) * rate
+                right.duration = (end - cutEnd) * rate
+                right.sourceStartTime += sourceOffset
                 keptClips.append(right)
             }
         }

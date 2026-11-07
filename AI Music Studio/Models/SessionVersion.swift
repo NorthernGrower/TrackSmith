@@ -50,7 +50,7 @@ extension StudioSession {
         var end: TimeInterval = 0
         for track in tracks {
             for clip in track.playbackClips {
-                let playable = min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+                let playable = clip.timelineDuration(tempoBPM: tempoBPM)
                 end = max(end, clip.startTime + playable)
             }
             for note in track.playedNotes(tempoBPM: tempoBPM) {

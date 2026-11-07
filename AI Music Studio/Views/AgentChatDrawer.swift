@@ -11,6 +11,7 @@ struct AgentChatDrawer: View {
     var onClose: () -> Void
 
     @FocusState private var isInputFocused: Bool
+    @StateObject private var speech = SpeechPromptRecognizer()
 
     private struct Bubble: View {
         let message: ChatMessage
@@ -52,6 +53,10 @@ struct AgentChatDrawer: View {
                 isInputFocused = true
             }
         }
+        .onChange(of: speech.transcript) { _, transcript in
+            if speech.isListening, !transcript.isEmpty { chat.draft = transcript }
+        }
+        .onDisappear { speech.stop() }
     }
 
     private var header: some View {
@@ -59,7 +64,7 @@ struct AgentChatDrawer: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Studio Agent")
                     .font(.headline)
-                Text("Ask for mixer changes in plain language")
+                Text("\(chat.currentContext) · type or dictate an edit")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -104,26 +109,61 @@ struct AgentChatDrawer: View {
     }
 
     private var inputBar: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Tell the agent what to change…", text: $chat.draft, axis: .vertical)
-                .font(.subheadline)
-                .lineLimit(1...4)
-                .focused($isInputFocused)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(Color.studioPanelHighlight, in: RoundedRectangle(cornerRadius: 14))
-                .submitLabel(.send)
-                .onSubmit { chat.send() }
-                .accessibilityLabel("Message the studio agent")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Ask the studio AI to edit…", text: $chat.draft, axis: .vertical)
+                    .font(.subheadline)
+                    .lineLimit(1...4)
+                    .focused($isInputFocused)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.studioPanelHighlight, in: RoundedRectangle(cornerRadius: 14))
+                    .submitLabel(.send)
+                    .onSubmit {
+                        speech.stop()
+                        chat.send()
+                    }
+                    .accessibilityLabel("Message the studio AI assistant")
 
-            Button(action: chat.send) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(canSend ? Color.studioAccent : Color.secondary)
+                Button {
+                    if speech.isListening {
+                        speech.stop()
+                    } else {
+                        isInputFocused = false
+                        chat.draft = ""
+                        speech.start()
+                    }
+                } label: {
+                    Image(systemName: speech.isListening ? "stop.circle.fill" : "mic.fill")
+                        .font(.title3)
+                        .foregroundStyle(speech.isListening ? Color.red : Color.studioAccent)
+                }
+                .buttonStyle(.plain)
+                .disabled(chat.isWaiting)
+                .accessibilityLabel(speech.isListening ? "Stop voice prompt" : "Start voice prompt")
+
+                Button {
+                    speech.stop()
+                    chat.send()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(canSend ? Color.studioAccent : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .accessibilityLabel("Send message")
             }
-            .buttonStyle(.plain)
-            .disabled(!canSend)
-            .accessibilityLabel("Send message")
+
+            if speech.isListening {
+                Text("Listening… Speak your edit, then tap Send.")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color.studioAccent)
+            } else if let errorMessage = speech.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.red)
+            }
         }
         .padding(12)
         .background(Color.studioPanel)

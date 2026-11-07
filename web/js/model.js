@@ -81,6 +81,41 @@ function defaultCompressor() {
   };
 }
 
+function defaultTrackEffectsRack() {
+  return {
+    chorus: { bypassed: true, rateHz: 0.8, depthMs: 5, mix: 0.25 },
+    distortion: { bypassed: true, driveDB: 8, mix: 0.35 },
+    stereoDelay: { bypassed: true, timeBeats: 0.5, feedback: 0.3, mix: 0.25 }
+  };
+}
+
+export function normalizeTrackEffectsRack(rack) {
+  const defaults = defaultTrackEffectsRack();
+  const value = rack && typeof rack === 'object' ? rack : {};
+  const chorus = value.chorus && typeof value.chorus === 'object' ? value.chorus : {};
+  const distortion = value.distortion && typeof value.distortion === 'object' ? value.distortion : {};
+  const stereoDelay = value.stereoDelay && typeof value.stereoDelay === 'object' ? value.stereoDelay : {};
+  return {
+    chorus: {
+      bypassed: chorus.bypassed !== false,
+      rateHz: clamp(Number(chorus.rateHz ?? defaults.chorus.rateHz), 0.1, 5),
+      depthMs: clamp(Number(chorus.depthMs ?? defaults.chorus.depthMs), 0, 12),
+      mix: clamp(Number(chorus.mix ?? defaults.chorus.mix), 0, 1)
+    },
+    distortion: {
+      bypassed: distortion.bypassed !== false,
+      driveDB: clamp(Number(distortion.driveDB ?? defaults.distortion.driveDB), 0, 20),
+      mix: clamp(Number(distortion.mix ?? defaults.distortion.mix), 0, 1)
+    },
+    stereoDelay: {
+      bypassed: stereoDelay.bypassed !== false,
+      timeBeats: clamp(Number(stereoDelay.timeBeats ?? defaults.stereoDelay.timeBeats), 0.25, 2),
+      feedback: clamp(Number(stereoDelay.feedback ?? defaults.stereoDelay.feedback), 0, 0.9),
+      mix: clamp(Number(stereoDelay.mix ?? defaults.stereoDelay.mix), 0, 1)
+    }
+  };
+}
+
 /// The two shared send buses: A is a reverb, B is a tempo-synced delay.
 export function defaultAuxBuses() {
   return {
@@ -190,8 +225,12 @@ export function createTrack({ name, fileId = null, duration = 0, index = 0 }) {
     sendA: 0,
     sendB: 0,
     arpeggiator: defaultArpeggiator(),
+    voice: 'synth',
+    presetId: null,
+    guitarTone: defaultGuitarTone(),
     eq: defaultEQ(),
     comp: defaultCompressor(),
+    effectsRack: defaultTrackEffectsRack(),
     automation: [],
     panAutomation: [],
     clips: [],
@@ -495,10 +534,25 @@ export function sequencedNotes(track) {
   return track.frozen && track.frozen.fileId ? [] : track.notes;
 }
 
-export function trackDuration(track) {
+export function clipPlaybackRate(clip, tempo = 120) {
+  const sourceTempo = Number(clip?.sourceTempoBPM);
+  if (!Number.isFinite(sourceTempo) || sourceTempo <= 0) return 1;
+  return clamp(clamp(Number(tempo) || 120, 60, 200) / clamp(sourceTempo, 60, 200), 0.25, 4);
+}
+
+export function clipTimelineDuration(clip, tempo = 120) {
+  const sourceLength = Math.min(Number(clip?.duration) || 0, Math.max(0, (Number(clip?.sourceDuration) || 0) - (Number(clip?.sourceStart) || 0)));
+  return sourceLength / clipPlaybackRate(clip, tempo);
+}
+
+export function clipSourceOffset(clip, timelineOffset, tempo = 120) {
+  return Math.max(0, Number(timelineOffset) || 0) * clipPlaybackRate(clip, tempo);
+}
+
+export function trackDuration(track, tempo = 120) {
   let end = 0;
   for (const clip of playbackClips(track)) {
-    const playable = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+    const playable = clipTimelineDuration(clip, tempo);
     end = Math.max(end, Math.max(0, clip.start) + playable);
   }
   for (const note of sequencedNotes(track)) {
@@ -510,7 +564,7 @@ export function trackDuration(track) {
 export function sessionDuration(session) {
   let end = 0;
   for (const track of session.tracks) {
-    end = Math.max(end, trackDuration(track));
+    end = Math.max(end, trackDuration(track, session.tempo));
   }
   return end;
 }
@@ -521,9 +575,9 @@ export function hasLoopRange(session) {
 
 /// The gain of a clip at an absolute timeline moment, including its own fades
 /// and automatic crossfades with the clips it overlaps.
-export function clipGainAt(clip, track, time) {
+export function clipGainAt(clip, track, time, tempo = 120) {
   const start = Math.max(0, clip.start);
-  const playable = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+  const playable = clipTimelineDuration(clip, tempo);
   const local = time - start;
   if (local < 0 || local > playable) return 0;
 
@@ -537,8 +591,11 @@ export function clipGainAt(clip, track, time) {
     .filter((item) => item.id !== clip.id)
     .sort((left, right) => left.start - right.start);
   const previous = [...others].reverse().find((item) => item.start <= start);
-  if (previous && previous.start + previous.duration > start) {
-    const overlap = previous.start + previous.duration - start;
+  const previousEnd = previous
+    ? previous.start + clipTimelineDuration(previous, tempo)
+    : 0;
+  if (previous && previousEnd > start) {
+    const overlap = previousEnd - start;
     if (local < overlap && overlap > 0) gain *= 0.5 + 0.5 * (local / overlap);
   }
   const next = others.find((item) => item.start > start);
@@ -652,6 +709,10 @@ export function normalizeSession(session) {
     track.sendA = clamp(Number(track.sendA ?? 0), 0, 1);
     track.sendB = clamp(Number(track.sendB ?? 0), 0, 1);
     track.arpeggiator = normalizeArpeggiator(track.arpeggiator);
+    track.voice = VOICES.some((voice) => voice.id === track.voice) ? track.voice : 'synth';
+    const storedPreset = presetById(track.presetId);
+    track.presetId = storedPreset && storedPreset.voice === track.voice ? storedPreset.id : null;
+    track.guitarTone = normalizeGuitarTone(track.guitarTone);
     track.eq = track.eq || defaultEQ();
     track.eq.bypassed = Boolean(track.eq.bypassed);
     track.eq.low = track.eq.low || { frequency: 120, gain: 0 };
@@ -659,10 +720,27 @@ export function normalizeSession(session) {
     track.eq.high = track.eq.high || { frequency: 8000, gain: 0 };
     track.comp = track.comp || defaultCompressor();
     track.comp.bypassed = track.comp.bypassed !== false;
+    track.effectsRack = normalizeTrackEffectsRack(track.effectsRack);
     track.automation = Array.isArray(track.automation) ? track.automation : [];
     track.panAutomation = Array.isArray(track.panAutomation) ? track.panAutomation : [];
     track.clips = Array.isArray(track.clips) ? track.clips : [];
     track.clips.forEach((clip) => {
+      clip.id = clip.id || uid();
+      clip.start = Math.max(0, Number(clip.start) || 0);
+      clip.sourceStart = Math.max(0, Number(clip.sourceStart) || 0);
+      clip.duration = Math.max(0, Number(clip.duration) || 0);
+      clip.sourceDuration = Math.max(
+        clip.sourceStart,
+        Number.isFinite(Number(clip.sourceDuration))
+          ? Number(clip.sourceDuration)
+          : clip.sourceStart + clip.duration
+      );
+      clip.duration = Math.min(clip.duration, Math.max(0, clip.sourceDuration - clip.sourceStart));
+      const sourceTempo = Number(clip.sourceTempoBPM);
+      clip.sourceTempoBPM = Number.isFinite(sourceTempo) && sourceTempo > 0
+        ? clamp(sourceTempo, 60, 200)
+        : null;
+      clip.transposeSemitones = clamp(Math.round(Number(clip.transposeSemitones) || 0), -12, 12);
       clip.fadeIn = Math.max(0, Number(clip.fadeIn) || 0);
       clip.fadeOut = Math.max(0, Number(clip.fadeOut) || 0);
     });
@@ -1098,3 +1176,133 @@ export function parseMidi(buffer) {
 }
 
 export { midiFileName };
+
+
+// ---------- Voices and sound presets ----------
+
+export const VOICES = [
+  { id: 'synth', name: 'Studio Synth' },
+  { id: 'piano', name: 'Piano' },
+  { id: 'strings', name: 'String Ensemble' },
+  { id: 'organ', name: 'Organ' },
+  { id: 'percussion', name: 'Percussion' },
+  { id: 'acousticGuitar', name: 'Acoustic Guitar' },
+  { id: 'electricGuitar', name: 'Electric Guitar' },
+  { id: 'distortedGuitar', name: 'Distorted Guitar' },
+  { id: 'bassGuitar', name: 'Bass Guitar' },
+  { id: 'marleneVocal', name: 'Marlene Vocal' }
+];
+
+export const INSTRUMENT_PRESETS = [
+  { id: 'synth-bright-saw', name: 'Bright Saw', detail: 'Cutting saw lead with an open filter', voice: 'synth', waveform: 'sawtooth', brightness: 7200, sustain: 1, attack: 0.012, release: 0.24, vibrato: 0, harmonic: 0.5, level: 1 },
+  { id: 'synth-warm-pad', name: 'Warm Pad', detail: 'Soft saw pad that swells in slowly', voice: 'synth', waveform: 'sawtooth', brightness: 1800, sustain: 1.2, attack: 0.24, release: 0.62, vibrato: 0.006, harmonic: 0.4, level: 1 },
+  { id: 'synth-square-lead', name: 'Square Lead', detail: 'Hollow square lead for hooks', voice: 'synth', waveform: 'square', brightness: 4200, sustain: 1, attack: 0.02, release: 0.26, vibrato: 0, harmonic: 0.5, level: 0.9 },
+  { id: 'synth-sine-bell', name: 'Sine Bell', detail: 'Clean sine with a long ring', voice: 'synth', waveform: 'sine', brightness: 9000, sustain: 1.4, attack: 0.005, release: 0.8, vibrato: 0, harmonic: 0.5, level: 0.85 },
+
+  { id: 'piano-bright-keys', name: 'Bright Keys', detail: 'Hammered piano with a crisp top', voice: 'piano', brightness: 6500, sustain: 1, attack: 0.004, release: 0.18, vibrato: 0, harmonic: 0.35, level: 1 },
+  { id: 'piano-soft-upright', name: 'Soft Upright', detail: 'Gentle upright with a rounded edge', voice: 'piano', brightness: 3200, sustain: 0.8, attack: 0.006, release: 0.2, vibrato: 0, harmonic: 0.2, level: 0.95 },
+  { id: 'piano-warm-grand', name: 'Warm Grand', detail: 'Full concert grand with long decay', voice: 'piano', brightness: 4200, sustain: 1.3, attack: 0.005, release: 0.28, vibrato: 0, harmonic: 0.28, level: 1 },
+  { id: 'piano-felt', name: 'Felt Piano', detail: 'Muted, intimate felt hammers', voice: 'piano', brightness: 1800, sustain: 0.75, attack: 0.01, release: 0.22, vibrato: 0, harmonic: 0.12, level: 0.9 },
+
+  { id: 'strings-legato', name: 'Legato Strings', detail: 'Smooth section that bows in together', voice: 'strings', brightness: 3400, sustain: 1.1, attack: 0.08, release: 0.32, vibrato: 0.008, harmonic: 0.5, level: 0.9 },
+  { id: 'strings-cinematic', name: 'Cinematic Strings', detail: 'Wide, dramatic swell with deep vibrato', voice: 'strings', brightness: 4800, sustain: 1.2, attack: 0.14, release: 0.46, vibrato: 0.014, harmonic: 0.55, level: 1 },
+  { id: 'strings-soft', name: 'Soft Ensemble', detail: 'Quiet, airy background strings', voice: 'strings', brightness: 2200, sustain: 1, attack: 0.18, release: 0.5, vibrato: 0.006, harmonic: 0.45, level: 0.85 },
+  { id: 'strings-bright', name: 'Bright Strings', detail: 'Staccato-ready section with bite', voice: 'strings', brightness: 6800, sustain: 0.9, attack: 0.05, release: 0.24, vibrato: 0.01, harmonic: 0.6, level: 0.9 },
+
+  { id: 'organ-gospel', name: 'Gospel Drawbars', detail: 'Full drawbar organ with a percussive click', voice: 'organ', brightness: 5200, sustain: 1, attack: 0.012, release: 0.12, vibrato: 0.004, harmonic: 0.55, level: 0.95 },
+  { id: 'organ-pipe', name: 'Church Pipe', detail: 'Slow speaking pipes with a long tail', voice: 'organ', brightness: 3600, sustain: 1, attack: 0.07, release: 0.32, vibrato: 0.002, harmonic: 0.35, level: 0.9 },
+  { id: 'organ-tonewheel', name: 'Tonewheel', detail: 'Rounded vintage organ, no click', voice: 'organ', brightness: 2600, sustain: 1, attack: 0.02, release: 0.18, vibrato: 0.006, harmonic: 0.3, level: 0.9 },
+  { id: 'organ-bright', name: 'Bright Organ', detail: 'Thin, cutting organ for stabs', voice: 'organ', brightness: 8000, sustain: 1, attack: 0.008, release: 0.1, vibrato: 0.003, harmonic: 0.7, level: 0.85 },
+
+  { id: 'percussion-marimba', name: 'Marimba', detail: 'Warm wooden bars with a round mallet', voice: 'percussion', brightness: 2400, sustain: 1, attack: 0.003, release: 0.3, vibrato: 0, harmonic: 0.35, level: 1 },
+  { id: 'percussion-soft-mallets', name: 'Soft Mallets', detail: 'Dark, gentle tuned percussion', voice: 'percussion', brightness: 1500, sustain: 0.8, attack: 0.004, release: 0.35, vibrato: 0, harmonic: 0.2, level: 0.9 },
+  { id: 'percussion-bells', name: 'Tuned Bells', detail: 'Glass bells with a long shimmer', voice: 'percussion', brightness: 6000, sustain: 1.3, attack: 0.002, release: 0.6, vibrato: 0.004, harmonic: 0.6, level: 0.9 },
+  { id: 'percussion-wood', name: 'Wood Block', detail: 'Dry, tight wooden strike', voice: 'percussion', brightness: 3200, sustain: 0.35, attack: 0.001, release: 0.08, vibrato: 0, harmonic: 0.15, level: 0.85 },
+
+  { id: 'acoustic-fingerpicked', name: 'Fingerpicked', detail: 'Soft fingertips on steel strings', voice: 'acousticGuitar', brightness: 3200, sustain: 1, attack: 0, release: 0.22, vibrato: 0, harmonic: 0.5, level: 0.95 },
+  { id: 'acoustic-strummed', name: 'Strummed Steel', detail: 'Bright, ringing strum', voice: 'acousticGuitar', brightness: 4800, sustain: 1.2, attack: 0, release: 0.24, vibrato: 0, harmonic: 0.6, level: 1 },
+  { id: 'acoustic-nylon', name: 'Soft Nylon', detail: 'Warm classical guitar', voice: 'acousticGuitar', brightness: 1900, sustain: 0.9, attack: 0, release: 0.22, vibrato: 0, harmonic: 0.4, level: 0.9 },
+
+  { id: 'electric-clean', name: 'Clean Neck', detail: 'Rounded neck pickup with long sustain', voice: 'electricGuitar', brightness: 2200, sustain: 1.1, attack: 0, release: 0.24, vibrato: 0, harmonic: 0.5, level: 0.95 },
+  { id: 'electric-bridge', name: 'Bridge Twang', detail: 'Bright bridge pickup with snap', voice: 'electricGuitar', brightness: 4600, sustain: 0.95, attack: 0, release: 0.22, vibrato: 0, harmonic: 0.6, level: 0.9 },
+  { id: 'electric-muted', name: 'Muted', detail: 'Palm-muted short notes', voice: 'electricGuitar', brightness: 1400, sustain: 0.45, attack: 0, release: 0.16, vibrato: 0, harmonic: 0.4, level: 0.85 },
+
+  { id: 'distorted-overdriven', name: 'Overdriven', detail: 'Saturated rhythm voice', voice: 'distortedGuitar', brightness: 2000, sustain: 1, attack: 0, release: 0.26, vibrato: 0, harmonic: 0.5, level: 0.95 },
+  { id: 'distorted-lead', name: 'Lead', detail: 'Singing lead with long sustain', voice: 'distortedGuitar', brightness: 2800, sustain: 1.25, attack: 0, release: 0.28, vibrato: 0.006, harmonic: 0.55, level: 0.9 },
+  { id: 'distorted-fuzz', name: 'Fuzz', detail: 'Thick, woolly fuzz', voice: 'distortedGuitar', brightness: 1200, sustain: 0.9, attack: 0, release: 0.24, vibrato: 0, harmonic: 0.7, level: 0.85 },
+
+  { id: 'bass-fingered', name: 'Fingered', detail: 'Round fingerstyle bass', voice: 'bassGuitar', brightness: 900, sustain: 1, attack: 0, release: 0.22, vibrato: 0, harmonic: 0.5, level: 1 },
+  { id: 'bass-picked', name: 'Picked', detail: 'Bright picked bass with attack', voice: 'bassGuitar', brightness: 1600, sustain: 0.9, attack: 0, release: 0.2, vibrato: 0, harmonic: 0.55, level: 0.95 },
+  { id: 'bass-sub', name: 'Sub Bass', detail: 'Deep, dark sub tone', voice: 'bassGuitar', brightness: 500, sustain: 1.25, attack: 0.01, release: 0.26, vibrato: 0, harmonic: 0.35, level: 1 },
+
+  { id: 'vocal-clear', name: 'Clear Lead', detail: 'Focused lead with a steady vibrato', voice: 'marleneVocal', brightness: 2600, sustain: 1, attack: 0.06, release: 0.26, vibrato: 0.011, harmonic: 0.07, level: 1 },
+  { id: 'vocal-breathy', name: 'Breathy', detail: 'Airy, intimate delivery', voice: 'marleneVocal', brightness: 2200, sustain: 1, attack: 0.05, release: 0.3, vibrato: 0.014, harmonic: 0.18, level: 0.95 },
+  { id: 'vocal-powerful', name: 'Powerful', detail: 'Open and loud with a quick start', voice: 'marleneVocal', brightness: 3200, sustain: 1, attack: 0.03, release: 0.22, vibrato: 0.009, harmonic: 0.04, level: 1 },
+  { id: 'vocal-soft', name: 'Soft Vowel', detail: 'Gentle, rounded vowel', voice: 'marleneVocal', brightness: 1800, sustain: 1, attack: 0.09, release: 0.3, vibrato: 0.008, harmonic: 0.1, level: 0.9 }
+];
+
+export function presetById(id) {
+  return INSTRUMENT_PRESETS.find((preset) => preset.id === id) || null;
+}
+
+export function presetsForVoice(voice) {
+  return INSTRUMENT_PRESETS.filter((preset) => preset.voice === voice);
+}
+
+export function defaultPresetFor(voice) {
+  return presetsForVoice(voice)[0] || INSTRUMENT_PRESETS[0];
+}
+
+export function presetForTrack(track) {
+  const stored = presetById(track && track.presetId);
+  if (stored && track.voice === stored.voice) return stored;
+  return defaultPresetFor(track && track.voice);
+}
+
+export function voiceName(id) {
+  const voice = VOICES.find((item) => item.id === id);
+  return voice ? voice.name : VOICES[0].name;
+}
+
+
+// ---------- Guitar tone ----------
+
+export const GUITAR_VOICES = ['acousticGuitar', 'electricGuitar', 'distortedGuitar'];
+
+export const GUITAR_TONES = [
+  { id: 'clean', name: 'Clean', detail: 'Neck pickup, low gain, plenty of headroom', tone: { gain: 0.3, brightness: 0.55, pickup: 0.3 } },
+  { id: 'crunch', name: 'Crunch', detail: 'Mildly broken up rhythm tone', tone: { gain: 0.62, brightness: 0.5, pickup: 0.6 } },
+  { id: 'lead', name: 'Lead', detail: 'Saturated bridge tone that sings', tone: { gain: 0.86, brightness: 0.75, pickup: 0.85 } },
+  { id: 'fingerpicked', name: 'Fingerpicked', detail: 'Soft, dark and dynamic for picking', tone: { gain: 0.18, brightness: 0.38, pickup: 0.2 } }
+];
+
+export function defaultGuitarTone() {
+  return { gain: 0.5, brightness: 0.5, pickup: 0.5 };
+}
+
+export function normalizeGuitarTone(tone) {
+  const value = tone && typeof tone === 'object' ? tone : {};
+  const defaults = defaultGuitarTone();
+  return {
+    gain: clamp(Number(value.gain ?? defaults.gain), 0, 1),
+    brightness: clamp(Number(value.brightness ?? defaults.brightness), 0, 1),
+    pickup: clamp(Number(value.pickup ?? defaults.pickup), 0, 1)
+  };
+}
+
+export function guitarTonePresetById(id) {
+  return GUITAR_TONES.find((preset) => preset.id === id) || null;
+}
+
+export function guitarTonePresetFor(tone) {
+  const safe = normalizeGuitarTone(tone);
+  return GUITAR_TONES.find((preset) => (
+    Math.abs(preset.tone.gain - safe.gain) < 0.01
+    && Math.abs(preset.tone.brightness - safe.brightness) < 0.01
+    && Math.abs(preset.tone.pickup - safe.pickup) < 0.01
+  )) || null;
+}
+
+export function isGuitarVoice(voice) {
+  return GUITAR_VOICES.includes(voice);
+}

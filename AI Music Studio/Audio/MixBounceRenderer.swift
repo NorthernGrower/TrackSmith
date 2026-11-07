@@ -10,6 +10,7 @@ private struct BounceClip {
     let file: AVAudioFile
     let clip: AudioClip
     let player: AVAudioPlayerNode
+    let timePitch: AVAudioUnitTimePitch
     let mixer: AVAudioMixerNode
     let trackID: UUID
 }
@@ -48,6 +49,7 @@ enum MixBounceRenderer {
         auxBusB: AuxBusSettings = .busB,
         tempoBPM: Int = 120,
         applyMuteSolo: Bool = true,
+        timeRange: ClosedRange<TimeInterval>? = nil,
         settings: BounceSettings = BounceSettings(),
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
@@ -61,9 +63,14 @@ enum MixBounceRenderer {
         var queuedClips: [BounceClip] = []
         var queuedNotes: [BounceNote] = []
         var trackMixers: [UUID: AVAudioMixerNode] = [:]
+        var trackChoruses: [UUID: AVAudioUnitDelay] = [:]
+        var trackStereoDelays: [UUID: AVAudioUnitDelay] = [:]
         var trackSendA: [UUID: AVAudioMixerNode] = [:]
         var trackSendB: [UUID: AVAudioMixerNode] = [:]
-        var duration: TimeInterval = 0
+        let renderStart = max(0, timeRange?.lowerBound ?? 0)
+        let renderEnd = max(renderStart, timeRange?.upperBound ?? .greatestFiniteMagnitude)
+        var duration: TimeInterval = timeRange.map { max(0, $0.upperBound - $0.lowerBound) } ?? 0
+        var effectsTail: TimeInterval = 0
         let mutedTrackIDs = Set(groups.filter(\.isMuted).flatMap(\.trackIDs))
         let soloedTrackIDs = Set(groups.filter(\.isSoloed).flatMap(\.trackIDs))
         let anySolo = tracks.contains { $0.isSoloed || soloedTrackIDs.contains($0.id) }
@@ -124,36 +131,57 @@ enum MixBounceRenderer {
         auxBReturn.outputVolume = auxBusB.isBypassed ? 0 : auxBusB.level
 
         for track in tracks {
+            effectsTail = max(effectsTail, TrackEffectsUnit.tailDuration(settings: track.effectsRack, tempoBPM: tempoBPM, isFrozen: track.isFrozen))
             let trackMixer = AVAudioMixerNode()
             let compressor = TrackCompressorUnit.make()
+            let chorus = AVAudioUnitDelay()
+            let distortion = TrackEffectsUnit.makeDistortion()
+            let stereoDelay = AVAudioUnitDelay()
             engine.attach(trackMixer)
             engine.attach(compressor)
+            engine.attach(chorus)
+            engine.attach(distortion)
+            engine.attach(stereoDelay)
             engine.connect(trackMixer, to: compressor, format: outputFormat)
-            engine.connect(compressor, to: masterBus, format: outputFormat)
+            engine.connect(compressor, to: chorus, format: outputFormat)
+            engine.connect(chorus, to: distortion, format: outputFormat)
+            engine.connect(distortion, to: stereoDelay, format: outputFormat)
+            engine.connect(stereoDelay, to: masterBus, format: outputFormat)
 
             let sendA = AVAudioMixerNode()
             let sendB = AVAudioMixerNode()
             engine.attach(sendA)
             engine.attach(sendB)
-            engine.connect(compressor, to: sendA, format: outputFormat)
+            engine.connect(stereoDelay, to: sendA, format: outputFormat)
             engine.connect(sendA, to: auxAInput, format: outputFormat)
-            engine.connect(compressor, to: sendB, format: outputFormat)
+            engine.connect(stereoDelay, to: sendB, format: outputFormat)
             engine.connect(sendB, to: auxBInput, format: outputFormat)
+            trackChoruses[track.id] = chorus
+            trackStereoDelays[track.id] = stereoDelay
             trackSendA[track.id] = sendA
             trackSendB[track.id] = sendB
             let audible = !applyMuteSolo
                 || (!(track.isMuted || mutedTrackIDs.contains(track.id))
                     && (!anySolo || track.isSoloed || soloedTrackIDs.contains(track.id)))
             trackMixer.outputVolume = audible
-                ? track.volume * groupGain(for: track.id, groups: groups) * track.automationGain(at: 0)
+                ? track.volume * groupGain(for: track.id, groups: groups) * track.automationGain(at: renderStart)
                 : 0
-            trackMixer.pan = min(1, max(-1, track.panAutomationValue(at: 0)))
+            trackMixer.pan = min(1, max(-1, track.panAutomationValue(at: renderStart)))
             trackMixers[track.id] = trackMixer
             var compressorSettings = track.compressorSettings
             if track.isFrozen {
                 compressorSettings.isBypassed = true
             }
             TrackCompressorUnit.configure(compressor, settings: compressorSettings)
+            TrackEffectsUnit.configure(
+                chorus: chorus,
+                distortion: distortion,
+                stereoDelay: stereoDelay,
+                settings: track.effectsRack,
+                tempoBPM: tempoBPM,
+                time: renderStart,
+                isFrozen: track.isFrozen
+            )
 
             for clip in track.playbackClips {
                 let sourceURL = TrackStorage.url(forFileName: clip.fileName)
@@ -164,30 +192,44 @@ enum MixBounceRenderer {
                     clip.duration,
                     max(0, min(clip.sourceDuration, sourceDuration) - clip.sourceStartTime)
                 )
-                guard playableSourceDuration > 0 else { continue }
+                let playbackRate = clip.playbackRate(tempoBPM: tempoBPM)
+                let playableDuration = playableSourceDuration / playbackRate
+                guard playableDuration > 0 else { continue }
+                let clipEnd = clip.startTime + playableDuration
+                let clippedStart = max(clip.startTime, renderStart)
+                let clippedEnd = min(clipEnd, renderEnd)
+                guard clippedEnd > clippedStart else { continue }
 
                 let player = AVAudioPlayerNode()
+                let timePitch = AVAudioUnitTimePitch()
+                timePitch.rate = Float(playbackRate)
+                timePitch.pitch = Float(clip.transposeSemitones * 100)
                 let clipMixer = AVAudioMixerNode()
                 engine.attach(player)
+                engine.attach(timePitch)
                 engine.attach(clipMixer)
-                engine.connect(player, to: clipMixer, format: file.processingFormat)
+                engine.connect(player, to: timePitch, format: file.processingFormat)
+                engine.connect(timePitch, to: clipMixer, format: file.processingFormat)
                 engine.connect(clipMixer, to: trackMixer, format: file.processingFormat)
                 queuedClips.append(BounceClip(
                     file: file,
                     clip: clip,
                     player: player,
+                    timePitch: timePitch,
                     mixer: clipMixer,
                     trackID: track.id
                 ))
-                duration = max(duration, clip.startTime + playableSourceDuration)
+                duration = max(duration, clippedEnd - renderStart)
             }
 
             for note in track.playedNotes(tempoBPM: tempoBPM) {
-                let noteDuration = note.duration
-                    + (track.voice == .synth ? SynthNoteVoice.release : track.voice.releaseTail)
+                guard note.startTime < renderEnd && note.endTime > renderStart else { continue }
+                let noteDuration = note.duration + max(track.voice.releaseTail, track.renderPreset.release)
                 guard let buffer = InstrumentSoundGenerator.voicedNote(
                     frequency: SynthNote.frequency(for: note.pitch),
                     voice: track.voice,
+                    preset: track.renderPreset,
+                    tone: track.guitarTone,
                     duration: noteDuration,
                     velocity: note.velocity,
                     format: outputFormat
@@ -197,23 +239,32 @@ enum MixBounceRenderer {
                 engine.attach(player)
                 engine.connect(player, to: trackMixer, format: outputFormat)
                 queuedNotes.append(BounceNote(buffer: buffer, note: note, player: player))
-                duration = max(duration, note.endTime)
+                let noteRelease = max(track.voice.releaseTail, track.renderPreset.release)
+                duration = max(duration, min(renderEnd, note.endTime) - renderStart + noteRelease)
             }
         }
 
         guard !queuedClips.isEmpty || !queuedNotes.isEmpty, duration > 0 else { throw RenderError.noAudio }
+        duration += effectsTail
 
         for queued in queuedClips {
             let sourceRate = queued.file.processingFormat.sampleRate
-            let sourceStart = AVAudioFramePosition(queued.clip.sourceStartTime * sourceRate)
-            let availableFrames = queued.file.length - sourceStart
-            let requestedFrames = AVAudioFramePosition(
-                min(queued.clip.duration, queued.clip.sourceDuration - queued.clip.sourceStartTime) * sourceRate
+            let playbackRate = queued.clip.playbackRate(tempoBPM: tempoBPM)
+            let clipEnd = queued.clip.startTime + queued.clip.timelineDuration(tempoBPM: tempoBPM)
+            let clippedStart = max(queued.clip.startTime, renderStart)
+            let clippedEnd = min(clipEnd, renderEnd)
+            guard clippedEnd > clippedStart else { continue }
+            let sourceOffset = queued.clip.sourceOffset(
+                forTimelineOffset: clippedStart - queued.clip.startTime,
+                tempoBPM: tempoBPM
             )
+            let sourceStart = AVAudioFramePosition((queued.clip.sourceStartTime + sourceOffset) * sourceRate)
+            let availableFrames = queued.file.length - sourceStart
+            let requestedFrames = AVAudioFramePosition((clippedEnd - clippedStart) * playbackRate * sourceRate)
             let frameCount = min(availableFrames, requestedFrames)
             guard sourceStart >= 0, frameCount > 0 else { continue }
 
-            let startSample = AVAudioFramePosition(max(0, queued.clip.startTime) * sampleRate)
+            let startSample = AVAudioFramePosition(max(0, clippedStart - renderStart) * sampleRate)
             let startTime = AVAudioTime(sampleTime: startSample, atRate: sampleRate)
             queued.player.scheduleSegment(
                 queued.file,
@@ -225,7 +276,7 @@ enum MixBounceRenderer {
         }
 
         for queued in queuedNotes {
-            let startSample = AVAudioFramePosition(max(0, queued.note.startTime) * sampleRate)
+            let startSample = AVAudioFramePosition(max(0, queued.note.startTime - renderStart) * sampleRate)
             let startTime = AVAudioTime(sampleTime: startSample, atRate: sampleRate)
             queued.player.scheduleBuffer(queued.buffer, at: startTime, options: [])
             queued.player.play()
@@ -256,7 +307,7 @@ enum MixBounceRenderer {
         while framesRendered < totalFrames {
             let framesRemaining = totalFrames - framesRendered
             let framesToRender = AVAudioFrameCount(min(Int64(maximumFrameCount), framesRemaining))
-            let automationTime = Double(framesRendered) / sampleRate
+            let automationTime = renderStart + Double(framesRendered) / sampleRate
             for track in tracks {
                 let audible = !applyMuteSolo
                     || (!(track.isMuted || mutedTrackIDs.contains(track.id))
@@ -266,12 +317,18 @@ enum MixBounceRenderer {
                     * track.automationGain(at: automationTime)
                 trackMixers[track.id]?.outputVolume = audible ? automatedVolume : 0
                 trackMixers[track.id]?.pan = min(1, max(-1, track.panAutomationValue(at: automationTime)))
+                if let chorus = trackChoruses[track.id] {
+                    TrackEffectsUnit.updateChorusDelay(chorus, settings: track.effectsRack.chorus, time: automationTime, isFrozen: track.isFrozen)
+                }
+                if let stereoDelay = trackStereoDelays[track.id] {
+                    TrackEffectsUnit.updateStereoDelayTime(stereoDelay, settings: track.effectsRack.stereoDelay, tempoBPM: tempoBPM)
+                }
                 trackSendA[track.id]?.outputVolume = audible ? min(1, max(0, track.sendA)) : 0
                 trackSendB[track.id]?.outputVolume = audible ? min(1, max(0, track.sendB)) : 0
             }
             for queued in queuedClips {
                 guard let track = tracks.first(where: { $0.id == queued.trackID }) else { continue }
-                queued.mixer.outputVolume = queued.clip.gain(at: automationTime, in: track)
+                queued.mixer.outputVolume = queued.clip.gain(at: automationTime, in: track, tempoBPM: tempoBPM)
             }
             let status = try engine.renderOffline(framesToRender, to: buffer)
 
@@ -319,6 +376,7 @@ enum MixBounceRenderer {
         auxBusA: AuxBusSettings = .busA,
         auxBusB: AuxBusSettings = .busB,
         tempoBPM: Int = 120,
+        timeRange: ClosedRange<TimeInterval>? = nil,
         settings: BounceSettings = BounceSettings(),
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
@@ -331,6 +389,7 @@ enum MixBounceRenderer {
             mastering: mastering,
             tempoBPM: tempoBPM,
             applyMuteSolo: false,
+            timeRange: timeRange,
             settings: settings,
             to: outputURL,
             progress: progress

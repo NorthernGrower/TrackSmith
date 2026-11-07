@@ -3,6 +3,7 @@
 //  AI Music Studio
 //
 
+import CoreMIDI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -10,6 +11,7 @@ struct InstrumentRackView: View {
     @ObservedObject var model: MixerViewModel
     var initialTrackID: UUID? = nil
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var midiController = CoreMIDIController()
 
     @State private var selectedInstrument = InstrumentSelection.synth
     @State private var drumDisplayMode = DrumDisplayMode.pads
@@ -34,6 +36,7 @@ struct InstrumentRackView: View {
     @State private var showSampleLibrary = false
     @State private var countInValue: Int?
     @State private var countInTask: Task<Void, Never>?
+    @State private var midiNoteDestinations: [String: UUID] = [:]
 
     private let pianoNotes: [PianoNote] = [
         PianoNote(title: "C4", frequency: 261.63),
@@ -61,6 +64,7 @@ struct InstrumentRackView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 17) {
                     destinationPicker
+                    midiControllerPanel
                     recordingControls
 
                     Picker("Instrument", selection: $selectedInstrument) {
@@ -98,6 +102,55 @@ struct InstrumentRackView: View {
             selectedTrackID = initialTrackID.flatMap { id in
                 model.tracks.contains(where: { $0.id == id }) ? id : nil
             } ?? model.tracks.first?.id
+            if let destination = selectedTrackID.flatMap({ id in model.tracks.first(where: { $0.id == id }) }) {
+                let name = destination.name.localizedLowercase
+                let isDrumTrack = destination.voice == .percussion
+                    || ["drum", "kick", "snare", "hat", "tom", "cymbal", "percussion"].contains { name.contains($0) }
+                selectedInstrument = isDrumTrack ? .drums : .synth
+                drumDisplayMode = isDrumTrack ? .pattern : .pads
+            } else {
+                selectedInstrument = .synth
+                drumDisplayMode = .pads
+            }
+            midiController.onNoteEvent = { event in
+                switch event {
+                case let .noteOn(pitch, velocity, channel):
+                    if let selectedTrackID {
+                        midiNoteDestinations["\(channel):\(pitch)"] = selectedTrackID
+                    }
+                    model.playMIDINote(
+                        pitch: pitch,
+                        velocity: velocity,
+                        channel: channel,
+                        destinationTrackID: selectedTrackID
+                    )
+                case let .noteOff(pitch, channel):
+                    let key = "\(channel):\(pitch)"
+                    let trackID = midiNoteDestinations.removeValue(forKey: key) ?? selectedTrackID
+                    model.stopMIDINote(
+                        pitch: pitch,
+                        channel: channel,
+                        destinationTrackID: trackID
+                    )
+                }
+            }
+            midiController.refreshDevices()
+        }
+        .onChange(of: midiController.selectedDeviceID) { _, _ in
+            model.stopAllMIDINotes()
+            midiNoteDestinations.removeAll()
+            guard midiController.isConnected else { return }
+            midiController.connectSelectedDevice()
+        }
+        .onChange(of: midiController.isConnected) { _, isConnected in
+            if !isConnected {
+                model.stopAllMIDINotes()
+                midiNoteDestinations.removeAll()
+            }
+        }
+        .onChange(of: selectedTrackID) { _, _ in
+            model.stopAllMIDINotes()
+            midiNoteDestinations.removeAll()
         }
         .onChange(of: model.tracks.map(\.id)) { _, trackIDs in
             if let selectedTrackID, trackIDs.contains(selectedTrackID) { return }
@@ -114,11 +167,14 @@ struct InstrumentRackView: View {
         }
         .sheet(isPresented: $showSampleLibrary) {
             SampleLibraryView(model: model)
+                .studioAgentAccess(context: "Sample Library")
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
         .onDisappear {
             cancelCountIn()
+            midiController.disconnect()
+            model.stopAllMIDINotes()
             if model.isRecordingInstrument {
                 model.stopInstrumentRecording()
             }
@@ -156,6 +212,68 @@ struct InstrumentRackView: View {
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
+        .background {
+            WoodGrainSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(Color(red: 0.62, green: 0.42, blue: 0.25).opacity(0.55), lineWidth: 1)
+        }
+    }
+
+    private var midiControllerPanel: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Label("MIDI CONTROLLER", systemImage: "pianokeys")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(0.7)
+                    .foregroundStyle(Color.studioAccent)
+                Spacer()
+                Button("Refresh") { midiController.refreshDevices() }
+                    .font(.system(size: 10, weight: .semibold))
+                    .buttonStyle(.plain)
+            }
+
+            if !midiController.devices.isEmpty {
+                Picker("MIDI Input", selection: $midiController.selectedDeviceID) {
+                    Text("Choose a controller").tag(Optional<MIDIEndpointRef>.none)
+                    ForEach(midiController.devices) { device in
+                        Text(device.name).tag(Optional(device.id))
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12, weight: .semibold))
+            }
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(midiController.isConnected ? Color.green : Color.studioAccent.opacity(0.65))
+                    .frame(width: 7, height: 7)
+                Text(midiController.statusMessage)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                Button(midiController.isConnected ? "Disconnect" : "Connect") {
+                    if midiController.isConnected {
+                        midiController.disconnect()
+                        model.stopAllMIDINotes()
+                    } else {
+                        midiController.connectSelectedDevice()
+                    }
+                }
+                .font(.system(size: 10, weight: .bold))
+                .buttonStyle(.bordered)
+                .tint(Color.studioAccent)
+                .disabled(!midiController.isConnected && (selectedTrackID == nil || midiController.selectedDeviceID == nil))
+            }
+
+            Text("Play the selected track's instrument preset. Use Record Performance above to capture a synchronized take.")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
         .background {
             WoodGrainSurface()
                 .clipShape(RoundedRectangle(cornerRadius: 11))
@@ -829,8 +947,8 @@ struct InstrumentRackView: View {
 
     private var canStartRecording: Bool {
         selectedTrackID != nil
-            && (selectedInstrument != .sampler || model.samplerDisplayName != nil)
-            && (selectedInstrument != .microphone || model.microphonePermissionGranted)
+            && (selectedInstrument != .sampler || model.samplerDisplayName != nil || midiController.isConnected)
+            && (selectedInstrument != .microphone || model.microphonePermissionGranted || midiController.isConnected)
     }
 
     private var recordingStatusText: String {
@@ -853,6 +971,7 @@ struct InstrumentRackView: View {
         if let selectedTrackID, model.isPunchActive(for: selectedTrackID) {
             return "Punch Record"
         }
+        if midiController.isConnected { return "Record MIDI Performance" }
         return selectedInstrument == .microphone ? "Record Mic Take" : "Record Performance"
     }
 
@@ -917,7 +1036,7 @@ struct InstrumentRackView: View {
                 return
             }
             countInValue = nil
-            if selectedInstrument == .microphone {
+            if selectedInstrument == .microphone && !midiController.isConnected {
                 model.startMicrophoneRecording(destinationTrackID: selectedTrackID)
             } else {
                 model.startInstrumentRecording(destinationTrackID: selectedTrackID)

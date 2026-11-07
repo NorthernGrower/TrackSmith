@@ -54,17 +54,30 @@ final class MixerEngine {
         let clip: AudioClip
         let file: AVAudioFile
         let player: AVAudioPlayerNode
+        let timePitch: AVAudioUnitTimePitch
     }
 
     private var trackMixers: [UUID: AVAudioMixerNode] = [:]
     private var instrumentMixers: [UUID: AVAudioMixerNode] = [:]
     private var equalizers: [UUID: AVAudioUnitEQ] = [:]
     private var compressors: [UUID: AVAudioUnitEffect] = [:]
+    private var trackChoruses: [UUID: AVAudioUnitDelay] = [:]
+    private var trackDistortions: [UUID: AVAudioUnitDistortion] = [:]
+    private var trackStereoDelays: [UUID: AVAudioUnitDelay] = [:]
     private var clipPlayers: [UUID: [ClipPlayback]] = [:]
     private var clipSignatures: [UUID: [AudioClip]] = [:]
+    private struct MIDINoteKey: Hashable {
+        let trackID: UUID
+        let pitch: Int
+        let channel: Int
+    }
+
     private var instrumentVoices: [UUID: [AVAudioPlayerNode]] = [:]
     private var instrumentFormats: [UUID: AVAudioFormat] = [:]
     private var voiceCursors: [UUID: Int] = [:]
+    private var midiInstrumentVoices: [UUID: [AVAudioPlayerNode]] = [:]
+    private var midiNoteCursors: [UUID: Int] = [:]
+    private var activeMIDINoteVoices: [MIDINoteKey: Int] = [:]
     private var previewVoices: [AVAudioPlayerNode] = []
     private var previewFormat: AVAudioFormat?
     private var previewVoiceCursor = 0
@@ -329,23 +342,32 @@ final class MixerEngine {
             let instrumentMixer = AVAudioMixerNode()
             let equalizer = AVAudioUnitEQ(numberOfBands: 3)
             let compressor = TrackCompressorUnit.make()
+            let chorus = AVAudioUnitDelay()
+            let distortion = TrackEffectsUnit.makeDistortion()
+            let stereoDelay = AVAudioUnitDelay()
 
             engine.attach(mixer)
             engine.attach(instrumentMixer)
             engine.attach(equalizer)
             engine.attach(compressor)
+            engine.attach(chorus)
+            engine.attach(distortion)
+            engine.attach(stereoDelay)
             engine.connect(instrumentMixer, to: mixer, format: instrumentFormat)
             engine.connect(mixer, to: equalizer, format: format)
             engine.connect(equalizer, to: compressor, format: format)
-            engine.connect(compressor, to: masterBus, format: format)
+            engine.connect(compressor, to: chorus, format: format)
+            engine.connect(chorus, to: distortion, format: format)
+            engine.connect(distortion, to: stereoDelay, format: format)
+            engine.connect(stereoDelay, to: masterBus, format: format)
 
             let sendA = AVAudioMixerNode()
             let sendB = AVAudioMixerNode()
             engine.attach(sendA)
             engine.attach(sendB)
-            engine.connect(compressor, to: sendA, format: format)
+            engine.connect(stereoDelay, to: sendA, format: format)
             engine.connect(sendA, to: auxAInput, format: format)
-            engine.connect(compressor, to: sendB, format: format)
+            engine.connect(stereoDelay, to: sendB, format: format)
             engine.connect(sendB, to: auxBInput, format: format)
             trackSendA[track.id] = sendA
             trackSendB[track.id] = sendB
@@ -364,6 +386,14 @@ final class MixerEngine {
                 voices.append(voice)
             }
 
+            var midiVoices: [AVAudioPlayerNode] = []
+            for _ in 0..<instrumentVoiceCount {
+                let voice = AVAudioPlayerNode()
+                engine.attach(voice)
+                engine.connect(voice, to: instrumentMixer, format: instrumentFormat)
+                midiVoices.append(voice)
+            }
+
             var sequencingVoices: [AVAudioPlayerNode] = []
             for _ in 0..<noteVoiceCount {
                 let notePlayer = AVAudioPlayerNode()
@@ -375,18 +405,27 @@ final class MixerEngine {
             var loadedClips: [ClipPlayback] = []
             for (clip, clipFile) in clipFiles {
                 let clipPlayer = AVAudioPlayerNode()
+                let timePitch = AVAudioUnitTimePitch()
+                timePitch.rate = Float(clip.playbackRate(tempoBPM: songTempoBPM))
+                timePitch.pitch = Float(clip.transposeSemitones * 100)
                 engine.attach(clipPlayer)
-                engine.connect(clipPlayer, to: mixer, format: clipFile.processingFormat)
-                loadedClips.append(ClipPlayback(clip: clip, file: clipFile, player: clipPlayer))
-                duration = max(duration, clip.startTime + clip.duration)
+                engine.attach(timePitch)
+                engine.connect(clipPlayer, to: timePitch, format: clipFile.processingFormat)
+                engine.connect(timePitch, to: mixer, format: clipFile.processingFormat)
+                loadedClips.append(ClipPlayback(clip: clip, file: clipFile, player: clipPlayer, timePitch: timePitch))
+                duration = max(duration, clip.startTime + clip.timelineDuration(tempoBPM: songTempoBPM))
             }
 
             trackMixers[track.id] = mixer
             instrumentMixers[track.id] = instrumentMixer
             equalizers[track.id] = equalizer
             compressors[track.id] = compressor
+            trackChoruses[track.id] = chorus
+            trackDistortions[track.id] = distortion
+            trackStereoDelays[track.id] = stereoDelay
             clipPlayers[track.id] = loadedClips
             instrumentVoices[track.id] = voices
+            midiInstrumentVoices[track.id] = midiVoices
             notePlayers[track.id] = sequencingVoices
             instrumentFormats[track.id] = instrumentFormat
             var eqSettings = track.eqSettings
@@ -397,6 +436,15 @@ final class MixerEngine {
             }
             configureEqualizer(equalizer, settings: eqSettings)
             TrackCompressorUnit.configure(compressor, settings: compressorSettings)
+            TrackEffectsUnit.configure(
+                chorus: chorus,
+                distortion: distortion,
+                stereoDelay: stereoDelay,
+                settings: track.effectsRack,
+                tempoBPM: songTempoBPM,
+                time: automationTime,
+                isFrozen: track.isFrozen
+            )
         }
 
         updateMix(tracks: tracks)
@@ -408,7 +456,7 @@ final class MixerEngine {
         mixNotes = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0.playedNotes(tempoBPM: songTempoBPM)) })
         let clipEnd = tracks.flatMap { track in
             track.playbackClips.map { clip in
-                max(0, clip.startTime) + min(clip.duration, max(0, clip.sourceDuration - clip.sourceStartTime))
+                max(0, clip.startTime) + clip.timelineDuration(tempoBPM: songTempoBPM)
             }
         }.max() ?? 0
         let noteEnd = mixNotes.values.flatMap { $0.map(\.endTime) }.max() ?? 0
@@ -421,7 +469,7 @@ final class MixerEngine {
         applyMix()
         for track in mixTracks {
             for loaded in clipPlayers[track.id] ?? [] {
-                loaded.player.volume = loaded.clip.gain(at: automationTime, in: track)
+                loaded.player.volume = loaded.clip.gain(at: automationTime, in: track, tempoBPM: songTempoBPM)
             }
         }
     }
@@ -449,6 +497,12 @@ final class MixerEngine {
             trackMixers[track.id]?.pan = min(1, max(-1, automatedPan))
             trackSendA[track.id]?.outputVolume = audible ? min(1, max(0, track.sendA)) : 0
             trackSendB[track.id]?.outputVolume = audible ? min(1, max(0, track.sendB)) : 0
+            if let chorus = trackChoruses[track.id] {
+                TrackEffectsUnit.updateChorusDelay(chorus, settings: track.effectsRack.chorus, time: automationTime, isFrozen: track.isFrozen)
+            }
+            if let stereoDelay = trackStereoDelays[track.id] {
+                TrackEffectsUnit.updateStereoDelayTime(stereoDelay, settings: track.effectsRack.stereoDelay, tempoBPM: songTempoBPM)
+            }
         }
     }
 
@@ -467,9 +521,22 @@ final class MixerEngine {
     }
 
     func setTempo(_ bpm: Int) {
-        songTempoBPM = min(200, max(60, bpm))
+        let tempo = min(200, max(60, bpm))
+        guard tempo != songTempoBPM else { return }
+        let wasPlaying = isPlaying
+        let position = currentTime
+        if wasPlaying { pause() }
+        songTempoBPM = tempo
         applyMasterEffects()
+        for loadedClips in clipPlayers.values {
+            for loaded in loadedClips {
+                loaded.timePitch.rate = Float(loaded.clip.playbackRate(tempoBPM: tempo))
+            }
+        }
         updateMix(tracks: mixTracks)
+        playHeadOffset = duration > 0 ? min(max(0, position), duration) : max(0, position)
+        updateAutomation(at: playHeadOffset)
+        if wasPlaying { play() }
     }
 
     /// Turns the click track on or off and sets its level.
@@ -573,6 +640,25 @@ final class MixerEngine {
             settings.isBypassed = true
         }
         TrackCompressorUnit.configure(compressor, settings: settings)
+    }
+
+    func updateTrackEffects(trackID: UUID, settings: TrackEffectsRack) {
+        guard let chorus = trackChoruses[trackID],
+              let distortion = trackDistortions[trackID],
+              let stereoDelay = trackStereoDelays[trackID] else { return }
+        let isFrozen = mixTracks.first(where: { $0.id == trackID })?.isFrozen == true
+        TrackEffectsUnit.configure(
+            chorus: chorus,
+            distortion: distortion,
+            stereoDelay: stereoDelay,
+            settings: settings,
+            tempoBPM: songTempoBPM,
+            time: automationTime,
+            isFrozen: isFrozen
+        )
+        if let index = mixTracks.firstIndex(where: { $0.id == trackID }) {
+            mixTracks[index].effectsRack = settings
+        }
     }
 
     private func configureEqualizer(_ equalizer: AVAudioUnitEQ, settings: TrackEQSettings) {
@@ -711,10 +797,7 @@ final class MixerEngine {
         for id in trackIDs {
             for loadedClip in clipPlayers[id] ?? [] {
                 let clip = loadedClip.clip
-                let playableDuration = min(
-                    clip.duration,
-                    max(0, clip.sourceDuration - clip.sourceStartTime)
-                )
+                let playableDuration = clip.timelineDuration(tempoBPM: songTempoBPM)
                 guard playableDuration > 0 else { continue }
 
                 let clipStart = max(0, clip.startTime)
@@ -781,13 +864,18 @@ final class MixerEngine {
     /// Builds (and caches) the audio for one piano-roll note.
     private func noteBuffer(for note: SynthNote, track: Track, format: AVAudioFormat) -> AVAudioPCMBuffer? {
         let voice = track.voice
-        let key = "\(track.id.uuidString)-\(voice.rawValue)-\(note.pitch)-\(Int(note.duration * 1000))-\(Int(note.velocity * 100))"
+        let preset = track.renderPreset
+        let tone = track.guitarTone
+        let toneKey = "\(Int(tone.gain * 100))-\(Int(tone.brightness * 100))-\(Int(tone.pickup * 100))"
+        let key = "\(track.id.uuidString)-\(voice.rawValue)-\(preset.id)-\(toneKey)-\(note.pitch)-\(Int(note.duration * 1000))-\(Int(note.velocity * 100))"
         if let cached = noteBufferCache[key] { return cached }
 
-        let duration = note.duration + (voice == .synth ? SynthNoteVoice.release : voice.releaseTail)
+        let duration = note.duration + max(voice.releaseTail, preset.release)
         guard let buffer = InstrumentSoundGenerator.voicedNote(
             frequency: SynthNote.frequency(for: note.pitch),
             voice: voice,
+            preset: preset,
+            tone: tone,
             duration: duration,
             velocity: note.velocity,
             format: format
@@ -809,9 +897,11 @@ final class MixerEngine {
         let sampleRate = loadedClip.file.processingFormat.sampleRate
         guard sampleRate > 0 else { return }
 
-        let startFrame = AVAudioFramePosition((loadedClip.clip.sourceStartTime + offset) * sampleRate)
+        let rate = loadedClip.clip.playbackRate(tempoBPM: songTempoBPM)
+        let sourceOffset = loadedClip.clip.sourceOffset(forTimelineOffset: offset, tempoBPM: songTempoBPM)
+        let startFrame = AVAudioFramePosition((loadedClip.clip.sourceStartTime + sourceOffset) * sampleRate)
         let availableFrames = loadedClip.file.length - startFrame
-        let requestedFrames = AVAudioFramePosition(max(0, duration) * sampleRate)
+        let requestedFrames = AVAudioFramePosition(max(0, duration * rate) * sampleRate)
         let frames = min(availableFrames, requestedFrames)
         guard startFrame >= 0, frames > 0 else { return }
 
@@ -918,6 +1008,46 @@ final class MixerEngine {
         player.scheduleFile(file, at: nil)
         scheduledInstrumentFiles[ObjectIdentifier(player)] = file
         player.play()
+    }
+
+    /// Plays a controller note through the selected track's instrument mixer.
+    func playMIDINote(
+        _ buffer: AVAudioPCMBuffer,
+        pitch: Int,
+        channel: Int,
+        destinationTrackID: UUID
+    ) {
+        let key = MIDINoteKey(trackID: destinationTrackID, pitch: pitch, channel: channel)
+        stopMIDINote(pitch: pitch, channel: channel, trackID: destinationTrackID)
+        guard let players = midiInstrumentVoices[destinationTrackID],
+              !players.isEmpty,
+              startAudioEngine() else { return }
+
+        let index = midiNoteCursors[destinationTrackID, default: 0] % players.count
+        midiNoteCursors[destinationTrackID] = (index + 1) % players.count
+        activeMIDINoteVoices = activeMIDINoteVoices.filter {
+            $0.key.trackID != destinationTrackID || $0.value != index
+        }
+        let player = players[index]
+        player.stop()
+        player.scheduleBuffer(buffer, at: nil, options: [])
+        player.play()
+        activeMIDINoteVoices[key] = index
+    }
+
+    func stopMIDINote(pitch: Int, channel: Int, trackID: UUID) {
+        let key = MIDINoteKey(trackID: trackID, pitch: pitch, channel: channel)
+        guard let index = activeMIDINoteVoices.removeValue(forKey: key),
+              let players = midiInstrumentVoices[trackID],
+              players.indices.contains(index) else { return }
+        players[index].stop()
+    }
+
+    func stopAllMIDINotes(trackID: UUID? = nil) {
+        let activeKeys = activeMIDINoteVoices.keys.filter { trackID == nil || $0.trackID == trackID }
+        for key in activeKeys {
+            stopMIDINote(pitch: key.pitch, channel: key.channel, trackID: key.trackID)
+        }
     }
 
     /// Stops any sound preview playing on the master output.
@@ -1109,9 +1239,16 @@ final class MixerEngine {
             loadedClips.forEach { clip in
                 clip.player.stop()
                 engine.detach(clip.player)
+                engine.detach(clip.timePitch)
             }
         }
         for voices in instrumentVoices.values {
+            voices.forEach { voice in
+                voice.stop()
+                engine.detach(voice)
+            }
+        }
+        for voices in midiInstrumentVoices.values {
             voices.forEach { voice in
                 voice.stop()
                 engine.detach(voice)
@@ -1139,6 +1276,15 @@ final class MixerEngine {
         for compressor in compressors.values {
             engine.detach(compressor)
         }
+        for chorus in trackChoruses.values {
+            engine.detach(chorus)
+        }
+        for distortion in trackDistortions.values {
+            engine.detach(distortion)
+        }
+        for delay in trackStereoDelays.values {
+            engine.detach(delay)
+        }
         for mixer in trackMixers.values {
             mixer.removeTap(onBus: 0)
             engine.detach(mixer)
@@ -1147,11 +1293,17 @@ final class MixerEngine {
         instrumentMixers.removeAll()
         equalizers.removeAll()
         compressors.removeAll()
+        trackChoruses.removeAll()
+        trackDistortions.removeAll()
+        trackStereoDelays.removeAll()
         clipPlayers.removeAll()
         clipSignatures.removeAll()
         instrumentVoices.removeAll()
+        midiInstrumentVoices.removeAll()
         instrumentFormats.removeAll()
         voiceCursors.removeAll()
+        midiNoteCursors.removeAll()
+        activeMIDINoteVoices.removeAll()
         previewVoices.removeAll()
         previewFormat = nil
         scheduledInstrumentFiles.removeAll()

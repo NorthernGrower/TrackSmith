@@ -110,6 +110,7 @@ enum InstrumentSoundGenerator {
         release: Double,
         duration: Double = 0.9,
         velocity: Float = 1,
+        level: Double = 1,
         format: AVAudioFormat
     ) -> AVAudioPCMBuffer? {
         let sampleRate = format.sampleRate
@@ -153,7 +154,10 @@ enum InstrumentSoundGenerator {
                 }
 
                 filteredSample += filterCoefficient * (rawSample - filteredSample)
-                channels[channel][frame] = Float(filteredSample * envelope * 0.22 * Double(min(1, max(0, velocity))))
+                channels[channel][frame] = Float(
+                    filteredSample * envelope * 0.22 * min(1.4, max(0.2, level))
+                        * Double(min(1, max(0, velocity)))
+                )
             }
         }
 
@@ -327,10 +331,12 @@ enum InstrumentSoundGenerator {
 
     // MARK: - Voiced instruments
 
-    /// Plays a note with the voice a track was arranged for.
+    /// Plays a note with the voice and preset a track was arranged for.
     static func voicedNote(
         frequency: Double,
         voice: TrackVoiceKind,
+        preset: InstrumentPreset,
+        tone: GuitarTone = GuitarTone(),
         duration: Double,
         velocity: Float = 1,
         format: AVAudioFormat
@@ -339,10 +345,45 @@ enum InstrumentSoundGenerator {
         case .synth:
             return synthNote(
                 frequency: frequency,
-                waveform: SynthNoteVoice.waveform,
-                cutoff: SynthNoteVoice.cutoff,
-                attack: SynthNoteVoice.attack,
-                release: SynthNoteVoice.release,
+                waveform: preset.waveform,
+                cutoff: preset.brightness,
+                attack: preset.attack,
+                release: preset.release,
+                duration: duration,
+                velocity: velocity,
+                level: preset.level,
+                format: format
+            )
+        case .piano:
+            return struckNote(
+                frequency: frequency,
+                preset: preset,
+                duration: duration,
+                velocity: velocity,
+                partials: pianoPartials,
+                format: format
+            )
+        case .percussion:
+            return struckNote(
+                frequency: frequency,
+                preset: preset,
+                duration: duration,
+                velocity: velocity,
+                partials: malletPartials,
+                format: format
+            )
+        case .organ:
+            return organNote(
+                frequency: frequency,
+                preset: preset,
+                duration: duration,
+                velocity: velocity,
+                format: format
+            )
+        case .strings:
+            return stringNote(
+                frequency: frequency,
+                preset: preset,
                 duration: duration,
                 velocity: velocity,
                 format: format
@@ -352,12 +393,20 @@ enum InstrumentSoundGenerator {
                 frequency: frequency,
                 duration: duration,
                 velocity: velocity,
+                brightness: preset.brightness,
+                vibratoDepth: preset.vibrato,
+                attackSeconds: preset.attack,
+                releaseSeconds: preset.release,
+                breath: preset.harmonic * 0.4,
+                level: 0.2 * preset.level,
                 format: format
             )
         case .acousticGuitar, .electricGuitar, .distortedGuitar, .bassGuitar:
             return pluckedNote(
                 frequency: frequency,
                 voice: voice,
+                preset: preset,
+                tone: tone,
                 duration: duration,
                 velocity: velocity,
                 format: format
@@ -365,11 +414,214 @@ enum InstrumentSoundGenerator {
         }
     }
 
+    // MARK: - Struck and sustained voices
+
+    private struct StruckPartial {
+        let ratio: Double
+        let gain: Double
+        let decay: Double
+    }
+
+    private static let pianoPartials: [StruckPartial] = [
+        StruckPartial(ratio: 1, gain: 1, decay: 0.9),
+        StruckPartial(ratio: 2, gain: 0.42, decay: 0.62),
+        StruckPartial(ratio: 3, gain: 0.22, decay: 0.46),
+        StruckPartial(ratio: 4, gain: 0.12, decay: 0.34),
+        StruckPartial(ratio: 6, gain: 0.06, decay: 0.24),
+    ]
+
+    private static let malletPartials: [StruckPartial] = [
+        StruckPartial(ratio: 1, gain: 1, decay: 0.42),
+        StruckPartial(ratio: 4, gain: 0.3, decay: 0.22),
+        StruckPartial(ratio: 10, gain: 0.08, decay: 0.12),
+    ]
+
+    /// A struck tone built from a handful of partials, for piano and tuned percussion.
+    private static func struckNote(
+        frequency: Double,
+        preset: InstrumentPreset,
+        duration: Double,
+        velocity: Float,
+        partials: [StruckPartial],
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        let noteDuration = min(6, max(0.15, duration))
+        let frameCount = max(1, Int(sampleRate * noteDuration))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
+              let channels = buffer.floatChannelData else { return nil }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        let channelCount = Int(format.channelCount)
+        let safeFrequency = min(sampleRate * 0.45, max(20, frequency))
+        let sustain = min(2.5, max(0.25, preset.sustain))
+        let level = min(1.4, max(0.2, preset.level))
+        let safeVelocity = Double(min(1, max(0, velocity)))
+        let cutoff = min(sampleRate * 0.45, max(400, preset.brightness))
+        let filterCoefficient = 1 - exp(-2 * Double.pi * cutoff / sampleRate)
+        let attack = min(max(0.001, preset.attack), noteDuration * 0.4)
+        let release = min(max(0.01, preset.release), noteDuration * 0.6)
+        let releaseStart = max(attack, noteDuration - release)
+        let gainSum = max(0.001, partials.reduce(0) { $0 + $1.gain })
+        let normal = 0.26 / gainSum
+        let hammer = min(1, max(0, preset.harmonic))
+
+        for channel in 0..<channelCount {
+            var filtered = 0.0
+            for frame in 0..<frameCount {
+                let time = Double(frame) / sampleRate
+                var sample = 0.0
+
+                for partial in partials {
+                    let phase = (time * safeFrequency * partial.ratio).truncatingRemainder(dividingBy: 1)
+                    let decayTime = max(0.05, partial.decay * sustain)
+                    sample += sin(2 * Double.pi * phase) * partial.gain * exp(-time / decayTime)
+                }
+
+                if hammer > 0 {
+                    sample += Double.random(in: -1...1) * hammer * exp(-time / 0.012) * 0.16
+                }
+
+                filtered += filterCoefficient * (sample - filtered)
+
+                let attackGain = time < attack ? time / max(0.001, attack) : 1
+                let releaseGain = time > releaseStart
+                    ? max(0, (noteDuration - time) / max(0.001, noteDuration - releaseStart))
+                    : 1
+
+                channels[channel][frame] = Float(
+                    filtered * attackGain * releaseGain * normal * level * safeVelocity
+                )
+            }
+        }
+
+        return buffer
+    }
+
+    /// A drawbar organ: stacked sines with a steady tone and a quick release.
+    private static func organNote(
+        frequency: Double,
+        preset: InstrumentPreset,
+        duration: Double,
+        velocity: Float,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        let noteDuration = min(6, max(0.15, duration))
+        let frameCount = max(1, Int(sampleRate * noteDuration))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
+              let channels = buffer.floatChannelData else { return nil }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        let channelCount = Int(format.channelCount)
+        let safeFrequency = min(sampleRate * 0.45, max(20, frequency))
+        let mix = min(1, max(0, preset.harmonic))
+        let drawbars: [(ratio: Double, gain: Double)] = [
+            (1, 1),
+            (2, 0.5 + 0.5 * mix),
+            (3, 0.28 * mix),
+            (4, 0.2 * mix),
+            (6, 0.12 * mix),
+        ]
+        let gainSum = max(0.001, drawbars.reduce(0) { $0 + $1.gain })
+        let normal = 0.5 / gainSum
+        let level = min(1.4, max(0.2, preset.level)) * Double(min(1, max(0, velocity)))
+        let cutoff = min(sampleRate * 0.45, max(400, preset.brightness))
+        let filterCoefficient = 1 - exp(-2 * Double.pi * cutoff / sampleRate)
+        let attack = min(max(0.004, preset.attack), noteDuration * 0.5)
+        let release = min(max(0.01, preset.release), noteDuration * 0.6)
+        let releaseStart = max(attack, noteDuration - release)
+        let vibrato = min(0.03, max(0, preset.vibrato))
+
+        for channel in 0..<channelCount {
+            var filtered = 0.0
+            for frame in 0..<frameCount {
+                let time = Double(frame) / sampleRate
+                let wobble = 1 + vibrato * sin(2 * Double.pi * 5.6 * time)
+                var sample = 0.0
+                for bar in drawbars {
+                    let phase = (time * safeFrequency * wobble * bar.ratio).truncatingRemainder(dividingBy: 1)
+                    sample += sin(2 * Double.pi * phase) * bar.gain
+                }
+
+                filtered += filterCoefficient * (sample - filtered)
+
+                let attackGain = time < attack ? time / max(0.001, attack) : 1
+                let releaseGain = time > releaseStart
+                    ? max(0, (noteDuration - time) / max(0.001, noteDuration - releaseStart))
+                    : 1
+
+                channels[channel][frame] = Float(filtered * attackGain * releaseGain * normal * level)
+            }
+        }
+
+        return buffer
+    }
+
+    /// A bowed string section: three slightly detuned saws through a low-pass.
+    private static func stringNote(
+        frequency: Double,
+        preset: InstrumentPreset,
+        duration: Double,
+        velocity: Float,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        let noteDuration = min(6, max(0.15, duration))
+        let frameCount = max(1, Int(sampleRate * noteDuration))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
+              let channels = buffer.floatChannelData else { return nil }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        let channelCount = Int(format.channelCount)
+        let safeFrequency = min(sampleRate * 0.45, max(20, frequency))
+        let level = min(1.4, max(0.2, preset.level)) * Double(min(1, max(0, velocity)))
+        let cutoff = min(sampleRate * 0.45, max(300, preset.brightness))
+        let filterCoefficient = 1 - exp(-2 * Double.pi * cutoff / sampleRate)
+        let attack = min(max(0.01, preset.attack), noteDuration * 0.6)
+        let release = min(max(0.02, preset.release), noteDuration * 0.7)
+        let releaseStart = max(attack, noteDuration - release)
+        let vibrato = min(0.03, max(0, preset.vibrato))
+        let detunes = [-0.0035, 0, 0.0035]
+
+        for channel in 0..<channelCount {
+            var filtered = 0.0
+            for frame in 0..<frameCount {
+                let time = Double(frame) / sampleRate
+                let wobble = 1 + vibrato * sin(2 * Double.pi * 5.3 * time)
+                var sample = 0.0
+                for detune in detunes {
+                    let phase = (time * safeFrequency * wobble * (1 + detune)).truncatingRemainder(dividingBy: 1)
+                    sample += 2 * phase - 1
+                }
+                sample /= Double(detunes.count)
+
+                filtered += filterCoefficient * (sample - filtered)
+
+                let attackGain = time < attack ? time / max(0.001, attack) : 1
+                let releaseGain = time > releaseStart
+                    ? max(0, (noteDuration - time) / max(0.001, noteDuration - releaseStart))
+                    : 1
+
+                channels[channel][frame] = Float(filtered * attackGain * releaseGain * 0.34 * level)
+            }
+        }
+
+        return buffer
+    }
+
+
     /// A sung vowel note: a glottal saw shaped by three formants with a slow vibrato.
     static func vocalNote(
         frequency: Double,
         duration: Double,
         velocity: Float = 1,
+        brightness: Double = 2_600,
+        vibratoDepth: Double = 0.011,
+        attackSeconds: Double = 0.05,
+        releaseSeconds: Double = 0.24,
+        breath: Double = 0.09,
+        level: Double = 0.2,
         format: AVAudioFormat
     ) -> AVAudioPCMBuffer? {
         let sampleRate = format.sampleRate
@@ -380,14 +632,15 @@ enum InstrumentSoundGenerator {
         buffer.frameLength = AVAudioFrameCount(frameCount)
 
         let channelCount = Int(format.channelCount)
-        // Formant centres and bandwidths for a female "ah" vowel.
+        // Formant centres and bandwidths for a female "ah" vowel, shifted by the preset.
+        let formantScale = min(1.4, max(0.6, brightness / 2_600))
         let formants: [(frequency: Double, bandwidth: Double, gain: Double)] = [
-            (880, 90, 1.0),
-            (1_260, 110, 0.6),
-            (2_860, 170, 0.28),
+            (880 * formantScale, 90, 1.0),
+            (1_260 * formantScale, 110, 0.6),
+            (2_860 * formantScale, 170, 0.28),
         ]
-        let attack = min(0.06, noteDuration * 0.3)
-        let release = min(0.26, noteDuration * 0.4)
+        let attack = min(max(0.01, attackSeconds), noteDuration * 0.3)
+        let release = min(max(0.02, releaseSeconds), noteDuration * 0.4)
         let releaseStart = max(attack, noteDuration - release)
         let safeVelocity = Double(min(1, max(0, velocity)))
 
@@ -396,13 +649,14 @@ enum InstrumentSoundGenerator {
                 FormantResonator(frequency: $0.frequency, bandwidth: $0.bandwidth, sampleRate: sampleRate)
             }
             var phase = 0.0
-            var breath = 0.0
+            var breathNoise = 0.0
 
             for frame in 0..<frameCount {
                 let time = Double(frame) / sampleRate
+                let depth = min(0.03, max(0, vibratoDepth))
                 let vibrato = 1
-                    + 0.011 * sin(2 * Double.pi * 5.1 * time)
-                    + 0.004 * sin(2 * Double.pi * 0.7 * time)
+                    + depth * sin(2 * Double.pi * 5.1 * time)
+                    + depth * 0.36 * sin(2 * Double.pi * 0.7 * time)
                 phase += frequency * vibrato / sampleRate
                 phase -= phase.rounded(.down)
 
@@ -414,8 +668,8 @@ enum InstrumentSoundGenerator {
                 }
 
                 let noise = Double.random(in: -1...1)
-                breath += 0.05 * (noise - breath)
-                sample += breath * 0.07
+                breathNoise += 0.05 * (noise - breathNoise)
+                sample += breathNoise * max(0, breath)
 
                 let envelope: Double
                 if time < attack {
@@ -426,7 +680,9 @@ enum InstrumentSoundGenerator {
                     envelope = 1
                 }
 
-                channels[channel][frame] = Float(sample * envelope * 0.20 * safeVelocity)
+                channels[channel][frame] = Float(
+                    sample * envelope * min(0.4, max(0.02, level)) * safeVelocity
+                )
             }
         }
 
@@ -437,6 +693,8 @@ enum InstrumentSoundGenerator {
     static func pluckedNote(
         frequency: Double,
         voice: TrackVoiceKind,
+        preset: InstrumentPreset,
+        tone: GuitarTone = GuitarTone(),
         duration: Double,
         velocity: Float = 1,
         format: AVAudioFormat
@@ -444,37 +702,39 @@ enum InstrumentSoundGenerator {
         let sampleRate = format.sampleRate
         let safeFrequency = min(sampleRate * 0.4, max(30, frequency))
 
-        let decay: Double
-        let brightness: Double
-        let drive: Double
-        let level: Double
+        let baseDecay: Double
+        let baseDrive: Double
+        let baseLevel: Double
         switch voice {
         case .acousticGuitar:
-            decay = 1.6
-            brightness = 3_400
-            drive = 1.5
-            level = 0.32
+            baseDecay = 1.6
+            baseDrive = 1.5
+            baseLevel = 0.32
         case .electricGuitar:
-            decay = 2.1
-            brightness = 2_500
-            drive = 2.0
-            level = 0.29
+            baseDecay = 2.1
+            baseDrive = 2.0
+            baseLevel = 0.29
         case .distortedGuitar:
-            decay = 2.7
-            brightness = 2_000
-            drive = 5.2
-            level = 0.25
+            baseDecay = 2.7
+            baseDrive = 5.2
+            baseLevel = 0.25
         case .bassGuitar:
-            decay = 1.9
-            brightness = 900
-            drive = 1.8
-            level = 0.36
+            baseDecay = 1.9
+            baseDrive = 1.8
+            baseLevel = 0.36
         default:
-            decay = 1.5
-            brightness = 2_600
-            drive = 1.6
-            level = 0.3
+            baseDecay = 1.5
+            baseDrive = 1.6
+            baseLevel = 0.3
         }
+
+        let decay = baseDecay * min(2.5, max(0.25, preset.sustain))
+        let brightness = min(
+            sampleRate * 0.4,
+            max(300, preset.brightness * tone.brightnessScale)
+        )
+        let drive = baseDrive * tone.driveScale
+        let level = baseLevel * min(1.4, max(0.2, preset.level))
 
         let noteDuration = min(2.4, max(0.15, duration))
         let frameCount = max(1, Int(sampleRate * noteDuration))

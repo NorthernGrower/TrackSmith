@@ -8,6 +8,10 @@ import Foundation
 /// The instrument a track's piano-roll notes are played with.
 enum TrackVoiceKind: String, Codable, CaseIterable, Identifiable {
     case synth
+    case piano
+    case strings
+    case organ
+    case percussion
     case marleneVocal
     case acousticGuitar
     case electricGuitar
@@ -19,6 +23,10 @@ enum TrackVoiceKind: String, Codable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .synth: return "Studio Synth"
+        case .piano: return "Piano"
+        case .strings: return "String Ensemble"
+        case .organ: return "Organ"
+        case .percussion: return "Percussion"
         case .marleneVocal: return "Marlene Vocal"
         case .acousticGuitar: return "Acoustic Guitar"
         case .electricGuitar: return "Electric Guitar"
@@ -30,6 +38,10 @@ enum TrackVoiceKind: String, Codable, CaseIterable, Identifiable {
     var shortTitle: String {
         switch self {
         case .synth: return "Synth"
+        case .piano: return "Piano"
+        case .strings: return "Strings"
+        case .organ: return "Organ"
+        case .percussion: return "Percussion"
         case .marleneVocal: return "Marlene"
         case .acousticGuitar: return "Acoustic"
         case .electricGuitar: return "Electric"
@@ -41,6 +53,10 @@ enum TrackVoiceKind: String, Codable, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .synth: return "pianokeys"
+        case .piano: return "pianokeys.inverse"
+        case .strings: return "music.quarternote.3"
+        case .organ: return "music.note.list"
+        case .percussion: return "circle.hexagongrid.fill"
         case .marleneVocal: return "music.mic"
         case .acousticGuitar, .electricGuitar, .distortedGuitar: return "guitars"
         case .bassGuitar: return "guitars.fill"
@@ -51,6 +67,10 @@ enum TrackVoiceKind: String, Codable, CaseIterable, Identifiable {
     var releaseTail: TimeInterval {
         switch self {
         case .synth: return 0.28
+        case .piano: return 0.35
+        case .strings: return 0.4
+        case .organ: return 0.16
+        case .percussion: return 0.25
         case .marleneVocal: return 0.32
         case .acousticGuitar: return 0.22
         case .electricGuitar: return 0.24
@@ -73,6 +93,11 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
     case lofi
     case trap
     case electro
+    case eighties
+    case nineties
+    case metal
+    case pop
+    case drumAndBass
 
     var id: String { rawValue }
 
@@ -83,6 +108,11 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
         case .lofi: return "Lo-Fi Kit"
         case .trap: return "Trap 808"
         case .electro: return "Electro Kit"
+        case .eighties: return "80s Arena"
+        case .nineties: return "90s Hip-Hop"
+        case .metal: return "Metal"
+        case .pop: return "Pop"
+        case .drumAndBass: return "Drum & Bass"
         }
     }
 
@@ -93,6 +123,11 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
         case .lofi: return "Dusty, short and warm"
         case .trap: return "Long boomy kick, snappy top"
         case .electro: return "Bright, punchy and dry"
+        case .eighties: return "Big gated-room punch and bright cymbals"
+        case .nineties: return "Warm, sampled-style hip-hop punch"
+        case .metal: return "Hard attack, fast decay and bright tops"
+        case .pop: return "Polished, balanced and radio-ready"
+        case .drumAndBass: return "Tight, crisp transients for fast breaks"
         }
     }
 
@@ -103,6 +138,11 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
         case .lofi: return "cassette"
         case .trap: return "bolt.fill"
         case .electro: return "sparkles"
+        case .eighties: return "speaker.wave.3.fill"
+        case .nineties: return "record.circle"
+        case .metal: return "bolt.fill"
+        case .pop: return "sparkles"
+        case .drumAndBass: return "waveform.path"
         }
     }
 
@@ -114,6 +154,11 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
         case .lofi: return 0.94
         case .trap: return 0.90
         case .electro: return 1.12
+        case .eighties: return 1.08
+        case .nineties: return 0.96
+        case .metal: return 1.14
+        case .pop: return 1.04
+        case .drumAndBass: return 1.10
         }
     }
 
@@ -125,6 +170,11 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
         case .lofi: return 0.78
         case .trap: return 1.32
         case .electro: return 0.82
+        case .eighties: return 1.2
+        case .nineties: return 1.02
+        case .metal: return 1.24
+        case .pop: return 0.9
+        case .drumAndBass: return 0.82
         }
     }
 
@@ -136,6 +186,11 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
         case .lofi: return 0.42
         case .trap: return 0.55
         case .electro: return 0.86
+        case .eighties: return 0.9
+        case .nineties: return 0.58
+        case .metal: return 0.96
+        case .pop: return 0.72
+        case .drumAndBass: return 0.88
         }
     }
 
@@ -146,15 +201,20 @@ enum DrumKit: String, Codable, CaseIterable, Identifiable {
         case .lofi: return 0.9
         case .trap: return 0.98
         case .electro: return 0.92
+        case .eighties: return 1.0
+        case .nineties: return 0.96
+        case .metal: return 1.0
+        case .pop: return 0.96
+        case .drumAndBass: return 0.98
         }
     }
 
     var defaultGuitar: GuitarStyle {
         switch self {
         case .acoustic: return .acoustic
-        case .lofi: return .cleanElectric
-        case .trap, .studio808: return .none
-        case .electro: return .cleanElectric
+        case .lofi, .electro, .eighties, .nineties, .pop: return .cleanElectric
+        case .trap, .studio808, .drumAndBass: return .none
+        case .metal: return .overdriven
         }
     }
 }

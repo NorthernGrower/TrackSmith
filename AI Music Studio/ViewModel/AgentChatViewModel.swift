@@ -21,9 +21,14 @@ final class AgentChatViewModel: ObservableObject {
     ]
     @Published var draft = ""
     @Published private(set) var isWaiting = false
+    @Published private(set) var currentContext = "Studio Mixer"
     weak var mixer: MixerViewModel?
 
     private let client = AgentClient()
+
+    func setContext(_ context: String) {
+        currentContext = context
+    }
 
     func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -32,11 +37,12 @@ final class AgentChatViewModel: ObservableObject {
         draft = ""
         messages.append(ChatMessage(isUser: true, text: text))
         isWaiting = true
+        let context = currentContext
 
         Task {
             defer { isWaiting = false }
             if AgentSettings.isConfigured {
-                await sendRemote(text, mixer: mixer)
+                await sendRemote(text, context: context, mixer: mixer)
             } else {
                 let (commands, reply) = LocalAgentParser.parse(text, tracks: mixer.tracks)
                 apply(commands, mixer: mixer)
@@ -45,9 +51,9 @@ final class AgentChatViewModel: ObservableObject {
         }
     }
 
-    private func sendRemote(_ message: String, mixer: MixerViewModel) async {
+    private func sendRemote(_ message: String, context: String, mixer: MixerViewModel) async {
         do {
-            let reply = try await client.send(message: message, tracks: mixer.tracks)
+            let reply = try await client.send(message: message, context: context, tracks: mixer.tracks)
             let commands = reply.commands ?? []
             apply(commands, mixer: mixer)
             if let text = reply.reply, !text.isEmpty {

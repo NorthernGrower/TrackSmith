@@ -9,6 +9,7 @@ import SwiftUI
 struct WaveformTimeline: View {
     @ObservedObject var model: MixerViewModel
     var onOpenTrackEQ: (UUID) -> Void = { _ in }
+    var onOpenTrackEffects: (UUID) -> Void = { _ in }
     var onOpenPianoRoll: (UUID) -> Void = { _ in }
     var onOpenInstrumentsForTrack: (UUID) -> Void = { _ in }
     var onAddInstrumentTrack: () -> Void = {}
@@ -95,6 +96,7 @@ struct WaveformTimeline: View {
         )) {
             if let trackID = takeLaneTrackID {
                 TakeLaneView(model: model, trackID: trackID)
+                    .studioAgentAccess(context: "Take Lane")
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
             }
@@ -137,59 +139,138 @@ struct WaveformTimeline: View {
     }
 
     private func clipEditToolbar(for selection: (trackID: UUID, clip: AudioClip)) -> some View {
+        let clipLength = selection.clip.timelineDuration(tempoBPM: model.tempoBPM)
         let canSplit = playheadTime > selection.clip.startTime + 0.05
-            && playheadTime < selection.clip.startTime + selection.clip.duration - 0.05
+            && playheadTime < selection.clip.startTime + clipLength - 0.05
 
-        return HStack(spacing: 7) {
-            Image(systemName: "waveform.path")
-                .foregroundStyle(Color.studioAccent)
-            Text(selection.clip.name)
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        return VStack(spacing: 5) {
+            HStack(spacing: 7) {
+                Image(systemName: "waveform.path")
+                    .foregroundStyle(Color.studioAccent)
+                Text(selection.clip.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button {
-                if let splitID = model.splitClip(
-                    trackID: selection.trackID,
-                    clipID: selection.clip.id,
-                    at: playheadTime,
-                    snapInterval: snapInterval
-                ) {
-                    selectedClipID = splitID
+                Button {
+                    model.previewClip(trackID: selection.trackID, clipID: selection.clip.id)
+                } label: {
+                    Label("Preview", systemImage: "play.fill")
+                        .font(.system(size: 10, weight: .semibold))
                 }
-            } label: {
-                Label("Split", systemImage: "scissors")
-                    .font(.system(size: 10, weight: .semibold))
-            }
-            .disabled(!canSplit)
-            .accessibilityLabel("Split selected clip at playhead")
+                .accessibilityLabel("Preview selected clip in the session")
 
-            Button {
-                if let duplicateID = model.duplicateClip(
-                    trackID: selection.trackID,
-                    clipID: selection.clip.id,
-                    snapInterval: snapInterval
-                ) {
-                    selectedClipID = duplicateID
+                Button {
+                    if let splitID = model.splitClip(
+                        trackID: selection.trackID,
+                        clipID: selection.clip.id,
+                        at: playheadTime,
+                        snapInterval: snapInterval
+                    ) {
+                        selectedClipID = splitID
+                    }
+                } label: {
+                    Label("Split", systemImage: "scissors")
+                        .font(.system(size: 10, weight: .semibold))
                 }
-            } label: {
-                Image(systemName: "plus.square.on.square")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .accessibilityLabel("Duplicate selected clip")
+                .disabled(!canSplit)
+                .accessibilityLabel("Split selected clip at playhead")
 
-            Button(role: .destructive) {
-                model.deleteClip(trackID: selection.trackID, clipID: selection.clip.id)
-                selectedClipID = nil
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 30, height: 30)
+                Button {
+                    if let duplicateID = model.duplicateClip(
+                        trackID: selection.trackID,
+                        clipID: selection.clip.id,
+                        snapInterval: snapInterval
+                    ) {
+                        selectedClipID = duplicateID
+                    }
+                } label: {
+                    Image(systemName: "plus.square.on.square")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .accessibilityLabel("Duplicate selected clip")
+
+                Button(role: .destructive) {
+                    model.deleteClip(trackID: selection.trackID, clipID: selection.clip.id)
+                    selectedClipID = nil
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .accessibilityLabel("Delete selected clip")
             }
-            .accessibilityLabel("Delete selected clip")
+
+            HStack(spacing: 9) {
+                Label("PITCH", systemImage: "tuningfork")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Button("−") {
+                    model.setClipTransposeSemitones(
+                        trackID: selection.trackID,
+                        clipID: selection.clip.id,
+                        semitones: selection.clip.transposeSemitones - 1
+                    )
+                }
+                .accessibilityLabel("Transpose down one semitone")
+                Text(String(format: "%+d st", selection.clip.transposeSemitones))
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .frame(minWidth: 42)
+                Button("+") {
+                    model.setClipTransposeSemitones(
+                        trackID: selection.trackID,
+                        clipID: selection.clip.id,
+                        semitones: selection.clip.transposeSemitones + 1
+                    )
+                }
+                .accessibilityLabel("Transpose up one semitone")
+                .disabled(selection.clip.transposeSemitones >= 12)
+
+                Rectangle().fill(Color.white.opacity(0.14)).frame(width: 1, height: 18)
+
+                Button {
+                    model.setClipSourceTempo(
+                        trackID: selection.trackID,
+                        clipID: selection.clip.id,
+                        bpm: selection.clip.sourceTempoBPM == nil ? Double(model.tempoBPM) : nil
+                    )
+                } label: {
+                    Text(selection.clip.sourceTempoBPM == nil ? "SYNC OFF" : "SYNC ON")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(selection.clip.sourceTempoBPM == nil ? Color.white.opacity(0.65) : Color.studioAccent)
+                }
+                .accessibilityLabel(selection.clip.sourceTempoBPM == nil ? "Enable tempo sync for clip" : "Disable tempo sync for clip")
+
+                if let sourceTempo = selection.clip.sourceTempoBPM {
+                    Button("−") {
+                        model.setClipSourceTempo(
+                            trackID: selection.trackID,
+                            clipID: selection.clip.id,
+                            bpm: sourceTempo - 1
+                        )
+                    }
+                    .accessibilityLabel("Decrease clip source tempo")
+                    Text("\(Int(sourceTempo.rounded())) → \(model.tempoBPM) BPM")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Button("+") {
+                        model.setClipSourceTempo(
+                            trackID: selection.trackID,
+                            clipID: selection.clip.id,
+                            bpm: sourceTempo + 1
+                        )
+                    }
+                    .accessibilityLabel("Increase clip source tempo")
+                } else {
+                    Text("NATURAL TEMPO")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Color.studioPanel)
@@ -465,6 +546,17 @@ struct WaveformTimeline: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.studioAccent)
                 .accessibilityLabel("Equalizer for \(track.name)")
+                Button {
+                    onOpenTrackEffects(track.id)
+                } label: {
+                    Image(systemName: "pedalboard")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 20, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.studioAccent)
+                .accessibilityLabel("Effects rack for \(track.name)")
                 Button {
                     onOpenPianoRoll(track.id)
                 } label: {
@@ -988,7 +1080,8 @@ struct WaveformTimeline: View {
 
     private func editableClip(trackID: UUID, clip: AudioClip, color: Color) -> some View {
         let isSelected = selectedClipID == clip.id
-        let clipWidth = max(52, CGFloat(clip.duration) * zoom)
+        let timelineDuration = clip.timelineDuration(tempoBPM: model.tempoBPM)
+        let clipWidth = max(52, CGFloat(timelineDuration) * zoom)
 
         return HStack(spacing: 0) {
             if isSelected {
@@ -1028,7 +1121,7 @@ struct WaveformTimeline: View {
                 ClipFadeCurve(
                     fadeIn: clip.fadeIn,
                     fadeOut: clip.fadeOut,
-                    duration: clip.duration
+                    duration: timelineDuration
                 )
                 .stroke(Color.black.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
                 .allowsHitTesting(false)
@@ -1037,13 +1130,13 @@ struct WaveformTimeline: View {
         .overlay(alignment: .topLeading) {
             if model.isProMode, isSelected {
                 fadeHandle(trackID: trackID, clip: clip, edge: .in)
-                    .offset(x: CGFloat(min(clip.fadeIn, clip.duration * 0.5)) * zoom - 7, y: 4)
+                    .offset(x: CGFloat(min(clip.fadeIn, timelineDuration * 0.5)) * zoom - 7, y: 4)
             }
         }
         .overlay(alignment: .topTrailing) {
             if model.isProMode, isSelected {
                 fadeHandle(trackID: trackID, clip: clip, edge: .out)
-                    .offset(x: -CGFloat(min(clip.fadeOut, clip.duration * 0.5)) * zoom + 7, y: 4)
+                    .offset(x: -CGFloat(min(clip.fadeOut, timelineDuration * 0.5)) * zoom + 7, y: 4)
             }
         }
         .accessibilityElement(children: .contain)
@@ -1158,7 +1251,7 @@ struct WaveformTimeline: View {
                         trackID: trackID,
                         clipID: clip.id,
                         original: original,
-                        to: original.startTime + original.duration + Double(value.translation.width / zoom),
+                        to: original.startTime + original.timelineDuration(tempoBPM: model.tempoBPM) + Double(value.translation.width / zoom),
                         snapInterval: snapInterval
                     )
                 }
@@ -1180,7 +1273,7 @@ struct WaveformTimeline: View {
                         trackID: trackID,
                         clipID: clip.id,
                         original: original,
-                        to: original.startTime + original.duration + Double(value.translation.width / zoom),
+                        to: original.startTime + original.timelineDuration(tempoBPM: model.tempoBPM) + Double(value.translation.width / zoom),
                         snapInterval: snapInterval
                     )
                 }

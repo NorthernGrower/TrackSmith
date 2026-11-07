@@ -10,15 +10,18 @@ struct SongwriterView: View {
     @ObservedObject var model: MixerViewModel
 
     @StateObject private var writer = SongwriterViewModel()
+    @StateObject private var lyricPreview = LyricLinePreview()
     @Environment(\.dismiss) private var dismiss
 
     @State private var tab = WriterTab.lyrics
     @State private var genre = MusicGenre.pop
     @State private var topic = ""
     @State private var vocal = VocalStyle.marleneLead
+    @State private var vocalSettings = VocalSettings()
     @State private var guitar = GuitarStyle.cleanElectric
     @State private var drumKit = DrumKit.studio808
     @State private var tempo = 118
+    @State private var showingLyricsLibrary = false
 
     var body: some View {
         NavigationStack {
@@ -46,12 +49,27 @@ struct SongwriterView: View {
             .navigationTitle("AI Songwriter")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showingLyricsLibrary = true } label: {
+                        Label("Lyrics", systemImage: "book.closed")
+                    }
+                    .accessibilityLabel("Open Lyrics Library")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
         }
         .onAppear(perform: applyGenreDefaults)
+        .onDisappear { lyricPreview.stop() }
+        .sheet(isPresented: $showingLyricsLibrary) {
+            LyricsLibraryView { draft in
+                writer.loadLyrics(draft)
+                topic = draft.topic
+                genre = MusicGenre(rawValue: draft.genreID) ?? genre
+                tab = .lyrics
+            }
+        }
         .onChange(of: genre) { _, _ in
             applyDefaultsForGenre()
         }
@@ -164,15 +182,64 @@ struct SongwriterView: View {
                         .tracking(1.1)
                         .foregroundStyle(Color.studioAccent)
 
-                    ForEach(section.lines, id: \.self) { line in
-                        Text(line)
-                            .font(.system(size: 13))
-                            .fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(section.lines.enumerated()), id: \.offset) { index, line in
+                        HStack(alignment: .center, spacing: 8) {
+                            Text(line)
+                                .font(.system(size: 13))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            let key = "\(section.id.uuidString)-\(index)"
+                            Button {
+                                if lyricPreview.playingKey == key {
+                                    lyricPreview.stop()
+                                } else {
+                                    lyricPreview.play(line, key: key)
+                                }
+                            } label: {
+                                Image(systemName: lyricPreview.playingKey == key ? "speaker.wave.2.fill" : "speaker")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Color.studioAccent)
+                                    .frame(width: 30, height: 30)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(lyricPreview.playingKey == key ? "Stop lyric preview" : "Hear lyric sung")
+                        }
                     }
                 }
             }
 
+            if let take = writer.sectionTake {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("NEW TAKE · \(take.title.uppercased())")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.studioAccent)
+                    ForEach(Array(take.lines.enumerated()), id: \.offset) { _, line in Text(line).font(.system(size: 13)) }
+                    HStack {
+                        Button("Keep New Take") { writer.keepSectionTake() }.buttonStyle(.borderedProminent).tint(Color.studioAccent)
+                        Button("Keep Old Take") { writer.discardSectionTake() }.buttonStyle(.bordered)
+                    }
+                }
+                .padding(12)
+                .background(Color.studioPanelHighlight.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+            }
+
             HStack(spacing: 10) {
+                Menu {
+                    ForEach(lyrics.sections.filter { ["Verse 1", "Chorus", "Bridge"].contains($0.title) }) { section in
+                        Button("Re-roll \(section.title)") {
+                            writer.rerollSection(section.title, genre: MusicGenre(rawValue: lyrics.genreID) ?? genre, topic: lyrics.topic)
+                        }
+                    }
+                } label: {
+                    Label("Re-roll Section", systemImage: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 38)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.primary)
+                .background(Color.studioPanelHighlight.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+
                 Button {
                     writer.writeLyrics(genre: genre, topic: topic)
                 } label: {
@@ -262,12 +329,14 @@ struct SongwriterView: View {
                             systemImage: style.systemImage,
                             isSelected: vocal == style
                         ) {
-                            vocal = style
+                            selectVocalStyle(style)
                         }
                     }
                 }
                 .padding(.vertical, 2)
             }
+
+            vocalControlsCard
 
             arrangementCard
 
@@ -278,11 +347,10 @@ struct SongwriterView: View {
                     vocal: vocal,
                     guitar: guitar,
                     drumKit: drumKit,
-                    tempo: tempo
+                    tempo: tempo,
+                    vocalSettings: vocalSettings
                 )
-                writer.createSong(request: request, model: model) {
-                    dismiss()
-                }
+                writer.createSong(request: request, model: model) {}
             } label: {
                 HStack(spacing: 8) {
                     if writer.isComposingSong {
@@ -359,8 +427,10 @@ struct SongwriterView: View {
             }
             if vocal.includesVocal {
                 arrangementRow(
-                    title: vocal == .marleneDouble ? "Marlene Lead + Harmony" : "Marlene Lead",
-                    detail: "Female vocal · \(vocal.subtitle.lowercased())",
+                    title: vocalSettings.harmonyCount > 1
+                        ? "Marlene + \(vocalSettings.harmonyCount - 1) Harmony"
+                        : "Marlene Lead",
+                    detail: "\(vocalSettings.range.title) range · \(vocalSettings.delivery.title.lowercased()) · \(vocalSettings.partCount) part\(vocalSettings.partCount == 1 ? "" : "s")",
                     systemImage: "music.mic"
                 )
             }
@@ -402,6 +472,129 @@ struct SongwriterView: View {
 
             Spacer(minLength: 0)
         }
+    }
+
+    // MARK: - Vocal controls
+
+    private var vocalControlsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "music.mic.circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.studioAccent)
+
+                Text("MARLENE'S VOICE")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.9)
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                Button {
+                    model.auditionVocal(vocalSettings)
+                } label: {
+                    Label("Audition", systemImage: "play.circle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.studioAccent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Audition Marlene's voice")
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                controlLabel("RANGE")
+                Picker("Vocal range", selection: $vocalSettings.range) {
+                    ForEach(VocalRange.allCases) { range in
+                        Text(range.title).tag(range)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Vocal range")
+
+                Text(vocalSettings.range.subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                controlLabel("DELIVERY")
+                Picker("Vocal delivery", selection: $vocalSettings.delivery) {
+                    ForEach(VocalDelivery.allCases) { delivery in
+                        Text(delivery.title).tag(delivery)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Vocal delivery")
+
+                Text(vocalSettings.delivery.subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    controlLabel("VIBRATO")
+                    Spacer(minLength: 0)
+                    Text("\(Int((vocalSettings.vibrato * 100).rounded()))%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Slider(value: $vocalSettings.vibrato, in: 0...1)
+                    .tint(Color.studioAccent)
+                    .accessibilityLabel("Vibrato amount")
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    controlLabel("HARMONIES")
+                    Spacer(minLength: 0)
+                    Picker("Vocal parts", selection: Binding(
+                        get: { vocalSettings.harmonyCount },
+                        set: { setHarmonyCount($0) }
+                    )) {
+                        ForEach(1...3, id: \.self) { count in
+                            Text(count == 1 ? "Solo" : "\(count) Parts").tag(count)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
+                    .accessibilityLabel("Vocal parts")
+                }
+
+                Text("Lead plus up to two harmony parts.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func controlLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .tracking(0.9)
+            .foregroundStyle(.secondary)
+    }
+
+    private func selectVocalStyle(_ style: VocalStyle) {
+        vocal = style
+        switch style {
+        case .marleneLead:
+            vocalSettings.harmonyCount = 1
+        case .marleneDouble:
+            vocalSettings.harmonyCount = max(2, vocalSettings.harmonyCount)
+        case .instrumental:
+            break
+        }
+    }
+
+    private func setHarmonyCount(_ count: Int) {
+        vocalSettings.harmonyCount = count
+        guard vocal != .instrumental else { return }
+        vocal = count > 1 ? .marleneDouble : .marleneLead
     }
 
     // MARK: - Shared pieces

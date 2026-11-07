@@ -1267,6 +1267,42 @@ button { cursor: pointer; }
 .instrument-record-button.recording { border-color: #f06a5e; background: #c94439; color: #fff4ec; }
 .instrument-record-button:disabled { opacity: .38; cursor: default; }
 .instrument-record-hint { margin: -7px 2px 4px; color: #9c8773; font: 8px "SF Mono", ui-monospace, Menlo, monospace; }
+.midi-controller-panel select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid rgba(202, 151, 91, 0.34);
+  border-radius: 8px;
+  padding: 0 8px;
+  background: #302017;
+  color: #f2e4d0;
+  font: 10px "SF Mono", ui-monospace, Menlo, monospace;
+}
+.midi-controller-panel select:disabled { opacity: .55; }
+.midi-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0 10px;
+  color: #b6a28a;
+  font: 8px/1.45 "SF Mono", ui-monospace, Menlo, monospace;
+}
+.midi-status > span:last-child { min-width: 0; }
+.midi-status-light {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin-top: 2px;
+  border-radius: 50%;
+  background: #b28d60;
+}
+.midi-status.connected .midi-status-light {
+  background: #79c88d;
+  box-shadow: 0 0 7px rgba(121, 200, 141, .5);
+}
+.midi-status.unavailable .midi-status-light { background: #e18478; }
+.midi-connect-button { width: 100%; min-height: 34px; }
+.midi-connect-button:disabled { opacity: .42; cursor: default; }
+.midi-hint { margin: 8px 2px 1px; color: #9c8773; font: 8px/1.45 "SF Mono", ui-monospace, Menlo, monospace; }
 @keyframes record-pulse { to { opacity: .45; transform: scale(.82); } }
 
 
@@ -1733,3 +1769,36 @@ button { cursor: pointer; }
   border-radius: 3px;
   transition: width 0.15s linear;
 }
+
+
+
+/* Non-destructive clip pitch and tempo controls */
+.clip-edit-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 4px;
+  border-left: 1px solid var(--line);
+}
+.clip-edit-label {
+  color: var(--secondary);
+  font: 700 8px "SF Mono", ui-monospace, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+.clip-edit-value {
+  min-width: 34px;
+  text-align: center;
+  font: 600 9px "SF Mono", ui-monospace, Menlo, monospace;
+}
+.clip-edit-group input[data-clip-bpm] {
+  width: 44px;
+  height: 26px;
+  padding: 0 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-highlight);
+  font: 600 9px "SF Mono", ui-monospace, Menlo, monospace;
+  text-align: center;
+}
+.clip-edit-group input[data-clip-bpm]:disabled { opacity: 0.45; }
+.clip-toolbar button:disabled { opacity: 0.4; cursor: default; }

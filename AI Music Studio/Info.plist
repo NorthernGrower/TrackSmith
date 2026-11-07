@@ -15,7 +15,9 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Record live audio into the selected track of your music session.</string>
+	<string>Record live audio into the selected track of your music session or dictate a prompt to the studio assistant.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Transcribe your spoken prompts so the studio assistant can make your requested edits.</string>
 	<key>UIDeviceFamily</key>
 	<array>
 		<integer>1</integer>

@@ -13,6 +13,7 @@ struct SongRequest {
     var guitar: GuitarStyle
     var drumKit: DrumKit
     var tempo: Int
+    var vocalSettings = VocalSettings()
 }
 
 /// Builds a complete session — drums, bass, keys, guitar and Marlene's vocal —
@@ -173,23 +174,38 @@ enum SongComposer {
             tracks.append(guitar)
         }
 
-        // Marlene sings a phrase per vocal section, with an optional harmony.
+        // Marlene sings a phrase per vocal section, with up to two harmonies.
         if request.vocal.includesVocal {
-            let harmonyCount = request.vocal.harmonyCount
+            let settings = request.vocalSettings
+            let partCount = settings.partCount
+            let harmonyIntervals = [4, -5]
+            let melodyRange = 60...83
+
             var leadNotes: [SynthNote] = []
-            var harmonyNotes: [SynthNote] = []
+            var harmonyNotes: [[SynthNote]] = Array(
+                repeating: [],
+                count: max(0, partCount - 1)
+            )
 
             for plan in plans {
                 guard let phrase = plan.phrase else { continue }
+                let lyricSection = lyrics?.sections.first(where: { $0.title == plan.name })
+                    ?? (plan.name == "Final Chorus" ? lyrics?.sections.first(where: { $0.title == "Chorus" }) : nil)
+                let lyricFingerprint = lyricSection?.lines.joined(separator: " ").utf8.reduce(0) { ($0 &* 31 &+ Int($1)) & 0x7fff_ffff } ?? 0
+                let melodyShift = lyricFingerprint % phrase.contour.count
                 for barOffset in 0..<plan.barCount {
                     let barIndex = plan.startBar + barOffset
                     let chord = chords[barIndex % chords.count]
                     let barStart = Double(barIndex) * barDuration
                     for (stepIndex, position) in phrase.beats.enumerated() {
                         let contour = phrase.contour
-                        let intervalIndex = contour[(barOffset * phrase.beats.count + stepIndex) % contour.count]
+                        let contourPosition = (barOffset * phrase.beats.count + stepIndex + melodyShift) % contour.count
+                        let intervalIndex = contour[contourPosition]
                         let interval = chord.intervals[min(intervalIndex, chord.intervals.count - 1)]
-                        let pitch = wrapped(64 + chord.rootOffset + interval, into: 62...79)
+                        let pitch = wrapped(
+                            64 + chord.rootOffset + interval + settings.range.semitoneOffset,
+                            into: melodyRange
+                        )
                         let start = barStart + position * beat
 
                         leadNotes.append(SynthNote(
@@ -199,12 +215,13 @@ enum SongComposer {
                             velocity: stepIndex == 0 ? 0.82 : 0.68
                         ))
 
-                        if harmonyCount > 1 {
-                            harmonyNotes.append(SynthNote(
-                                pitch: wrapped(pitch + 4, into: 62...81),
+                        for partIndex in harmonyNotes.indices {
+                            let offset = harmonyIntervals[min(partIndex, harmonyIntervals.count - 1)]
+                            harmonyNotes[partIndex].append(SynthNote(
+                                pitch: wrapped(pitch + offset, into: melodyRange),
                                 startTime: start,
                                 duration: beat * phrase.noteBeats,
-                                velocity: 0.4
+                                velocity: partIndex == 0 ? 0.42 : 0.34
                             ))
                         }
                     }
@@ -219,6 +236,8 @@ enum SongComposer {
                 notes: leadNotes
             )
             vocal.voice = .marleneVocal
+            vocal.presetID = settings.delivery.presetID
+            vocal.vocalVibrato = settings.vibratoDepth
             var vocalEQ = vocal.eqSettings
             vocalEQ.lowGain = -2
             vocalEQ.midGain = 1.5
@@ -228,15 +247,17 @@ enum SongComposer {
             vocal.compressorSettings.ratio = 3.5
             tracks.append(vocal)
 
-            if harmonyCount > 1 {
+            for (partIndex, notes) in harmonyNotes.enumerated() where !notes.isEmpty {
                 var harmony = Track(
-                    name: "Marlene (Harmony)",
+                    name: partIndex == 0 ? "Marlene (Harmony)" : "Marlene (Harmony \(partIndex + 1))",
                     fileName: "",
-                    volume: 0.5,
-                    pan: -0.18,
-                    notes: harmonyNotes
+                    volume: partIndex == 0 ? 0.5 : 0.42,
+                    pan: partIndex == 0 ? -0.18 : 0.22,
+                    notes: notes
                 )
                 harmony.voice = .marleneVocal
+                harmony.presetID = settings.delivery.presetID
+                harmony.vocalVibrato = settings.vibratoDepth
                 tracks.append(harmony)
             }
         }
