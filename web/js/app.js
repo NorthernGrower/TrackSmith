@@ -4,6 +4,7 @@ import * as model from './model.js';
 import { StudioEngine, encodeWav } from './audio-engine.js';
 import { InstrumentEngine, DRUM_PADS, STARTER_SOUNDS } from './instruments.js';
 import { createZipBlob } from './zip.js';
+import { DEFAULT_STEM_TARGETS, STEM_TARGETS, renderOfflineBandSplit, separateWithAudioShake } from './stem-separation.js';
 
 const ROW_HEIGHT = 92;
 const RULER_HEIGHT = 62;
@@ -2609,6 +2610,7 @@ function openModal(html, { tall = false } = {}) {
 }
 
 function closeModal() {
+  if (state.modal === 'separate-song') dismissSeparationFlow();
   if (state.modal === 'instruments') {
     state.midiRequestID += 1;
     disconnectWebMIDIInput('MIDI controller disconnected.');
@@ -6136,3 +6138,346 @@ async function boot() {
 }
 
 boot();
+
+
+
+// ---------- AI song separation ----------
+
+let separationFile = null;
+let separationPreviewURL = null;
+let separationController = null;
+let separationTargets = new Set(DEFAULT_STEM_TARGETS);
+let separationDuration = 0;
+let separationOperationID = 0;
+let separationFlowOpen = false;
+let separationBusy = false;
+
+function formatSeparationDuration(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function openSeparateSong() {
+  if (state.modal) closeModal();
+  separationFile = null;
+  separationDuration = 0;
+  separationTargets = new Set(DEFAULT_STEM_TARGETS);
+  separationBusy = false;
+  separationFlowOpen = true;
+  state.modal = 'separate-song';
+
+  const targetMarkup = (targets) => targets.map((target) => `
+    <label class="separation-target">
+      <input type="checkbox" data-separation-target="${target.id}" ${separationTargets.has(target.id) ? 'checked' : ''}>
+      <span><strong>${escapeHtml(target.name)}</strong><small>${escapeHtml(target.hint)}</small></span>
+    </label>`).join('');
+
+  openModal(`
+    <header class="modal-header">
+      <h2>Separate Your Song</h2>
+      <button class="modal-close" type="button" data-close>Close</button>
+    </header>
+    <div class="modal-body separation-body">
+      <div class="separation-card">
+        <h3 class="separation-section-title">SOURCE SONG</h3>
+        <div class="separation-source-row">
+          <button class="tool" type="button" id="separationChooseBtn">Choose Song</button>
+          <div class="separation-source-meta">
+            <strong id="separationFileName">No song selected</strong>
+            <span id="separationFileDuration">Choose one audio file to preview and estimate credits.</span>
+          </div>
+        </div>
+        <audio class="separation-preview" id="separationPreview" controls preload="metadata" hidden></audio>
+        <input id="separationFileInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.aif,.aiff,.aac,.flac" hidden>
+      </div>
+
+      <div class="separation-card">
+        <h3 class="separation-section-title">CHOOSE STEMS</h3>
+        <div class="separation-target-grid">${targetMarkup(STEM_TARGETS.slice(0, 6))}</div>
+        <details class="separation-more">
+          <summary>More targets · piano, strings, wind, drum kit</summary>
+          <div class="separation-target-grid">${targetMarkup(STEM_TARGETS.slice(6))}</div>
+        </details>
+      </div>
+
+      <div class="separation-card">
+        <div class="separation-estimate"><strong id="separationCreditEstimate">— credits</strong><span id="separationEstimateDetail">Choose a song and stems for an estimate</span></div>
+        <p class="separation-note">Credits are charged per minute for each selected stem. Source duration rounds up to the next whole minute.</p>
+      </div>
+
+      <div class="separation-card">
+        <label class="separation-key-label" for="separationApiKey">AudioShake API key</label>
+        <input class="separation-key-input" id="separationApiKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your API key">
+        <p class="separation-key-help">Create a key in <a href="https://dashboard.audioshake.ai" target="_blank" rel="noopener noreferrer">AudioShake Dashboard → Settings → API Keys</a>. The key stays in this page's memory and is sent directly to AudioShake; it is never saved here.</p>
+      </div>
+
+      <div class="separation-card separation-disclosure">
+        <span aria-hidden="true">↑</span>
+        <div><strong>Your song is uploaded to AudioShake.</strong> AI-separated stems are estimates and may contain some bleed. Use Offline Band Split below for a no-upload frequency-band fallback.</div>
+      </div>
+
+      <div class="separation-card separation-progress" id="separationProgressCard" aria-live="polite">
+        <div class="separation-progress-head"><strong id="separationProgressLabel">Preparing…</strong><span id="separationProgressPercent">0%</span></div>
+        <div class="separation-progress-track"><div class="separation-progress-fill" id="separationProgressFill"></div></div>
+      </div>
+      <div class="separation-message" id="separationMessage" role="status"></div>
+
+      <div class="separation-actions">
+        <button class="tool primary" type="button" id="separationAiBtn" disabled>Separate Stems</button>
+        <button class="tool secondary" type="button" id="separationOfflineBtn" disabled>Use Offline Band Split · No Upload</button>
+      </div>
+      <p class="separation-note">The offline fallback creates Bass, Vocals, Drums and Other frequency bands. These are not AI-isolated instruments and can contain overlapping sounds.</p>
+    </div>` , { tall: true });
+
+  document.getElementById('separationChooseBtn').addEventListener('click', () => {
+    document.getElementById('separationFileInput').click();
+  });
+  document.getElementById('separationFileInput').addEventListener('change', (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (!file) return;
+    if (separationPreviewURL) URL.revokeObjectURL(separationPreviewURL);
+    separationFile = file;
+    separationDuration = 0;
+    separationPreviewURL = URL.createObjectURL(file);
+    const preview = document.getElementById('separationPreview');
+    preview.src = separationPreviewURL;
+    preview.hidden = false;
+    document.getElementById('separationFileName').textContent = file.name;
+    document.getElementById('separationFileDuration').textContent = 'Reading song duration…';
+    preview.onloadedmetadata = () => {
+      if (preview.src !== separationPreviewURL || !Number.isFinite(preview.duration) || preview.duration <= 0) return;
+      separationDuration = preview.duration;
+      document.getElementById('separationFileDuration').textContent = `${formatSeparationDuration(separationDuration)} · source song`;
+      updateSeparationEstimate();
+      updateSeparationControls();
+    };
+    preview.onerror = () => {
+      if (preview.src !== separationPreviewURL) return;
+      const durationLabel = document.getElementById('separationFileDuration');
+      if (!durationLabel) return;
+      durationLabel.textContent = 'This browser could not read the song duration. Try a WAV or MP3 file.';
+      updateSeparationEstimate();
+      updateSeparationControls();
+    };
+    updateSeparationEstimate();
+    updateSeparationControls();
+    resetSeparationProgress();
+    showSeparationMessage('', '');
+  });
+
+  document.querySelectorAll('[data-separation-target]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const target = input.dataset.separationTarget;
+      if (input.checked) separationTargets.add(target);
+      else separationTargets.delete(target);
+      updateSeparationEstimate();
+      updateSeparationControls();
+      resetSeparationProgress();
+      showSeparationMessage('', '');
+    });
+  });
+  document.getElementById('separationAiBtn').addEventListener('click', runAISeparation);
+  document.getElementById('separationOfflineBtn').addEventListener('click', runOfflineSeparation);
+  updateSeparationEstimate();
+  updateSeparationControls();
+}
+
+function updateSeparationEstimate() {
+  const estimate = document.getElementById('separationCreditEstimate');
+  const detail = document.getElementById('separationEstimateDetail');
+  if (!estimate || !detail) return;
+  const selectedCount = separationTargets.size;
+  if (!separationDuration || !selectedCount) {
+    estimate.textContent = '— credits';
+    detail.textContent = !selectedCount ? 'Choose at least one stem' : 'Choose a song for an estimate';
+    return;
+  }
+  const billedMinutes = Math.max(1, Math.ceil(separationDuration / 60));
+  estimate.textContent = `${billedMinutes * selectedCount} credits`;
+  detail.textContent = `${formatSeparationDuration(separationDuration)} · ${billedMinutes} billed min × ${selectedCount} stems`;
+}
+
+function updateSeparationControls() {
+  const aiButton = document.getElementById('separationAiBtn');
+  const offlineButton = document.getElementById('separationOfflineBtn');
+  if (!aiButton || !offlineButton) return;
+  aiButton.disabled = separationBusy || !separationFile || !separationDuration || !separationTargets.size;
+  offlineButton.disabled = separationBusy || !separationFile;
+  document.getElementById('separationChooseBtn').disabled = separationBusy;
+  document.getElementById('separationApiKey').disabled = separationBusy;
+  document.querySelectorAll('[data-separation-target]').forEach((input) => { input.disabled = separationBusy; });
+}
+
+function resetSeparationProgress() {
+  const card = document.getElementById('separationProgressCard');
+  if (!card) return;
+  card.classList.remove('on');
+  document.getElementById('separationProgressFill').style.width = '0';
+  document.getElementById('separationProgressPercent').textContent = '0%';
+}
+
+function setSeparationProgress(label, fraction) {
+  const card = document.getElementById('separationProgressCard');
+  if (!card) return;
+  card.classList.add('on');
+  const progress = Math.max(0, Math.min(1, Number(fraction) || 0));
+  document.getElementById('separationProgressLabel').textContent = label;
+  document.getElementById('separationProgressPercent').textContent = `${Math.round(progress * 100)}%`;
+  document.getElementById('separationProgressFill').style.width = `${progress * 100}%`;
+}
+
+function showSeparationMessage(message, kind = '') {
+  const element = document.getElementById('separationMessage');
+  if (!element) return;
+  element.textContent = message;
+  element.className = `separation-message${message ? ' on' : ''}${kind ? ` ${kind}` : ''}`;
+}
+
+function uniqueSeparationTrackName(baseName, usedNames) {
+  const cleanName = String(baseName || 'Stem').replace(/\.[^.]+$/, '').trim() || 'Stem';
+  let name = cleanName;
+  let suffix = 2;
+  while (usedNames.has(name.toLowerCase())) {
+    name = `${cleanName} ${suffix}`;
+    suffix += 1;
+  }
+  usedNames.add(name.toLowerCase());
+  return name;
+}
+
+async function appendSeparationOutputs(outputs, operationID) {
+  const failures = [];
+  const usedNames = new Set(state.session.tracks.map((track) => track.name.toLowerCase()));
+  let added = 0;
+  let changed = false;
+  for (let index = 0; index < outputs.length; index += 1) {
+    if (operationID !== separationOperationID) break;
+    const output = outputs[index];
+    try {
+      const blob = output.blob || new Blob([output.data], { type: 'audio/wav' });
+      const buffer = output.buffer || await engine.decode(await blob.arrayBuffer());
+      if (operationID !== separationOperationID) break;
+      const fileId = await model.saveFile(blob, output.fileName || `${output.name || 'Stem'}.wav`);
+      if (operationID !== separationOperationID) {
+        await model.removeFile(fileId);
+        break;
+      }
+      if (!changed) snapshot();
+      const name = uniqueSeparationTrackName(output.name, usedNames);
+      const track = model.createTrack({ name, fileId, duration: buffer.duration, index: state.session.tracks.length });
+      state.session.tracks.push(track);
+      state.buffers.set(fileId, buffer);
+      engine.buffers.set(fileId, buffer);
+      state.peaks.set(fileId, computePeaks(buffer));
+      added += 1;
+      changed = true;
+      setSeparationProgress(`Adding stems · ${index + 1} of ${outputs.length}…`, 0.82 + 0.17 * (index + 1) / outputs.length);
+    } catch (error) {
+      failures.push(`${output.name || 'Stem'}: ${error.message || 'Could not import this stem.'}`);
+    }
+  }
+  if (changed) {
+    persist();
+    engine.rebuild();
+    render();
+  }
+  return { added, failures };
+}
+
+async function runAISeparation() {
+  if (!separationFile || !separationTargets.size) return;
+  const apiKey = document.getElementById('separationApiKey').value.trim();
+  if (!apiKey) {
+    showSeparationMessage('Enter your AudioShake API key before starting AI separation.', 'error');
+    return;
+  }
+  const operationID = ++separationOperationID;
+  const controller = new AbortController();
+  separationController = controller;
+  separationBusy = true;
+  updateSeparationControls();
+  showSeparationMessage('', '');
+  setSeparationProgress('Preparing secure upload…', 0.01);
+  try {
+    const result = await separateWithAudioShake(separationFile, [...separationTargets], apiKey, {
+      signal: controller.signal,
+      onProgress: (label, fraction) => setSeparationProgress(label, fraction)
+    });
+    if (operationID !== separationOperationID) return;
+    const imported = await appendSeparationOutputs(result.stems, operationID);
+    if (operationID !== separationOperationID) return;
+    const failures = [...result.failures, ...imported.failures];
+    const message = failures.length
+      ? `Added ${imported.added} AI stem${imported.added === 1 ? '' : 's'}. Some outputs were unavailable:\n${failures.join('\n')}`
+      : `Added ${imported.added} AI-separated stem${imported.added === 1 ? '' : 's'} to your session.`;
+    showSeparationMessage(message, failures.length ? '' : 'success');
+    setSeparationProgress('AI stems added to the session.', 1);
+  } catch (error) {
+    if (operationID !== separationOperationID) return;
+    if (error.name !== 'AbortError') showSeparationMessage(error.message || 'AI separation failed. Please try again.', 'error');
+  } finally {
+    if (operationID === separationOperationID) {
+      separationBusy = false;
+      if (separationController === controller) separationController = null;
+      updateSeparationControls();
+    }
+  }
+}
+
+async function runOfflineSeparation() {
+  if (!separationFile) return;
+  const operationID = ++separationOperationID;
+  separationBusy = true;
+  updateSeparationControls();
+  showSeparationMessage('', '');
+  setSeparationProgress('Reading song locally…', 0.02);
+  try {
+    const inputBuffer = await engine.decode(await separationFile.arrayBuffer());
+    if (operationID !== separationOperationID) return;
+    const bands = await renderOfflineBandSplit(inputBuffer, (label, fraction) => {
+      setSeparationProgress(label, 0.05 + fraction * 0.75);
+    });
+    if (operationID !== separationOperationID) return;
+    const outputs = bands.map((band) => ({ ...band, blob: encodeWav(band.buffer) }));
+    const imported = await appendSeparationOutputs(outputs, operationID);
+    if (operationID !== separationOperationID) return;
+    if (imported.failures.length) {
+      showSeparationMessage(`Added ${imported.added} offline band tracks. Some could not be imported:\n${imported.failures.join('\n')}`, 'error');
+    } else {
+      showSeparationMessage(`Added ${imported.added} offline frequency-band tracks. These are not AI-isolated instruments.`, 'success');
+    }
+    setSeparationProgress('Offline band split added to the session.', 1);
+  } catch (error) {
+    if (operationID !== separationOperationID) return;
+    showSeparationMessage(error.message || 'The offline band split failed.', 'error');
+  } finally {
+    if (operationID === separationOperationID) {
+      separationBusy = false;
+      updateSeparationControls();
+    }
+  }
+}
+
+function dismissSeparationFlow() {
+  if (!separationFlowOpen) return;
+  separationFlowOpen = false;
+  separationOperationID += 1;
+  if (separationController) separationController.abort();
+  separationController = null;
+  separationBusy = false;
+  separationFile = null;
+  separationDuration = 0;
+  const preview = document.getElementById('separationPreview');
+  if (preview) {
+    preview.onloadedmetadata = null;
+    preview.onerror = null;
+    preview.pause();
+    preview.removeAttribute('src');
+    preview.load();
+  }
+  if (separationPreviewURL) URL.revokeObjectURL(separationPreviewURL);
+  separationPreviewURL = null;
+}
+
+document.getElementById('separateSongBtn')?.addEventListener('click', openSeparateSong);

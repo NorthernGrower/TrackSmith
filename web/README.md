@@ -48,7 +48,22 @@ The `sounds` folder holds the free, CC0 starter sounds that also ship with the
 iOS app (see the app's `Starter Sounds/CREDITS.md`); the sampler can load them
 straight from the page.
 
-## Still iOS-only
+## AI stem separation
 
-Live microphone recording and on-device stem separation are not part of the web
-version yet.
+Choose **Split Song** in the studio to separate a song into selected AudioShake
+stems. The browser sends the source file and API key directly to AudioShake; the
+key is held only in page memory and is never saved in local storage. Create a key
+in the [AudioShake dashboard](https://dashboard.audioshake.ai) under Settings →
+API Keys. AudioShake charges per selected stem and rounds song duration up to a
+whole minute; the displayed credits are an estimate. AI stems may contain bleed.
+
+AudioShake's browser examples document API calls from JavaScript, but do not
+state whether every origin, including GitHub Pages, is permitted by CORS. If a
+request is blocked, the browser will show a connection/CORS error. Output links
+are also temporary; stems are downloaded into the studio's local audio library.
+
+**Use Offline Band Split** is a separate, no-upload fallback. It creates Bass,
+Vocals, Drums and Other frequency bands locally; these are not AI-isolated
+instruments and will still contain overlapping sounds.
+
+Live microphone recording is not part of the web version yet.
