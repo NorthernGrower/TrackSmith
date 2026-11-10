@@ -113,6 +113,8 @@ struct Track: Identifiable, Codable, Equatable {
     var frozenDuration: TimeInterval
     /// Arpeggiator applied to this track's arrangement notes.
     var arpeggiator = ArpeggiatorSettings()
+    /// Which palette slot the user chose for this track, or -1 for the default cycling color.
+    var colorIndex = -1
     private var clipLayoutInitialized: Bool
 
     init(
@@ -139,7 +141,8 @@ struct Track: Identifiable, Codable, Equatable {
         sendB: Float = 0,
         frozenFileName: String? = nil,
         frozenDuration: TimeInterval = 0,
-        arpeggiator: ArpeggiatorSettings = ArpeggiatorSettings()
+        arpeggiator: ArpeggiatorSettings = ArpeggiatorSettings(),
+        colorIndex: Int = -1
     ) {
         self.id = id
         self.name = name
@@ -174,6 +177,7 @@ struct Track: Identifiable, Codable, Equatable {
         self.frozenFileName = frozenFileName
         self.frozenDuration = frozenDuration
         self.arpeggiator = arpeggiator
+        self.colorIndex = colorIndex
         clipLayoutInitialized = true
     }
 
@@ -203,6 +207,7 @@ struct Track: Identifiable, Codable, Equatable {
         case frozenFileName
         case frozenDuration
         case arpeggiator
+        case colorIndex
         case clipLayoutInitialized
     }
 
@@ -250,6 +255,7 @@ struct Track: Identifiable, Codable, Equatable {
         frozenFileName = try values.decodeIfPresent(String.self, forKey: .frozenFileName)
         frozenDuration = try values.decodeIfPresent(TimeInterval.self, forKey: .frozenDuration) ?? 0
         arpeggiator = try values.decodeIfPresent(ArpeggiatorSettings.self, forKey: .arpeggiator) ?? ArpeggiatorSettings()
+        colorIndex = try values.decodeIfPresent(Int.self, forKey: .colorIndex) ?? -1
         clipLayoutInitialized = true
     }
 

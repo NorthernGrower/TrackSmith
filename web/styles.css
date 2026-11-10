@@ -1867,3 +1867,48 @@ button { cursor: pointer; }
 
 
 .separation-preview[hidden] { display: none; }
+
+
+
+/* Expandable stem archive manifest details in the export library */
+.archive-toggle {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-highlight);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.archive-toggle span:last-child { color: var(--accent); font-size: 14px; }
+.archive-manifest {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid rgba(245, 158, 42, .18);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, .16);
+}
+.archive-manifest[role="status"] { color: var(--secondary); font-size: 10px; }
+.archive-manifest-info { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.archive-manifest-info > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.archive-manifest-info span,
+.archive-manifest-heading { color: var(--secondary); font: 700 8px "SF Mono", ui-monospace, Menlo, monospace; letter-spacing: .06em; }
+.archive-manifest-info strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.archive-manifest-list { display: flex; flex-direction: column; gap: 5px; }
+.archive-manifest-heading,
+.archive-stem-row { display: grid; grid-template-columns: minmax(0, 1fr) 54px 50px; gap: 6px; align-items: center; }
+.archive-stem-row { min-height: 25px; border-top: 1px solid var(--line); padding-top: 5px; }
+.archive-stem-row strong { overflow: hidden; color: var(--text); font-size: 9px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.archive-stem-row span { color: var(--secondary); font: 8px "SF Mono", ui-monospace, Menlo, monospace; text-align: right; }
+.archive-manifest-empty { margin: 0; color: var(--secondary); font-size: 9px; }

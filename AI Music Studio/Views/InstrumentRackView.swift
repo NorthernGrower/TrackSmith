@@ -99,6 +99,8 @@ struct InstrumentRackView: View {
             }
         }
         .onAppear {
+            CrashReporter.shared.mark("Instruments panel body built")
+            model.setInstrumentPanelVisible(true)
             selectedTrackID = initialTrackID.flatMap { id in
                 model.tracks.contains(where: { $0.id == id }) ? id : nil
             } ?? model.tracks.first?.id
@@ -134,7 +136,10 @@ struct InstrumentRackView: View {
                     )
                 }
             }
-            midiController.refreshDevices()
+            Task { @MainActor in
+                await Task.yield()
+                midiController.refreshDevices()
+            }
         }
         .onChange(of: midiController.selectedDeviceID) { _, _ in
             model.stopAllMIDINotes()
@@ -172,6 +177,7 @@ struct InstrumentRackView: View {
                 .presentationDragIndicator(.visible)
         }
         .onDisappear {
+            model.setInstrumentPanelVisible(false)
             cancelCountIn()
             midiController.disconnect()
             model.stopAllMIDINotes()

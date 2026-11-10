@@ -7,6 +7,16 @@ import AVFoundation
 import Combine
 import Foundation
 
+private struct StemArchiveImportRequest: Sendable {
+    let fileName: String
+    let trackName: String
+}
+
+private struct StemArchiveImportedFile: Sendable {
+    let trackName: String
+    let storedFileName: String
+}
+
 @MainActor
 final class MixerViewModel: ObservableObject {
     private struct UndoTrackState: Equatable {
@@ -49,6 +59,7 @@ final class MixerViewModel: ObservableObject {
     private var storedVersions: [SessionVersion] = []
     @Published private(set) var masterLevel: Float = 0
     @Published private(set) var isPlaying = false
+    @Published private(set) var isInitializing = true
     @Published private(set) var tempoBPM = 120
     @Published private(set) var loopStart: TimeInterval = 0
     @Published private(set) var loopEnd: TimeInterval = 0
@@ -105,8 +116,11 @@ final class MixerViewModel: ObservableObject {
 
     private var recordingStartTime: TimeInterval = 0
     private var samplerFileURL: URL?
-    private let engine = MixerEngine()
+    private lazy var engine = MixerEngine()
+    private var initializationTask: Task<Void, Never>?
+    private var initializationWatchdogTask: Task<Void, Never>?
     private var smoothedLevels: [UUID: Float] = [:]
+    private var isInstrumentPanelVisible = false
     private var waveformTask: Task<Void, Never>?
     private var wasPlayingBeforeScrub = false
     nonisolated(unsafe) private var playbackTask: Task<Void, Never>?
@@ -174,7 +188,37 @@ final class MixerViewModel: ObservableObject {
         storedVersions = SessionVersionStore.load()
         versions = storedVersions.filter { $0.sessionID == activeSessionID }
         exports = MixExportStorage.loadExports()
+
+        initializationTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            self?.initializeAudioGraph()
+        }
+        // If the first pass never completes (cancelled, or stuck part-way),
+        // retry once and finally unblock the UI with the last known stage.
+        initializationWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self, self.isInitializing, !Task.isCancelled else { return }
+            CrashReporter.shared.mark("Watchdog: initialization still pending, retrying")
+            self.initializeAudioGraph()
+            guard self.isInitializing else { return }
+            try? await Task.sleep(for: .seconds(4))
+            guard self.isInitializing, !Task.isCancelled else { return }
+            self.isInitializing = false
+            self.audioError = "The studio couldn't finish preparing (last step: \(CrashReporter.shared.currentBreadcrumb))."
+        }
+        playbackTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refresh()
+                try? await Task.sleep(for: .seconds(1.0 / 30))
+            }
+        }
+    }
+
+    private func initializeAudioGraph() {
+        CrashReporter.shared.mark("Init: reading clip metadata")
         resolveClipMetadata()
+        CrashReporter.shared.mark("Init: building the audio engine")
         engine.load(tracks: tracks)
         engine.updateGroups(groups)
         duration = engine.duration
@@ -184,7 +228,10 @@ final class MixerViewModel: ObservableObject {
         engine.updateMasterEffects(masterEffects, tempoBPM: tempoBPM)
         engine.updateMasterChain(mastering)
         engine.setMetronome(enabled: isMetronomeEnabled, level: metronomeLevel)
+        CrashReporter.shared.mark("Init: loading waveforms")
         loadWaveforms()
+        isInitializing = false
+        CrashReporter.shared.mark("Studio timeline")
 
         // Keep a first snapshot so there is always something to go back to.
         if versions.isEmpty {
@@ -193,16 +240,11 @@ final class MixerViewModel: ObservableObject {
                 self?.saveVersionNow(force: true)
             }
         }
-
-        playbackTask = Task { [weak self] in
-            while !Task.isCancelled {
-                self?.refresh()
-                try? await Task.sleep(for: .seconds(1.0 / 30))
-            }
-        }
     }
 
     deinit {
+        initializationTask?.cancel()
+        initializationWatchdogTask?.cancel()
         autosaveTask?.cancel()
         playbackTask?.cancel()
         drumSequencerTask?.cancel()
@@ -221,6 +263,99 @@ final class MixerViewModel: ObservableObject {
         guard !imported.isEmpty else { return }
 
         tracks += imported
+        reloadEngine()
+    }
+
+    /// Validates and imports the selected ZIP stems as one session change.
+    func importStems(from archiveURL: URL, stems: [StemArchiveManifest.Stem]) async throws {
+        guard !stems.isEmpty else { throw StemArchiveError.noStemsSelected }
+
+        var seenFileNames = Set<String>()
+        let requests = try stems.map { stem -> StemArchiveImportRequest in
+            let fileName = stem.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fileName.isEmpty else { throw StemArchiveError.invalidArchive }
+            guard seenFileNames.insert(fileName).inserted else {
+                throw StemArchiveError.duplicateStemEntry(fileName)
+            }
+            let providedName = stem.trackName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackName = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+            return StemArchiveImportRequest(
+                fileName: fileName,
+                trackName: providedName.isEmpty ? fallbackName : providedName
+            )
+        }
+
+        let scoped = archiveURL.startAccessingSecurityScopedResource()
+        defer { if scoped { archiveURL.stopAccessingSecurityScopedResource() } }
+
+        let importedFiles = try await Task.detached(priority: .userInitiated) {
+            var temporaryURLs: [URL] = []
+            var storedFileNames: [String] = []
+            defer {
+                temporaryURLs.forEach { try? FileManager.default.removeItem(at: $0) }
+            }
+
+            do {
+                var staged: [(request: StemArchiveImportRequest, url: URL)] = []
+                for request in requests {
+                    guard StemArchive.supportsAudioFile(named: request.fileName) else {
+                        throw StemArchiveError.unsupportedAudioFormat(request.trackName)
+                    }
+
+                    let extractedURL: URL
+                    do {
+                        extractedURL = try StemArchive.extractStem(
+                            from: archiveURL,
+                            fileName: request.fileName,
+                            named: request.trackName
+                        )
+                    } catch StemArchiveError.unsupportedStemCompression {
+                        throw StemArchiveError.unsupportedStemCompressionForStem(request.trackName)
+                    } catch {
+                        throw StemArchiveError.unreadableStem(request.trackName)
+                    }
+                    temporaryURLs.append(extractedURL)
+                    try StemArchive.validateAudioFile(at: extractedURL, named: request.trackName)
+                    staged.append((request, extractedURL))
+                }
+
+                var imported: [StemArchiveImportedFile] = []
+                for item in staged {
+                    do {
+                        let result = try TrackStorage.importFile(at: item.url)
+                        storedFileNames.append(result.storedName)
+                        imported.append(StemArchiveImportedFile(
+                            trackName: item.request.trackName,
+                            storedFileName: result.storedName
+                        ))
+                    } catch {
+                        throw StemArchiveError.couldNotStoreStem(item.request.trackName)
+                    }
+                }
+                return imported
+            } catch {
+                storedFileNames.forEach {
+                    try? FileManager.default.removeItem(at: TrackStorage.url(forFileName: $0))
+                }
+                throw error
+            }
+        }.value
+
+        var usedNames = Set(tracks.map { $0.name.lowercased() })
+        let newTracks = importedFiles.map { importedFile -> Track in
+            let baseName = importedFile.trackName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = baseName.isEmpty ? "Stem" : baseName
+            var candidate = base
+            var suffix = 2
+            while usedNames.contains(candidate.lowercased()) {
+                candidate = "\(base) \(suffix)"
+                suffix += 1
+            }
+            usedNames.insert(candidate.lowercased())
+            return Track(name: candidate, fileName: importedFile.storedFileName)
+        }
+
+        tracks.append(contentsOf: newTracks)
         reloadEngine()
     }
 
@@ -1381,6 +1516,16 @@ final class MixerViewModel: ObservableObject {
         setTempo(tempoBPM + amount)
     }
 
+    func setInstrumentPanelVisible(_ visible: Bool) {
+        guard isInstrumentPanelVisible != visible else { return }
+        isInstrumentPanelVisible = visible
+        if !visible {
+            currentTime = engine.currentTime
+            updateLevels()
+            loudness = engine.loudnessReading()
+        }
+    }
+
     func playSynthNote(
         frequency: Double,
         waveform: SynthWaveform,
@@ -1508,6 +1653,14 @@ final class MixerViewModel: ObservableObject {
         guard drumKit != self.drumKit else { return }
         self.drumKit = drumKit
         persistActiveSession()
+    }
+
+    /// Sets the palette color the user chose for a track.
+    func setTrackColor(_ colorIndex: Int, for trackID: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }),
+              tracks[index].colorIndex != colorIndex else { return }
+        tracks[index].colorIndex = min(3, max(0, colorIndex))
+        commitSession()
     }
 
     func startDrumSequencer(
@@ -2095,6 +2248,9 @@ final class MixerViewModel: ObservableObject {
             return
         }
         let timeRangeToBounce: ClosedRange<TimeInterval>? = settings.range == .loopRange && hasLoopRange ? loopStart...loopEnd : nil
+        let rangeToArchive: BounceRange = timeRangeToBounce == nil ? .entireSession : .loopRange
+        let loopStartToArchive = rangeToArchive == .loopRange ? loopStart : nil
+        let loopEndToArchive = rangeToArchive == .loopRange ? loopEnd : nil
 
         bounceSettings = settings
         BounceSettingsStorage.save(settings)
@@ -2170,6 +2326,14 @@ final class MixerViewModel: ObservableObject {
                         sessionName: sessionNameToBounce,
                         tempoBPM: tempo,
                         stems: stemsToArchive,
+                        bounceSettings: StemArchiveManifest.BounceSettings(
+                            range: rangeToArchive,
+                            loopStart: loopStartToArchive,
+                            loopEnd: loopEndToArchive,
+                            sampleRate: settingsToBounce.sampleRate,
+                            bitDepth: settingsToBounce.format == .wav ? settingsToBounce.bitDepth : nil,
+                            normalize: settingsToBounce.normalize
+                        ),
                         to: archiveURL
                     )
                 }.value
@@ -2939,35 +3103,111 @@ final class MixerViewModel: ObservableObject {
 
     // MARK: - Stem separation
 
-    /// Splits a full song into stems on device and loads them as tracks.
-    func separateStems(from songURL: URL) {
+    /// Separates selected musical parts with AudioShake and adds them to the open session.
+    func separateStems(
+        from source: StemSeparationSource,
+        targets: Set<AudioShakeStemTarget>,
+        completion: @escaping (_ addedCount: Int, _ failures: [String], _ error: String?) -> Void
+    ) {
         guard !isSeparating else { return }
-
         isSeparating = true
         separationProgress = 0
         separationStatus = "Preparing…"
+        separationError = nil
 
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
+            var addedCount = 0
+            var failures: [String] = []
+            var errorMessage: String?
+
             do {
-                let stems = try await OnDeviceStemSeparator.separate(fileAt: songURL) { [weak self] status, fraction in
-                    Task { @MainActor in
+                let result = try await AudioShakeStemSeparator.separate(source: source, targets: targets) { [weak self] status, fraction in
+                    Task { @MainActor [weak self] in
                         self?.separationStatus = status
                         self?.separationProgress = fraction
                     }
                 }
-                applyStems(stems)
+                self.appendStems(result.stems)
+                addedCount = result.stems.count
+                failures = result.failures
+                self.separationStatus = "Added \(addedCount) AI stems to the session."
             } catch {
-                separationError = (error as? LocalizedError)?.errorDescription
-                    ?? "Separation failed. The file may not be readable as audio."
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? "AI separation failed. Please try again."
+                self.separationStatus = "AI separation failed."
             }
-            isSeparating = false
+
+            self.isSeparating = false
+            completion(addedCount, failures, errorMessage)
         }
     }
 
-    private func applyStems(_ stems: [ImportedStem]) {
-        stop()
-        tracks = stems.map { Track(name: $0.name, fileName: $0.storedName) }
-        reloadEngine()
+    /// Runs the clearly labeled local frequency-band fallback without uploading audio.
+    func separateOfflineStems(
+        from source: StemSeparationSource,
+        completion: @escaping (_ addedCount: Int, _ error: String?) -> Void
+    ) {
+        guard !isSeparating else { return }
+        isSeparating = true
+        separationProgress = 0
+        separationStatus = "Preparing offline band split…"
+        separationError = nil
+
+        Task { [weak self] in
+            guard let self else { return }
+            var addedCount = 0
+            var errorMessage: String?
+
+            do {
+                let stems = try await OnDeviceStemSeparator.separate(fileAt: source.fileURL) { [weak self] status, fraction in
+                    Task { @MainActor [weak self] in
+                        self?.separationStatus = status
+                        self?.separationProgress = fraction
+                    }
+                }
+                self.appendStems(stems)
+                addedCount = stems.count
+                self.separationStatus = "Added \(addedCount) offline band tracks to the session."
+            } catch {
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? "The offline band split failed."
+                self.separationStatus = "Offline band split failed."
+            }
+
+            self.isSeparating = false
+            completion(addedCount, errorMessage)
+        }
+    }
+
+    private func appendStems(_ stems: [ImportedStem]) {
+        guard !stems.isEmpty else { return }
+
+        var names = Set(tracks.map { $0.name.lowercased() })
+        let newTracks = stems.map { stem -> Track in
+            var name = stem.name
+            var suffix = 2
+            while names.contains(name.lowercased()) {
+                name = "\(stem.name) \(suffix)"
+                suffix += 1
+            }
+            names.insert(name.lowercased())
+            return Track(name: name, fileName: stem.storedName)
+        }
+
+        let wasPlaying = isPlaying
+        let resumeTime = engine.currentTime
+        tracks.append(contentsOf: newTracks)
+        resolveClipMetadata()
+        engine.load(tracks: tracks)
+        engine.updateGroups(groups)
+        duration = engine.duration
+        applyLoopChangeToEngine()
+        currentTime = min(max(0, resumeTime), duration)
+        engine.seek(to: currentTime)
+        if wasPlaying { engine.play() }
+        isPlaying = engine.isPlaying
+        currentTime = engine.currentTime
+        loadWaveforms()
+        commitSession()
     }
 
     private func clipLocation(trackID: UUID, clipID: UUID) -> (track: Int, clip: Int)? {
@@ -3017,19 +3257,34 @@ final class MixerViewModel: ObservableObject {
     }
 
     private func refresh() {
+        guard !isInitializing else { return }
         let time = engine.currentTime
-        engine.updateAutomation(at: time)
-        engine.ensureLoopScheduling()
+        if !isInstrumentPanelVisible || isPlaying {
+            engine.updateAutomation(at: time)
+            engine.ensureLoopScheduling()
+        }
         if isPlaying, !isLoopingPlayback, duration > 0, time >= duration {
             stop()
+        } else if isInstrumentPanelVisible {
+            if isRecordingInstrument {
+                let elapsed = max(0, time - recordingStartTime)
+                if elapsed - recordingElapsed >= 0.1 {
+                    recordingElapsed = elapsed
+                }
+            }
         } else {
-            currentTime = time
+            if currentTime != time {
+                currentTime = time
+            }
             if isRecordingInstrument {
                 recordingElapsed = max(0, time - recordingStartTime)
             }
+            updateLevels()
+            let reading = engine.loudnessReading()
+            if loudness != reading {
+                loudness = reading
+            }
         }
-        updateLevels()
-        loudness = engine.loudnessReading()
     }
 
     private func updateLevels() {

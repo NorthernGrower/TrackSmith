@@ -302,7 +302,6 @@ final class MixerEngine {
         let newClipSignatures = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0.playbackClips) })
         guard tracks.map(\.id) != trackIDs || newClipSignatures != clipSignatures else {
             updateMix(tracks: tracks)
-            ensurePreviewVoices()
             return
         }
 
@@ -378,22 +377,6 @@ final class MixerEngine {
                 store.ingest(id: trackID, buffer: buffer)
             }
 
-            var voices: [AVAudioPlayerNode] = []
-            for _ in 0..<instrumentVoiceCount {
-                let voice = AVAudioPlayerNode()
-                engine.attach(voice)
-                engine.connect(voice, to: instrumentMixer, format: instrumentFormat)
-                voices.append(voice)
-            }
-
-            var midiVoices: [AVAudioPlayerNode] = []
-            for _ in 0..<instrumentVoiceCount {
-                let voice = AVAudioPlayerNode()
-                engine.attach(voice)
-                engine.connect(voice, to: instrumentMixer, format: instrumentFormat)
-                midiVoices.append(voice)
-            }
-
             var sequencingVoices: [AVAudioPlayerNode] = []
             for _ in 0..<noteVoiceCount {
                 let notePlayer = AVAudioPlayerNode()
@@ -424,8 +407,6 @@ final class MixerEngine {
             trackDistortions[track.id] = distortion
             trackStereoDelays[track.id] = stereoDelay
             clipPlayers[track.id] = loadedClips
-            instrumentVoices[track.id] = voices
-            midiInstrumentVoices[track.id] = midiVoices
             notePlayers[track.id] = sequencingVoices
             instrumentFormats[track.id] = instrumentFormat
             var eqSettings = track.eqSettings
@@ -448,7 +429,6 @@ final class MixerEngine {
         }
 
         updateMix(tracks: tracks)
-        ensurePreviewVoices()
     }
 
     func updateMix(tracks: [Track]) {
@@ -1019,9 +999,8 @@ final class MixerEngine {
     ) {
         let key = MIDINoteKey(trackID: destinationTrackID, pitch: pitch, channel: channel)
         stopMIDINote(pitch: pitch, channel: channel, trackID: destinationTrackID)
-        guard let players = midiInstrumentVoices[destinationTrackID],
-              !players.isEmpty,
-              startAudioEngine() else { return }
+        let players = ensureMIDIInstrumentVoices(for: destinationTrackID)
+        guard !players.isEmpty, startAudioEngine() else { return }
 
         let index = midiNoteCursors[destinationTrackID, default: 0] % players.count
         midiNoteCursors[destinationTrackID] = (index + 1) % players.count
@@ -1182,9 +1161,46 @@ final class MixerEngine {
         }
     }
 
+    /// Creates a track's live-playback voices only when they are first used.
+    /// Keeping these out of the initial graph avoids allocating unused audio nodes
+    /// for every track in a session.
+    private func ensureInstrumentVoices(for trackID: UUID) -> [AVAudioPlayerNode] {
+        if let voices = instrumentVoices[trackID] { return voices }
+        guard let mixer = instrumentMixers[trackID],
+              let format = instrumentFormats[trackID] else { return [] }
+
+        var voices: [AVAudioPlayerNode] = []
+        for _ in 0..<instrumentVoiceCount {
+            let voice = AVAudioPlayerNode()
+            engine.attach(voice)
+            engine.connect(voice, to: mixer, format: format)
+            voices.append(voice)
+        }
+        instrumentVoices[trackID] = voices
+        return voices
+    }
+
+    /// MIDI voices are likewise allocated only when a controller sends a note.
+    private func ensureMIDIInstrumentVoices(for trackID: UUID) -> [AVAudioPlayerNode] {
+        if let voices = midiInstrumentVoices[trackID] { return voices }
+        guard let mixer = instrumentMixers[trackID],
+              let format = instrumentFormats[trackID] else { return [] }
+
+        var voices: [AVAudioPlayerNode] = []
+        for _ in 0..<instrumentVoiceCount {
+            let voice = AVAudioPlayerNode()
+            engine.attach(voice)
+            engine.connect(voice, to: mixer, format: format)
+            voices.append(voice)
+        }
+        midiInstrumentVoices[trackID] = voices
+        return voices
+    }
+
     private func voices(for destinationTrackID: UUID?) -> (trackID: UUID?, players: [AVAudioPlayerNode]) {
-        if let destinationTrackID, let voices = instrumentVoices[destinationTrackID] {
-            return (destinationTrackID, voices)
+        if let destinationTrackID {
+            let voices = ensureInstrumentVoices(for: destinationTrackID)
+            if !voices.isEmpty { return (destinationTrackID, voices) }
         }
         ensurePreviewVoices()
         return (nil, previewVoices)
@@ -1340,7 +1356,12 @@ enum TrackStorage {
         if FileManager.default.fileExists(atPath: destination.path) {
             destination = stemsDirectory.appendingPathComponent("\(UUID().uuidString.prefix(8))_\(source.lastPathComponent)")
         }
-        try FileManager.default.copyItem(at: source, to: destination)
+        do {
+            try FileManager.default.copyItem(at: source, to: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
 
         // Convert compressed formats (MP3, M4A, …) to WAV PCM on import so
         // playback, waveforms and stem separation all work reliably.
@@ -1374,6 +1395,10 @@ enum TrackStorage {
               let writeData = writeBuffer.floatChannelData else { return nil }
 
         let outputURL = uniqueStemURL(baseName: url.deletingPathExtension().lastPathComponent, fileExtension: "wav")
+        var completed = false
+        defer {
+            if !completed { try? FileManager.default.removeItem(at: outputURL) }
+        }
         let output = try AVAudioFile(
             forWriting: outputURL,
             settings: outputFormat.settings,
@@ -1397,6 +1422,7 @@ enum TrackStorage {
             try output.write(from: writeBuffer)
         }
 
+        completed = true
         return outputURL
     }
 

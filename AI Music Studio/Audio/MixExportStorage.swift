@@ -53,6 +53,23 @@ struct MixExportArchive: Identifiable, Equatable {
     }
 }
 
+enum MixExportStorageError: LocalizedError {
+    case archiveNotFound
+    case invalidArchiveName
+    case archiveNameInUse
+
+    var errorDescription: String? {
+        switch self {
+        case .archiveNotFound:
+            return "This stem archive could not be found."
+        case .invalidArchiveName:
+            return "Enter a valid archive name."
+        case .archiveNameInUse:
+            return "An archive with that name already exists. Choose another name."
+        }
+    }
+}
+
 enum MixExportStorage {
     private static let metadataFileName = ".export-metadata.json"
 
@@ -137,6 +154,80 @@ enum MixExportStorage {
             )
         }
         .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    static func renameStemArchive(_ archive: MixExportArchive, to proposedName: String) throws -> MixExportArchive {
+        guard archive.url.pathExtension.lowercased() == "zip" else {
+            throw MixExportStorageError.archiveNotFound
+        }
+
+        var baseName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        while baseName.lowercased().hasSuffix(".zip") {
+            baseName = String(baseName.dropLast(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        baseName = baseName
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: "\\", with: "-")
+            .components(separatedBy: .controlCharacters)
+            .joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let safeBaseName = String(baseName.prefix(120))
+        guard !safeBaseName.isEmpty else { throw MixExportStorageError.invalidArchiveName }
+
+        let fileManager = FileManager.default
+        let sourceURL = archive.url.standardizedFileURL
+        let destinationURL = exportsDirectory
+            .appendingPathComponent("\(safeBaseName).zip", isDirectory: false)
+            .standardizedFileURL
+        guard sourceURL.deletingLastPathComponent() == exportsDirectory.standardizedFileURL,
+              fileManager.fileExists(atPath: sourceURL.path) else {
+            throw MixExportStorageError.archiveNotFound
+        }
+        if sourceURL.path == destinationURL.path { return archive }
+
+        let isCaseOnlyRename = sourceURL.path.caseInsensitiveCompare(destinationURL.path) == .orderedSame
+        if fileManager.fileExists(atPath: destinationURL.path) && !isCaseOnlyRename {
+            throw MixExportStorageError.archiveNameInUse
+        }
+
+        var metadata = loadMetadata()
+        let existingMetadata = metadata.removeValue(forKey: sourceURL.lastPathComponent)
+        if let existingMetadata {
+            metadata[destinationURL.lastPathComponent] = existingMetadata
+        }
+
+        try moveArchiveFile(from: sourceURL, to: destinationURL, caseOnly: isCaseOnlyRename)
+        do {
+            let data = try JSONEncoder().encode(metadata)
+            try data.write(to: metadataURL, options: .atomic)
+        } catch {
+            try? moveArchiveFile(from: destinationURL, to: sourceURL, caseOnly: isCaseOnlyRename)
+            throw error
+        }
+
+        return MixExportArchive(
+            url: destinationURL,
+            createdAt: archive.createdAt,
+            sessionName: archive.sessionName
+        )
+    }
+
+    private static func moveArchiveFile(from sourceURL: URL, to destinationURL: URL, caseOnly: Bool) throws {
+        let fileManager = FileManager.default
+        guard caseOnly else {
+            try fileManager.moveItem(at: sourceURL, to: destinationURL)
+            return
+        }
+
+        let temporaryURL = exportsDirectory.appendingPathComponent("archive-rename-\(UUID().uuidString).tmp")
+        try fileManager.moveItem(at: sourceURL, to: temporaryURL)
+        do {
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+        } catch {
+            try? fileManager.moveItem(at: temporaryURL, to: sourceURL)
+            throw error
+        }
     }
 
     private static func loadMetadata() -> [String: MixExportMetadata] {

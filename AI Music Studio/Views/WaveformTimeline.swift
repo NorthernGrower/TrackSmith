@@ -503,7 +503,7 @@ struct WaveformTimeline: View {
     // MARK: - Track controls
 
     private func controlStrip(for track: Track, index: Int) -> some View {
-        let color = Color.studioTrackColor(for: index)
+        let color = Color.studioTrackColor(for: track, index: index)
         let group = model.group(forTrack: track.id)
 
         return VStack(alignment: .leading, spacing: group == nil ? 7 : 5) {
@@ -514,6 +514,33 @@ struct WaveformTimeline: View {
                 Text(track.name)
                     .font(.system(size: 10, weight: .semibold))
                     .lineLimit(1)
+                Menu {
+                    ForEach(0..<Color.studioTrackPalette.count, id: \.self) { slot in
+                        Button {
+                            model.setTrackColor(slot, for: track.id)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(Color.studioTrackPalette[slot])
+                                    .frame(width: 12, height: 12)
+                                Text("Color \(slot + 1)")
+                                if track.colorIndex == slot
+                                    || (track.colorIndex < 0 && slot == index) {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 10, height: 10)
+                        .overlay {
+                            Circle().stroke(Color.white.opacity(0.25), lineWidth: 0.5)
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Color for \(track.name)")
                 if model.armedTrackID == track.id {
                     Circle()
                         .fill(Color.red)
@@ -972,7 +999,7 @@ struct WaveformTimeline: View {
     // MARK: - Waveform lanes and playhead
 
     private func lane(for track: Track, index: Int) -> some View {
-        let color = Color.studioTrackColor(for: index)
+        let color = Color.studioTrackColor(for: track, index: index)
 
         return ZStack(alignment: .leading) {
             Color.white.opacity(0.025)

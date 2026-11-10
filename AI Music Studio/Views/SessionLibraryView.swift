@@ -21,6 +21,8 @@ struct SessionLibraryView: View {
     @State private var pendingImport: PendingSessionImport?
     @State private var showingNameCollision = false
     @State private var shareItem: SessionShareItem?
+    @State private var searchText = ""
+    @State private var sortOrder: SessionSortOrder = .recentlyEdited
 
     private struct PendingSessionImport {
         let url: URL
@@ -30,12 +32,36 @@ struct SessionLibraryView: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach(model.sessions.sorted(by: { $0.lastEdited > $1.lastEdited })) { session in
-                    sessionRow(session)
-                        .listRowBackground(Color.studioPanel)
+                Section {
+                    if visibleSessions.isEmpty {
+                        ContentUnavailableView.search(text: searchText)
+                            .listRowBackground(Color.clear)
+                    } else {
+                        ForEach(visibleSessions) { session in
+                            sessionRow(session)
+                                .listRowBackground(Color.studioPanel)
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("SORT BY")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .tracking(0.8)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Picker("Sort sessions", selection: $sortOrder) {
+                            Text("Recently Edited").tag(SessionSortOrder.recentlyEdited)
+                            Text("Name").tag(SessionSortOrder.name)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 220)
+                        .accessibilityLabel("Sort sessions")
+                    }
+                    .textCase(nil)
                 }
             }
             .listStyle(.plain)
+            .searchable(text: $searchText, prompt: "Search sessions")
             .scrollContentBackground(.hidden)
             .background(Color.studioBackground)
             .navigationTitle("Sessions")
@@ -151,6 +177,30 @@ struct SessionLibraryView: View {
         }
         .preferredColorScheme(.dark)
         .tint(Color.studioAccent)
+    }
+
+    private var visibleSessions: [StudioSession] {
+        let matchingSessions = model.sessions.filter { session in
+            searchText.isEmpty || session.name.localizedStandardContains(searchText)
+        }
+
+        switch sortOrder {
+        case .recentlyEdited:
+            return matchingSessions.sorted {
+                if $0.lastEdited == $1.lastEdited {
+                    return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                }
+                return $0.lastEdited > $1.lastEdited
+            }
+        case .name:
+            return matchingSessions.sorted {
+                let comparison = $0.name.localizedStandardCompare($1.name)
+                if comparison == .orderedSame {
+                    return $0.lastEdited > $1.lastEdited
+                }
+                return comparison == .orderedAscending
+            }
+        }
     }
 
     private var collisionTitle: String {
@@ -298,6 +348,11 @@ struct SessionLibraryView: View {
         }
         .padding(.vertical, 5)
     }
+}
+
+private enum SessionSortOrder: String, CaseIterable, Hashable {
+    case recentlyEdited
+    case name
 }
 
 private struct SessionShareItem: Identifiable {

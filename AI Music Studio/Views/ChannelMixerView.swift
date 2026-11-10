@@ -465,7 +465,7 @@ struct ChannelMixerView: View {
     // MARK: - Channel strips
 
     private func channelStrip(_ track: Track, index: Int) -> some View {
-        let color = Color.studioTrackColor(for: index)
+        let color = Color.studioTrackColor(for: track, index: index)
 
         return VStack(spacing: 8) {
             VStack(spacing: 3) {

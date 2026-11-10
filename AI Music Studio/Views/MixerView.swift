@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 extension Color {
@@ -13,15 +14,28 @@ extension Color {
     static let studioAccent = Color(red: 0.96, green: 0.62, blue: 0.16)
     static let studioPanAutomation = Color(red: 0.36, green: 0.56, blue: 0.93)
 
+    /// The compact palette users pick track colors from.
+    private static let studioPalette: [Color] = [
+        Color(red: 0.98, green: 0.64, blue: 0.18),
+        Color(red: 0.16, green: 0.66, blue: 0.60),
+        Color(red: 0.36, green: 0.56, blue: 0.93),
+        Color(red: 0.80, green: 0.42, blue: 0.78),
+    ]
+
+    static var studioTrackPalette: [Color] { studioPalette }
+
     /// One restrained color per track, cycling for larger sessions.
     static func studioTrackColor(for index: Int) -> Color {
-        let palette: [Color] = [
-            Color(red: 0.98, green: 0.64, blue: 0.18),
-            Color(red: 0.16, green: 0.66, blue: 0.60),
-            Color(red: 0.36, green: 0.56, blue: 0.93),
-            Color(red: 0.80, green: 0.42, blue: 0.78),
-        ]
-        return palette[index % palette.count]
+        let slots = studioPalette.count
+        return studioPalette[((index % slots) + slots) % slots]
+    }
+
+    /// The color shown for a track: its chosen palette slot, else the default cycling color.
+    static func studioTrackColor(for track: Track, index: Int) -> Color {
+        if track.colorIndex >= 0, track.colorIndex < studioPalette.count {
+            return studioPalette[track.colorIndex]
+        }
+        return studioTrackColor(for: index)
     }
 }
 
@@ -29,6 +43,8 @@ struct MixerView: View {
     @StateObject private var model = MixerViewModel()
     @State private var showImporter = false
     @State private var showSplitPicker = false
+    @State private var showStemArchiveImporter = false
+    @State private var selectedSongURL: URL?
     @StateObject private var chat = AgentChatViewModel()
     @State private var activeSheet: StudioSheet?
     @State private var selectedEQTrackID: UUID?
@@ -36,44 +52,119 @@ struct MixerView: View {
     @State private var selectedPianoRollTrackID: UUID?
     @State private var instrumentDestinationTrackID: UUID?
     @State private var bounceMode: BounceSettingsView.Mode = .mix
+    @State private var crashReportText: String?
 
     var body: some View {
-        ScrollView(.vertical) {
-            VStack(spacing: 0) {
-                header
-
-                if model.tracks.isEmpty {
-                    emptyState
-                        .frame(maxWidth: .infinity, minHeight: 360)
-                } else {
-                    WaveformTimeline(
-                        model: model,
-                        onOpenTrackEQ: { trackID in
-                            selectedEQTrackID = trackID
-                            activeSheet = .trackEQ
-                        },
-                        onOpenTrackEffects: { trackID in
-                            selectedEffectsTrackID = trackID
-                            activeSheet = .trackEffects
-                        },
-                        onOpenPianoRoll: { trackID in
-                            selectedPianoRollTrackID = trackID
-                            activeSheet = .pianoRoll
-                        },
-                        onOpenInstrumentsForTrack: { trackID in
-                            instrumentDestinationTrackID = trackID
-                            activeSheet = .instruments
-                        },
-                        onAddInstrumentTrack: createInstrumentLayerAndOpen
-                    )
-                    .frame(minHeight: 420)
+        let core = studioScroll
+            .overlay(alignment: .top) {
+                if let crashReportText {
+                    CrashReportBanner(text: crashReportText, onDismiss: clearCrashReport)
                 }
+            }
+            .onAppear {
+                chat.mixer = model
+                CrashReporter.shared.mark("Studio timeline")
+                crashReportText = CrashReporter.shared.takePendingReport()
+            }
+            .studioAgentAccess(context: "Studio Mixer")
+            .environmentObject(chat)
+            .preferredColorScheme(.dark)
+            .tint(Color.studioAccent)
+        return core
+            .sheet(item: $activeSheet) { destination in
+                sheetContent(for: destination)
+            }
+            .onChange(of: model.lastExportURL) { _, exportURL in
+                if exportURL != nil {
+                    activeSheet = .exports
+                }
+            }
+            .onChange(of: activeSheet) { _, sheet in
+                if let sheet {
+                    CrashReporter.shared.mark("Presenting sheet \(sheet.assistantContext)")
+                } else {
+                    CrashReporter.shared.mark("Studio timeline")
+                }
+            }
+            .alert(Text(alertTitle), isPresented: studioErrorBinding) {
+                Button("OK", role: .cancel) {
+                    model.separationError = nil
+                    model.clearBounceError()
+                    model.clearFreezeError()
+                    model.audioError = nil
+                }
+            } message: {
+                Text(studioErrorMessage)
+            }
+    }
 
-                TransportBarView(model: model)
+    private var studioScroll: some View {
+        ScrollView(.vertical) {
+            if model.isInitializing {
+                VStack(spacing: 14) {
+                    ProgressView()
+                        .tint(Color.studioAccent)
+                    Text("Preparing Studio…")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 500)
+            } else {
+                VStack(spacing: 0) {
+                    header
+
+                    if model.tracks.isEmpty {
+                        emptyState
+                            .frame(maxWidth: .infinity, minHeight: 360)
+                    } else {
+                        WaveformTimeline(
+                            model: model,
+                            onOpenTrackEQ: { trackID in
+                                selectedEQTrackID = trackID
+                                activeSheet = .trackEQ
+                            },
+                            onOpenTrackEffects: { trackID in
+                                selectedEffectsTrackID = trackID
+                                activeSheet = .trackEffects
+                            },
+                            onOpenPianoRoll: { trackID in
+                                selectedPianoRollTrackID = trackID
+                                activeSheet = .pianoRoll
+                            },
+                            onOpenInstrumentsForTrack: { trackID in
+                                instrumentDestinationTrackID = trackID
+                                activeSheet = .instruments
+                            },
+                            onAddInstrumentTrack: createInstrumentLayerAndOpen
+                        )
+                        .frame(minHeight: 420)
+                    }
+
+                    TransportBarView(model: model)
+                }
             }
         }
         .scrollIndicators(.hidden)
         .background(Color.studioBackground.ignoresSafeArea())
+        .background {
+            StemArchiveImportCoordinator(
+                model: model,
+                isImporterPresented: $showStemArchiveImporter
+            )
+        }
+        .background {
+            AudioImportCoordinator(
+                model: model,
+                isPresented: $showImporter
+            )
+        }
+        .background {
+            SplitSongCoordinator(
+                isPresented: $showSplitPicker,
+                selectedSongURL: $selectedSongURL,
+                onSongPicked: { activeSheet = .separateSong }
+            )
+        }
         .overlay {
             if model.isSeparating {
                 separationProgressCard
@@ -89,34 +180,22 @@ struct MixerView: View {
                 freezeProgressCard
             }
         }
-        .onAppear {
-            chat.mixer = model
-        }
-        .studioAgentAccess(context: "Studio Mixer")
-        .environmentObject(chat)
-        .preferredColorScheme(.dark)
-        .tint(Color.studioAccent)
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: [.audio, .mp3, UTType(filenameExtension: "wav") ?? .audio],
-            allowsMultipleSelection: true
-        ) { result in
-            if case .success(let urls) = result {
-                model.importTracks(from: urls)
-            }
-        }
-        .fileImporter(
-            isPresented: $showSplitPicker,
-            allowedContentTypes: [.audio, .mp3, UTType(filenameExtension: "wav") ?? .audio],
-            allowsMultipleSelection: false
-        ) { result in
-            if case .success(let urls) = result, let songURL = urls.first {
-                model.separateStems(from: songURL)
-            }
-        }
-        .sheet(item: $activeSheet) { destination in
-            Group {
-                switch destination {
+    }
+
+    private func clearCrashReport() {
+        crashReportText = nil
+    }
+
+    private var studioErrorMessage: String {
+        if let audioError = model.audioError { return audioError }
+        if let freezeError = model.freezeError { return freezeError }
+        if let bounceError = model.bounceError { return bounceError }
+        return model.separationError ?? ""
+    }
+
+    private func sheetContent(for destination: StudioSheet) -> some View {
+        Group {
+            switch destination {
             case .settings:
                 SettingsView()
             case .instruments:
@@ -203,25 +282,17 @@ struct MixerView: View {
                 } else {
                     Color.clear
                 }
+            case .separateSong:
+                if let selectedSongURL {
+                    SeparateSongView(model: model, sourceURL: selectedSongURL)
+                        .presentationDetents([.large])
+                        .presentationDragIndicator(.visible)
+                } else {
+                    Color.clear
                 }
             }
-            .studioAgentAccess(context: destination.assistantContext)
         }
-        .onChange(of: model.lastExportURL) { _, exportURL in
-            if exportURL != nil {
-                activeSheet = .exports
-            }
-        }
-        .alert(Text(alertTitle), isPresented: studioErrorBinding) {
-            Button("OK", role: .cancel) {
-                model.separationError = nil
-                model.clearBounceError()
-                model.clearFreezeError()
-                model.audioError = nil
-            }
-        } message: {
-            Text(model.audioError ?? model.freezeError ?? model.bounceError ?? model.separationError ?? "")
-        }
+        .studioAgentAccess(context: destination.assistantContext)
     }
 
     private func createInstrumentLayerAndOpen() {
@@ -355,6 +426,12 @@ struct MixerView: View {
                     }
 
                     Button {
+                        showStemArchiveImporter = true
+                    } label: {
+                        Label("Import Stems from ZIP", systemImage: "waveform.badge.plus")
+                    }
+
+                    Button {
                         showSplitPicker = true
                     } label: {
                         Label("Split Song Into Stems", systemImage: "waveform.path.ecg")
@@ -461,6 +538,12 @@ struct MixerView: View {
                     showImporter = true
                 } label: {
                     Label("Import Audio Tracks", systemImage: "waveform")
+                }
+
+                Button {
+                    showStemArchiveImporter = true
+                } label: {
+                    Label("Import Stems from ZIP", systemImage: "waveform.badge.plus")
                 }
 
                 Button {
@@ -604,6 +687,95 @@ private struct StudioToolbarButton: View {
     }
 }
 
+private struct CrashReportBanner: View {
+    let text: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("Last crash report", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.studioAccent)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = text
+                } label: {
+                    Text("Copy")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.studioAccent, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+
+                Button("Dismiss", action: onDismiss)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .buttonStyle(.plain)
+            }
+
+            ScrollView {
+                Text(text)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 140)
+        }
+        .padding(12)
+        .background(Color.studioPanel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.studioAccent.opacity(0.4), lineWidth: 1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+    }
+}
+
+/// Keeps the audio-file importer on its own background child so the studio
+/// view chain never carries more than one fileImporter modifier.
+private struct AudioImportCoordinator: View {
+    @ObservedObject var model: MixerViewModel
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        Color.clear
+            .fileImporter(
+                isPresented: $isPresented,
+                allowedContentTypes: [.audio, .mp3, UTType(filenameExtension: "wav") ?? .audio],
+                allowsMultipleSelection: true
+            ) { result in
+                if case .success(let urls) = result {
+                    model.importTracks(from: urls)
+                }
+            }
+    }
+}
+
+/// Same pattern for the split-song picker.
+private struct SplitSongCoordinator: View {
+    @Binding var isPresented: Bool
+    @Binding var selectedSongURL: URL?
+    let onSongPicked: () -> Void
+
+    var body: some View {
+        Color.clear
+            .fileImporter(
+                isPresented: $isPresented,
+                allowedContentTypes: [.audio, .mp3, UTType(filenameExtension: "wav") ?? .audio],
+                allowsMultipleSelection: false
+            ) { result in
+                if case .success(let urls) = result, let songURL = urls.first {
+                    selectedSongURL = songURL
+                    onSongPicked()
+                }
+            }
+    }
+}
+
 private enum StudioSheet: String, Identifiable {
     case settings
     case instruments
@@ -620,6 +792,7 @@ private enum StudioSheet: String, Identifiable {
     case pianoRoll
     case bounce
     case songwriter
+    case separateSong
 
     var id: String { rawValue }
 
@@ -640,6 +813,7 @@ private enum StudioSheet: String, Identifiable {
         case .pianoRoll: return "Piano Roll"
         case .bounce: return "Bounce Settings"
         case .songwriter: return "AI Songwriter"
+        case .separateSong: return "Separate Your Song"
         }
     }
 }

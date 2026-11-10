@@ -3,7 +3,7 @@
 import * as model from './model.js';
 import { StudioEngine, encodeWav } from './audio-engine.js';
 import { InstrumentEngine, DRUM_PADS, STARTER_SOUNDS } from './instruments.js';
-import { createZipBlob } from './zip.js';
+import { createZipBlob, readZipManifest } from './zip.js';
 import { DEFAULT_STEM_TARGETS, STEM_TARGETS, renderOfflineBandSplit, separateWithAudioShake } from './stem-separation.js';
 
 const ROW_HEIGHT = 92;
@@ -5078,6 +5078,8 @@ async function openSessions() {
     </div>`;
   }).join('');
   const previewURLs = new Map();
+  const expandedArchiveIDs = new Set();
+  const archiveManifestStates = new Map();
   exports.forEach((item) => {
     if (item.kind === 'archive' || !item.blob) return;
     const previewURL = URL.createObjectURL(item.blob);
@@ -5130,6 +5132,36 @@ async function openSessions() {
 
   const exportBaseName = (item) => (item.name || 'export').replace(/\.[a-z0-9]+$/i, '');
 
+  const archiveManifestMarkup = (item) => {
+    if (!expandedArchiveIDs.has(item.id)) return '';
+    const archiveState = archiveManifestStates.get(item.id);
+    const detailID = `archive-manifest-${escapeHtml(item.id)}`;
+    if (!archiveState || archiveState.status === 'loading') {
+      return `<div class="archive-manifest" id="${detailID}" role="status">Reading archive manifest…</div>`;
+    }
+    if (archiveState.status === 'error') {
+      return `<div class="archive-manifest" id="${detailID}" role="status">This archive does not contain a readable stem manifest.</div>`;
+    }
+
+    const manifest = archiveState.manifest;
+    const stems = manifest.stems.map((stem) => `
+      <div class="archive-stem-row">
+        <strong title="${escapeHtml(stem.trackName)}">${escapeHtml(stem.trackName)}</strong>
+        <span>${model.formatTime(stem.duration)}</span>
+        <span>${escapeHtml(stem.format.toUpperCase())}</span>
+      </div>`).join('');
+    return `<div class="archive-manifest" id="${detailID}">
+      <div class="archive-manifest-info">
+        <div><span>SESSION</span><strong title="${escapeHtml(manifest.sessionName)}">${escapeHtml(manifest.sessionName)}</strong></div>
+        <div><span>TEMPO</span><strong>${manifest.sessionTempoBPM} BPM</strong></div>
+      </div>
+      <div class="archive-manifest-list">
+        <div class="archive-manifest-heading"><span>TRACK</span><span style="text-align:right">LENGTH</span><span style="text-align:right">FORMAT</span></div>
+        ${stems || '<p class="archive-manifest-empty">No stems are listed in this manifest.</p>'}
+      </div>
+    </div>`;
+  };
+
   const exportRowsMarkup = () => visibleExports().map((item) => {
     const isArchive = item.kind === 'archive';
     const previewURL = previewURLs.get(item.id) || '';
@@ -5144,6 +5176,12 @@ async function openSessions() {
     const details = isArchive
       ? 'ZIP STEM ARCHIVE'
       : `${kind} · ${escapeHtml(item.format || 'AUDIO')} · ${model.formatTime(item.duration)}`;
+    const archiveExpanded = isArchive && expandedArchiveIDs.has(item.id);
+    const archiveToggle = isArchive
+      ? `<button class="archive-toggle" data-archive-toggle="${escapeHtml(item.id)}" aria-controls="archive-manifest-${escapeHtml(item.id)}" aria-expanded="${archiveExpanded}">
+          <span>${archiveExpanded ? 'Hide manifest' : 'View manifest'}</span><span aria-hidden="true">${archiveExpanded ? '⌃' : '⌄'}</span>
+        </button>`
+      : '';
     return `<article class="export-row">
       <div class="export-icon" aria-hidden="true">${isArchive ? '▣' : '♫'}</div>
       <div class="export-meta">
@@ -5151,7 +5189,8 @@ async function openSessions() {
         <span>${details}</span>
         <span class="export-session">${escapeHtml(item.sessionName || 'Session name unavailable for older export')}</span>
       </div>
-      ${isArchive ? '' : `<audio class="export-preview" controls preload="none" src="${escapeHtml(previewURL)}" aria-label="Preview ${escapeHtml(name)}"></audio>`}
+      ${archiveToggle}
+      ${isArchive ? archiveManifestMarkup(item) : `<audio class="export-preview" controls preload="none" src="${escapeHtml(previewURL)}" aria-label="Preview ${escapeHtml(name)}"></audio>`}
       <div class="export-actions">
         <button class="icon-btn export-rename" data-export-rename="${escapeHtml(item.id)}" title="Rename" aria-label="Rename ${escapeHtml(name)}">✎</button>
         <button class="tool" data-export-download="${escapeHtml(item.id)}">Download</button>
@@ -5167,6 +5206,41 @@ async function openSessions() {
   };
 
   const bindExportRowActions = () => {
+    el.modalRoot.querySelectorAll('[data-archive-toggle]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const id = button.dataset.archiveToggle;
+        if (!id) return;
+        if (expandedArchiveIDs.has(id)) {
+          expandedArchiveIDs.delete(id);
+          updateExportList();
+          return;
+        }
+
+        expandedArchiveIDs.add(id);
+        if (archiveManifestStates.has(id)) {
+          updateExportList();
+          return;
+        }
+
+        archiveManifestStates.set(id, { status: 'loading' });
+        updateExportList();
+        const item = exports.find((entry) => entry.id === id);
+        if (!item?.blob) {
+          archiveManifestStates.set(id, { status: 'error' });
+          updateExportList();
+          return;
+        }
+
+        readZipManifest(item.blob).then((manifest) => {
+          archiveManifestStates.set(id, { status: 'ready', manifest });
+          if (state.sessionsRequestID === requestID && state.modal === 'sessions') updateExportList();
+        }).catch(() => {
+          archiveManifestStates.set(id, { status: 'error' });
+          if (state.sessionsRequestID === requestID && state.modal === 'sessions') updateExportList();
+        });
+      });
+    });
+
     el.modalRoot.querySelectorAll('[data-export-rename]').forEach((button) => {
       button.addEventListener('click', async () => {
         const item = exports.find((entry) => entry.id === button.dataset.exportRename);

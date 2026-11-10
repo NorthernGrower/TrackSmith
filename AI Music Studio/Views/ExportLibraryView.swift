@@ -29,6 +29,9 @@ struct ExportLibraryView: View {
 
     @State private var midiShareItem: ShareItem?
     @State private var stemArchives: [MixExportArchive] = []
+    @State private var archiveToRename: MixExportArchive?
+    @State private var archiveRenameDraft = ""
+    @State private var archiveRenameError: String?
     @State private var searchText = ""
     @State private var selectedFilter = ExportLibraryFilter.all
 
@@ -111,6 +114,9 @@ struct ExportLibraryView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .sheet(item: $archiveToRename) { archive in
+                archiveRenameSheet(for: archive)
+            }
         }
         .sheet(item: $midiShareItem) { item in
             ShareSheet(items: [item.url])
@@ -179,26 +185,49 @@ struct ExportLibraryView: View {
 
     private func archiveRow(_ archive: MixExportArchive) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: "archivebox")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(Color.studioAccent)
-                .frame(width: 38, height: 38)
-                .background(Color.studioAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+            NavigationLink {
+                StemArchiveDetailView(archive: archive)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(Color.studioAccent)
+                        .frame(width: 38, height: 38)
+                        .background(Color.studioAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(archive.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text("ZIP  ·  \(archive.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Text(archive.sessionName.map { "Session · \($0)" } ?? "Session · unavailable for older export")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(archive.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text("ZIP  ·  \(archive.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Text(archive.sessionName.map { "Session · \($0)" } ?? "Session · unavailable for older export")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the archive manifest")
 
             Spacer(minLength: 4)
+
+            Button {
+                archiveRenameDraft = archive.name
+                archiveRenameError = nil
+                archiveToRename = archive
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 38, height: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Rename \(archive.name)")
 
             ShareLink(item: archive.url) {
                 Image(systemName: "square.and.arrow.up")
@@ -210,6 +239,56 @@ struct ExportLibraryView: View {
         }
         .padding(.vertical, 5)
         .listRowBackground(Color.studioPanel)
+    }
+
+    private func archiveRenameSheet(for archive: MixExportArchive) -> some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                TextField("Archive name", text: $archiveRenameDraft)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+
+                Text("The .zip extension will be kept.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if let archiveRenameError {
+                    Label(archiveRenameError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .background(Color.studioBackground.ignoresSafeArea())
+            .navigationTitle("Rename Archive")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { archiveToRename = nil }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { renameArchive(archive, to: archiveRenameDraft) }
+                        .disabled(archiveRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .preferredColorScheme(.dark)
+    }
+
+    private func renameArchive(_ archive: MixExportArchive, to name: String) {
+        do {
+            let renamedArchive = try MixExportStorage.renameStemArchive(archive, to: name)
+            stemArchives = stemArchives.map { $0.id == archive.id ? renamedArchive : $0 }
+            archiveRenameError = nil
+            archiveToRename = nil
+        } catch {
+            archiveRenameError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     private func audioRow(_ mix: MixExport) -> some View {
